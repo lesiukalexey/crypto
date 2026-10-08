@@ -115,7 +115,8 @@ try {
     if (is_array($status) && ($status['status'] ?? '') === 'error' && $statusAge < 300) {
         respond($status + $snapshotPayload, 503);
     }
-    $stale = !is_array($status) || ($pending ? !$workerBusy : $statusAge > 1800 || (($status['status'] ?? '') === 'error' && $statusAge > 300));
+    $retryCancelled = (string) ($_GET['retry_cancelled'] ?? '') === '1';
+    $stale = !is_array($status) || ($retryCancelled && ($status['status'] ?? '') === 'cancelled') || ($pending ? !$workerBusy : $statusAge > 1800 || (($status['status'] ?? '') === 'error' && $statusAge > 300));
     if ($stale) {
         $lock = fopen($cacheDir . '/portfolio-' . $key . '.lock', 'c');
         if ($lock !== false && flock($lock, LOCK_EX | LOCK_NB)) {

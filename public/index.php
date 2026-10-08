@@ -263,7 +263,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="symbol_sort" id="symbol-sort-mode" value="<?= h($symbolSort) ?>">
 <input type="hidden" name="snapshot_ids" id="portfolio-snapshot-ids" value="<?= h((string) ($_GET['snapshot_ids'] ?? '')) ?>">
 <input type="hidden" name="save_mode" id="save-mode-value" value="<?= $saveMode ? '1' : '0' ?>">
-<div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов пар и пересчитать выбранную пару" title="Сбросить кэш рейтингов ранее рассчитанных пар и пересчитать только выбранную пару">🧹</button></div>
+<div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Остановить расчёты, сбросить кэш рейтингов и пересчитать выбранную пару" title="Остановить запущенные расчёты, сбросить кэш рейтингов и пересчитать выбранную пару">🧹</button></div>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label>
 
@@ -532,6 +532,8 @@ resetSymbolCacheButton.addEventListener('click', async () => {
     if (isResettingSymbolCache) return;
     isResettingSymbolCache = true;
     let resetSucceeded = false;
+    let stoppedProcesses = 0;
+    let resetError = '';
     exitRankingRequestVersion++;
     resetSymbolCacheButton.disabled = true;
     resetSymbolCacheButton.textContent = '…';
@@ -545,17 +547,20 @@ resetSymbolCacheButton.addEventListener('click', async () => {
         const result = await response.json();
         if (!response.ok || result.status !== 'ready') throw new Error(result.message || 'Не удалось сбросить кэш рейтингов');
         resetSucceeded = true;
+        stoppedProcesses = Number(result.stopped_processes) || 0;
         symbolSortMode.value = '';
         portfolioSnapshotIds.value = '';
         const params = new URLSearchParams(new FormData(filtersForm));
         history.replaceState(null, '', location.pathname + '?' + params.toString());
     } catch (error) {
-        resetSymbolCacheButton.title = error.message || 'Не удалось сбросить кэш рейтингов';
+        resetError = error.message || 'Не удалось сбросить кэш рейтингов';
     } finally {
         isResettingSymbolCache = false;
         resetSymbolCacheButton.disabled = false;
         resetSymbolCacheButton.textContent = '🧹';
-        resetSymbolCacheButton.title = 'Сбросить кэш рейтингов ранее рассчитанных пар и пересчитать только выбранную пару';
+        resetSymbolCacheButton.title = resetSucceeded
+            ? `Остановлено расчётов: ${stoppedProcesses}. Кэш сброшен; пересчитываю выбранную пару.`
+            : resetError || 'Остановить запущенные расчёты, сбросить кэш рейтингов и пересчитать выбранную пару';
         if (resetSucceeded) {
             loadExitRanking();
         }
@@ -571,8 +576,12 @@ async function sortSymbolsByProfit() {
     try {
         const params = new URLSearchParams(new FormData(filtersForm));
         let ranking;
+        let retryCancelled = true;
         do {
-            const response = await fetch(`symbol-ranking.php?${params.toString()}`, {headers:{Accept:'application/json'}});
+            const requestParams = new URLSearchParams(params);
+            if (retryCancelled) requestParams.set('retry_cancelled', '1');
+            retryCancelled = false;
+            const response = await fetch(`symbol-ranking.php?${requestParams.toString()}`, {headers:{Accept:'application/json'}});
             ranking = await response.json();
             if (!response.ok || ranking.status === 'error') throw new Error(ranking.message || 'Не удалось отсортировать пары');
             if (ranking.status === 'pending') {
@@ -581,6 +590,10 @@ async function sortSymbolsByProfit() {
                 await wait(1500);
             }
         } while (ranking.status === 'pending');
+        if (ranking.status === 'cancelled') {
+            resetRefreshButton(ranking.message || 'Расчёт рейтинга пар остановлен кнопкой сброса кэша.');
+            return;
+        }
         if (ranking.status !== 'ready' || !Array.isArray(ranking.symbols)) throw new Error(ranking.message || 'Рейтинг пар пока недоступен');
         const currentSymbol = symbolSelect.value;
         const options = new Map([...symbolSelect.options].map(option => [option.value, option]));
@@ -701,10 +714,14 @@ async function loadPortfolioRanking() {
     let buttonTitle = 'Рассчитать рейтинг еще раз';
     try {
         const params = new URLSearchParams(new FormData(filtersForm));
+        let retryCancelled = true;
         history.replaceState(null, '', location.pathname + '?' + params.toString());
         let ranking;
         do {
-            const response = await fetch('portfolio-ranking.php?' + params.toString(), {headers:{Accept:'application/json'}});
+            const requestParams = new URLSearchParams(params);
+            if (retryCancelled) requestParams.set('retry_cancelled', '1');
+            retryCancelled = false;
+            const response = await fetch('portfolio-ranking.php?' + requestParams.toString(), {headers:{Accept:'application/json'}});
             ranking = await response.json();
             if (ranking.snapshot_ids && !params.get('snapshot_ids')) {
                 const frozenIds = JSON.stringify(ranking.snapshot_ids);
@@ -724,6 +741,11 @@ async function loadPortfolioRanking() {
                 await wait(1500);
             }
         } while (ranking.status === 'pending');
+        if (ranking.status === 'cancelled') {
+            portfolioRankingStatus.textContent = ranking.message || 'Общий расчёт остановлен кнопкой сброса кэша.';
+            buttonTitle = 'Расчет остановлен';
+            return;
+        }
         if (ranking.status !== 'ready') throw new Error(ranking.message || 'Общий рейтинг пока недоступен');
         const globalRows = (ranking.global_top || []).map((item, index) => [
             String(index + 1), item.entry_label, item.exit_label, pnlText(item.average_pnl),
