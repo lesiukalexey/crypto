@@ -105,12 +105,15 @@ try {
         $result = json_decode((string) file_get_contents($resultPath), true);
         if (is_array($result) && ($result['status'] ?? '') === 'ready') {
             $entries = $result['entries'] ?? [];
+            $cachedStatus = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
+            $elapsedValue = $result['elapsed_seconds'] ?? (is_array($cachedStatus) ? ($cachedStatus['elapsed_seconds'] ?? null) : null);
+            $elapsedSeconds = is_numeric($elapsedValue) ? max(0, (int) $elapsedValue) : null;
             if ($entries === []) {
-                respond(['status' => 'insufficient_data', 'message' => 'Для рейтинга нужно минимум ' . $minTrades . ' ' . ($minTrades === 1 ? 'сделка' : 'сделки') . ' за выбранный период.', 'entries' => [], 'groups' => []]);
+                respond(['status' => 'insufficient_data', 'message' => 'Для рейтинга нужно минимум ' . $minTrades . ' ' . ($minTrades === 1 ? 'сделка' : 'сделки') . ' за выбранный период.', 'entries' => [], 'groups' => [], 'elapsed_seconds' => $elapsedSeconds]);
             }
             $profile = is_file($profilePath) ? json_decode((string) file_get_contents($profilePath), true) : null;
             if (is_array($profile) && ($profile['status'] ?? '') === 'ready') {
-                respond(['status' => 'ready', 'entries' => $entries, 'groups' => $profile['groups']]);
+                respond(['status' => 'ready', 'entries' => $entries, 'groups' => $profile['groups'], 'elapsed_seconds' => $elapsedSeconds]);
             }
         }
     }

@@ -565,8 +565,9 @@ def main() -> int:
                         pass
 
         entries.sort(key=lambda item: (-item["best_pnl"], item["label"]))
-        write_json(result_path, {"status": "ready", "entries": entries})
-        write_json(status_path, {"status": "ready", "progress": 100, "elapsed_seconds": int(time.monotonic() - started)})
+        elapsed_seconds = int(time.monotonic() - started)
+        write_json(result_path, {"status": "ready", "entries": entries, "elapsed_seconds": elapsed_seconds})
+        write_json(status_path, {"status": "ready", "progress": 100, "elapsed_seconds": elapsed_seconds})
         return 0
     except Exception as exc:
         write_json(status_path, {"status": "error", "progress": 0, "message": "Не удалось рассчитать рейтинг стратегий."})

@@ -580,6 +580,9 @@ function createElapsedTimer(element, label) {
     let elapsedMs = 0;
     let intervalId = null;
     let finished = false;
+    let persistedKey = null;
+    let previousElapsedMs = null;
+    let pendingSeen = false;
     const render = () => {
         const totalSeconds = Math.floor((startedAt === null ? elapsedMs : performance.now() - startedAt) / 1000);
         const hours = Math.floor(totalSeconds / 3600);
@@ -591,7 +594,18 @@ function createElapsedTimer(element, label) {
         element.textContent = `${currentLabel}: ${time}`;
     };
     return {
-        start() {
+        start(nextPersistedKey = null) {
+            if (nextPersistedKey !== null) {
+                persistedKey = nextPersistedKey;
+                try {
+                    const saved = window.sessionStorage.getItem(persistedKey);
+                    previousElapsedMs = saved === null ? null : Number(saved);
+                    if (!Number.isFinite(previousElapsedMs) || previousElapsedMs < 0) previousElapsedMs = null;
+                    pendingSeen = false;
+                } catch (_) {
+                    previousElapsedMs = null;
+                }
+            }
             if (startedAt !== null || finished) return;
             elapsedMs = 0;
             startedAt = performance.now();
@@ -603,18 +617,30 @@ function createElapsedTimer(element, label) {
             currentLabel = nextLabel;
             if (startedAt !== null || elapsedMs > 0 || finished) render();
         },
-        finish(finalLabel = null) {
+        finish(finalLabel = null, options = {}) {
             if (finalLabel !== null) currentLabel = finalLabel;
             if (startedAt === null) {
                 if (elapsedMs > 0) render();
                 return;
             }
             elapsedMs = performance.now() - startedAt;
+            if (options.useStored === true && previousElapsedMs !== null) elapsedMs = previousElapsedMs;
+            else if (!pendingSeen && Number.isFinite(options.fallbackElapsedMs) && options.fallbackElapsedMs > 0) elapsedMs = options.fallbackElapsedMs;
             startedAt = null;
             finished = true;
             window.clearInterval(intervalId);
             intervalId = null;
+            if (persistedKey !== null && options.persist !== false) {
+                try { window.sessionStorage.setItem(persistedKey, String(elapsedMs)); } catch (_) {}
+            }
             render();
+        },
+        markPending() {
+            pendingSeen = true;
+            previousElapsedMs = null;
+            if (persistedKey !== null) {
+                try { window.sessionStorage.removeItem(persistedKey); } catch (_) {}
+            }
         },
         reset() {
             window.clearInterval(intervalId);
@@ -622,6 +648,9 @@ function createElapsedTimer(element, label) {
             startedAt = null;
             elapsedMs = 0;
             finished = false;
+            persistedKey = null;
+            previousElapsedMs = null;
+            pendingSeen = false;
             element.textContent = '';
             element.hidden = true;
         },
@@ -916,24 +945,31 @@ martingaleApplyButton.addEventListener('click', () => {
 });
 async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (isResettingSymbolCache) return;
+    const params = new URLSearchParams(new FormData(filtersForm));
     if (!isPoll) {
         strategyRankingTimer.reset();
         strategyRankingTimer.setLabel('Ожидание ответа · всего прошло');
-        strategyRankingTimer.start();
+        const timerParams = new URLSearchParams([...params].filter(([key]) => !['exit_config', 'symbol_sort'].includes(key)));
+        strategyRankingTimer.start('strategy-ranking-elapsed:' + timerParams.toString());
     }
     const requestVersion = exitRankingRequestVersion;
-    const params = new URLSearchParams(new FormData(filtersForm));
     try {
         const response = await fetch(`strategy-ranking.php?${params.toString()}`, {headers:{Accept:'application/json'}});
         const ranking = await response.json();
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
         if (ranking.status === 'pending') {
+            strategyRankingTimer.markPending();
             strategyRankingTimer.setLabel(ranking.queued
                 ? 'В очереди · всего прошло'
                 : 'Расчёт выполняется · всего прошло');
             strategyRankingTimer.start();
         } else {
-            strategyRankingTimer.finish('Общее время до ответа');
+            const completedStatus = ['ready', 'insufficient_data', 'entry_unavailable'].includes(ranking.status);
+            strategyRankingTimer.finish('Общее время до ответа', {
+                useStored: completedStatus,
+                fallbackElapsedMs: Number(ranking.elapsed_seconds) * 1000,
+                persist: completedStatus,
+            });
         }
         if (ranking.status === 'insufficient_data') {
             entryConfigSelect.replaceChildren();
@@ -993,7 +1029,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         promoteRankedSymbol(params.get('symbol'));
     } catch (_) {
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
-        strategyRankingTimer.finish('Общее время до ошибки');
+        strategyRankingTimer.finish('Общее время до ошибки', {persist: false});
         exitConfigSelect.options[0].textContent = 'Не удалось загрузить рейтинг';
     }
 }
@@ -1005,7 +1041,7 @@ resetSymbolCacheButton.addEventListener('click', async () => {
     let resetError = '';
     exitRankingRequestVersion++;
     portfolioRankingRequestVersion++;
-    strategyRankingTimer.finish('Остановлено кнопкой сброса');
+    strategyRankingTimer.finish('Остановлено кнопкой сброса', {persist: false});
     portfolioRankingTimer.finish('Остановлено кнопкой сброса');
     refreshSymbolsButton.disabled = true;
     portfolioRankingStatus.textContent = 'Останавливаю все фоновые расчёты…';
