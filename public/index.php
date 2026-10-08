@@ -552,6 +552,7 @@ const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel')
 const portfolioRankingContent = document.querySelector('#portfolio-ranking-content');
 const portfolioRankingStatus = document.querySelector('#portfolio-ranking-status');
 function createElapsedTimer(element, label) {
+    let currentLabel = label;
     let startedAt = null;
     let elapsedMs = 0;
     let intervalId = null;
@@ -563,7 +564,7 @@ function createElapsedTimer(element, label) {
         const time = hours > 0
             ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
             : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-        element.textContent = `${label}: ${time}`;
+        element.textContent = `${currentLabel}: ${time}`;
     };
     return {
         start() {
@@ -574,8 +575,16 @@ function createElapsedTimer(element, label) {
             render();
             intervalId = window.setInterval(render, 1000);
         },
-        finish() {
-            if (startedAt === null) return;
+        setLabel(nextLabel) {
+            currentLabel = nextLabel;
+            if (startedAt !== null || elapsedMs > 0) render();
+        },
+        finish(finalLabel = null) {
+            if (finalLabel !== null) currentLabel = finalLabel;
+            if (startedAt === null) {
+                if (elapsedMs > 0) render();
+                return;
+            }
             elapsedMs = performance.now() - startedAt;
             startedAt = null;
             window.clearInterval(intervalId);
@@ -883,6 +892,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (isResettingSymbolCache) return;
     if (!isPoll) {
         strategyRankingTimer.reset();
+        strategyRankingTimer.setLabel('Ожидание ответа · всего прошло');
         strategyRankingTimer.start();
     }
     const requestVersion = exitRankingRequestVersion;
@@ -891,8 +901,14 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         const response = await fetch(`strategy-ranking.php?${params.toString()}`, {headers:{Accept:'application/json'}});
         const ranking = await response.json();
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
-        if (ranking.status === 'pending') strategyRankingTimer.start();
-        else strategyRankingTimer.finish();
+        if (ranking.status === 'pending') {
+            strategyRankingTimer.setLabel(ranking.queued
+                ? 'В очереди · всего прошло'
+                : 'Расчёт выполняется · всего прошло');
+            strategyRankingTimer.start();
+        } else {
+            strategyRankingTimer.finish('Общее время до ответа');
+        }
         if (ranking.status === 'insufficient_data') {
             entryConfigSelect.replaceChildren();
             const entryMessage = document.createElement('option');
@@ -951,7 +967,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         promoteRankedSymbol(params.get('symbol'));
     } catch (_) {
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
-        strategyRankingTimer.finish();
+        strategyRankingTimer.finish('Общее время до ошибки');
         exitConfigSelect.options[0].textContent = 'Не удалось загрузить рейтинг';
     }
 }
