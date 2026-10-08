@@ -18,7 +18,7 @@ import pymysql
 
 from app import load_config
 from database import connect_mysql
-from strategy_ranking import PriceTree, make_signals, martingale_target_policies, resolve_entry_config, simulate, exit_values
+from strategy_ranking import PriceTree, QuoteArrays, make_signals, martingale_target_policies, resolve_entry_config, simulate, exit_values
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -109,6 +109,7 @@ def main() -> int:
             if symbol in max_ids and int(row["id"]) <= max_ids[symbol]:
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
+        del raw_rows
 
         entry_selection = resolve_entry_config(args.entry_config, ranking)
         if entry_selection is None:
@@ -133,26 +134,28 @@ def main() -> int:
 
         for symbol_index, symbol in enumerate(sorted(max_ids)):
             rows = rows_by_symbol[symbol]
+            quotes = QuoteArrays.from_rows(rows) if rows else QuoteArrays([], [], [], [])
+            del rows_by_symbol[symbol]
             best_pnl = -math.inf
             best_label = ""
             symbol_completed = 0
-            if len(rows) >= 2:
+            if len(quotes) >= 2:
                 if immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(rows, float(threshold), int(lookback), entry_direction)
+                    signals, shorts = make_signals(quotes, float(threshold), int(lookback), entry_direction)
                 if signals and not (
                     args.martingale_mode == "none" and len(signals) < args.min_trades
                 ):
-                    bid_tree = PriceTree([float(row["bid_price"]) for row in rows])
-                    ask_tree = PriceTree([float(row["ask_price"]) for row in rows])
+                    bid_tree = PriceTree(quotes.bids)
+                    ask_tree = PriceTree(quotes.asks)
                     fee_rate = args.fee_percent / 100
 
                     def consider(target: float | None, loss: float | None, label: str) -> None:
                         nonlocal best_pnl, best_label, symbol_completed
                         for target_policy, policy_label in martingale_target_policies(args.martingale_mode, loss):
                             pnl, trade_count = simulate(
-                                rows, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
+                                quotes, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
                                 target, loss, args.martingale_mode, args.martingale_timing,
                                 args.martingale_attempts, target_policy,
                             )

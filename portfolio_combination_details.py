@@ -18,7 +18,7 @@ import pymysql
 from app import load_config
 from database import connect_mysql
 from portfolio_ranking import exit_specs
-from strategy_ranking import PriceTree, build_entry_specs, make_signals, martingale_target_policies, simulate, write_json
+from strategy_ranking import PriceTree, QuoteArrays, build_entry_specs, make_signals, martingale_target_policies, simulate, write_json
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -123,26 +123,29 @@ def main() -> int:
             if symbol in max_ids and int(row["id"]) <= max_ids[symbol]:
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
+        del raw_rows
 
         entry_id, entry_label, lookback, threshold, entry_family, immediate_short = selected_entry
         _, exit_label, take_profit, stop_loss = selected_exit
         fee_rate = args.fee_percent / 100
         tickers = []
-        for symbol, rows in rows_by_symbol.items():
+        for symbol in list(rows_by_symbol):
+            rows = rows_by_symbol.pop(symbol)
+            quotes = QuoteArrays.from_rows(rows) if rows else QuoteArrays([], [], [], [])
             pnl: float | None = None
             trade_count = 0
-            if len(rows) >= 2:
+            if len(quotes) >= 2:
                 if immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(rows, int(threshold) / 100, int(lookback), entry_family or "both")
+                    signals, shorts = make_signals(quotes, int(threshold) / 100, int(lookback), entry_family or "both")
                 if signals:
                     pnl, trade_count = simulate(
-                        rows,
+                        quotes,
                         signals,
                         shorts,
-                        PriceTree([float(row["bid_price"]) for row in rows]),
-                        PriceTree([float(row["ask_price"]) for row in rows]),
+                        PriceTree(quotes.bids),
+                        PriceTree(quotes.asks),
                         args.balance,
                         fee_rate,
                         take_profit,

@@ -22,6 +22,7 @@ from app import load_config
 from database import connect_mysql
 from strategy_ranking import (
     PriceTree,
+    QuoteArrays,
     build_entry_specs,
     exit_values,
     make_signals,
@@ -137,6 +138,8 @@ def main() -> int:
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
 
+        quotes_by_symbol = {symbol: QuoteArrays.from_rows(rows) for symbol, rows in rows_by_symbol.items() if rows}
+        del raw_rows, rows_by_symbol
         price_trees_by_symbol: dict[str, tuple[PriceTree, PriceTree]] = {}
         specs = build_entry_specs(ranking)
         base_candidate_count = exit_count(exit_profiles)
@@ -155,14 +158,14 @@ def main() -> int:
         selected_entry_best: dict[str, dict[str, Any]] = {}
 
         for entry_id, entry_label, lookback, threshold, entry_family, immediate_short in specs:
-            contexts: dict[str, tuple[list[dict[str, Any]], list[int], list[bool], PriceTree, PriceTree]] = {}
-            for symbol, rows in rows_by_symbol.items():
-                if len(rows) < 2:
+            contexts: dict[str, tuple[QuoteArrays, list[int], list[bool], PriceTree, PriceTree]] = {}
+            for symbol, quotes in quotes_by_symbol.items():
+                if len(quotes) < 2:
                     continue
                 if immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(rows, int(threshold) / 100, int(lookback), entry_family or "both")
+                    signals, shorts = make_signals(quotes, int(threshold) / 100, int(lookback), entry_family or "both")
                 if not signals or (
                     args.martingale_mode == "none" and len(signals) < args.min_trades
                 ):
@@ -170,12 +173,12 @@ def main() -> int:
                 price_trees = price_trees_by_symbol.get(symbol)
                 if price_trees is None:
                     price_trees = (
-                        PriceTree([float(row["bid_price"]) for row in rows]),
-                        PriceTree([float(row["ask_price"]) for row in rows]),
+                        PriceTree(quotes.bids),
+                        PriceTree(quotes.asks),
                     )
                     price_trees_by_symbol[symbol] = price_trees
                 contexts[symbol] = (
-                    rows,
+                    quotes_by_symbol[symbol],
                     signals,
                     shorts,
                     price_trees[0],
@@ -201,9 +204,9 @@ def main() -> int:
                     eligible_symbols = 0
                     profitable_symbols = 0
                     local_winners_for_candidate: list[tuple[str, dict[str, Any]]] = []
-                    for symbol, (rows, signals, shorts, bid_tree, ask_tree) in contexts.items():
+                    for symbol, (quotes, signals, shorts, bid_tree, ask_tree) in contexts.items():
                         pnl, trade_count = simulate(
-                            rows,
+                            quotes,
                             signals,
                             shorts,
                             bid_tree,

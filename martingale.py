@@ -35,7 +35,7 @@ def martingale_base_notional(
 
 
 def simulate_martingale(
-    rows: list[dict[str, Any]],
+    quotes: Any,
     signal_indexes: list[int],
     signal_shorts: list[bool],
     bid_tree: Any,
@@ -55,7 +55,7 @@ def simulate_martingale(
     balance = start_balance
     signal_cursor = 0
     closed_orders = 0
-    count = len(rows)
+    count = len(quotes)
     if target_policy not in ("scaled", "fixed"):
         raise ValueError("Invalid martingale exit target policy")
     base_notional = martingale_base_notional(start_balance, fee_rate, stop_loss, mode, attempts, target_policy)
@@ -66,7 +66,7 @@ def simulate_martingale(
         entry_index = signal_indexes[signal_cursor]
         is_short = signal_shorts[signal_cursor]
         signal_cursor += 1
-        price = float(rows[entry_index]["bid_price"] if is_short else rows[entry_index]["ask_price"])
+        price = quotes.bids[entry_index] if is_short else quotes.asks[entry_index]
         if price <= 0:
             continue
         notional = min(base_notional, balance / (1 + fee_rate))
@@ -105,7 +105,7 @@ def simulate_martingale(
             crossings = [index for index in (first_take, first_stop) if index is not None]
             exit_index = min(crossings) if crossings else count - 1
             def net_at(index: int) -> float:
-                quote = float(rows[index]["ask_price"] if is_short else rows[index]["bid_price"])
+                quote = quotes.asks[index] if is_short else quotes.bids[index]
                 if is_short:
                     return entry_cost - total_quantity * quote - entry_fees - total_quantity * quote * fee_rate
                 return total_quantity * quote - entry_cost - entry_fees - total_quantity * quote * fee_rate
@@ -149,7 +149,7 @@ def simulate_martingale(
                             signal_cursor = len(signal_indexes)
                             break
                     if add_notional > 0 and next_index < count:
-                        add_price = float(rows[next_index]["bid_price"] if next_short else rows[next_index]["ask_price"])
+                        add_price = quotes.bids[next_index] if next_short else quotes.asks[next_index]
                         if add_price > 0:
                             add_quantity = add_notional / add_price
                             legs.append((add_price, add_quantity, add_notional * fee_rate))
@@ -176,7 +176,7 @@ def simulate_martingale(
                     available = max(0.0, balance)
                     reverse_notional = min(wanted, available / (1 + fee_rate))
                     if next_index < count and reverse_notional > 0:
-                        reverse_price = float(rows[next_index]["bid_price"] if reverse_short else rows[next_index]["ask_price"])
+                        reverse_price = quotes.bids[next_index] if reverse_short else quotes.asks[next_index]
                         if reverse_price > 0:
                             is_short = reverse_short
                             entry_index = next_index

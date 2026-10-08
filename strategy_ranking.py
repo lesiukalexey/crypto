@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -80,18 +81,39 @@ class PriceTree:
         return visit(1, 0, self.size)
 
 
+@dataclass(slots=True)
+class QuoteArrays:
+    """Numeric quote columns prepared once for a ranking simulation."""
+
+    bids: list[float]
+    asks: list[float]
+    lasts: list[float]
+    timestamps: list[float]
+
+    @classmethod
+    def from_rows(cls, rows: list[dict[str, Any]]) -> "QuoteArrays":
+        return cls(
+            [float(row["bid_price"]) for row in rows],
+            [float(row["ask_price"]) for row in rows],
+            [float(row["last_price"]) for row in rows],
+            [row["received_at_utc"].replace(tzinfo=timezone.utc).timestamp() for row in rows],
+        )
+
+    def __len__(self) -> int:
+        return len(self.bids)
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     temporary.replace(path)
 
 
-def make_signals(rows: list[dict[str, Any]], threshold: float, lookback: int, direction: str = "both") -> tuple[list[int], list[bool]]:
+def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction: str = "both") -> tuple[list[int], list[bool]]:
     if direction not in ("both", "long", "short"):
         raise ValueError("Invalid entry direction")
-    count = len(rows)
-    timestamps = [row["received_at_utc"].replace(tzinfo=timezone.utc).timestamp() for row in rows]
-    gaps = [0.0] + [timestamps[index] - timestamps[index - 1] for index in range(1, count)]
+    count = len(quotes)
+    gaps = [0.0] + [quotes.timestamps[index] - quotes.timestamps[index - 1] for index in range(1, count)]
     continuous = [False] * count
     for index in range(lookback, count):
         continuous[index] = all(gaps[j] <= 120 for j in range(index - lookback + 1, index + 1))
@@ -101,10 +123,10 @@ def make_signals(rows: list[dict[str, Any]], threshold: float, lookback: int, di
     for index in range(lookback + 1, count - 1):
         if not continuous[index] or not continuous[index - 1]:
             continue
-        current_base = float(rows[index - lookback]["last_price"])
-        previous_base = float(rows[index - lookback - 1]["last_price"])
-        movement = float(rows[index]["last_price"]) - current_base
-        previous_movement = float(rows[index - 1]["last_price"]) - previous_base
+        current_base = quotes.lasts[index - lookback]
+        previous_base = quotes.lasts[index - lookback - 1]
+        movement = quotes.lasts[index] - current_base
+        previous_movement = quotes.lasts[index - 1] - previous_base
         if direction != "short" and movement >= threshold and previous_movement < threshold:
             indexes.append(index)
             directions.append(False)
@@ -167,7 +189,7 @@ def resolve_entry_config(entry_config: str, ranking: dict[str, Any]) -> dict[str
 
 
 def simulate(
-    rows: list[dict[str, Any]],
+    quotes: QuoteArrays,
     signal_indexes: list[int],
     signal_shorts: list[bool],
     bid_tree: PriceTree,
@@ -183,13 +205,13 @@ def simulate(
 ) -> tuple[float, int]:
     if martingale_mode != "none":
         return simulate_martingale(
-            rows, signal_indexes, signal_shorts, bid_tree, ask_tree, start_balance,
+            quotes, signal_indexes, signal_shorts, bid_tree, ask_tree, start_balance,
             fee_rate, take_profit, stop_loss, martingale_mode, martingale_timing, martingale_attempts,
             martingale_target_policy,
         )
     balance = start_balance
     signal_cursor = 0
-    count = len(rows)
+    count = len(quotes)
     trades_closed = 0
     fee_factor = (1 + fee_rate) / (1 - fee_rate)
     inverse_fee_factor = (1 - fee_rate) / (1 + fee_rate)
@@ -200,7 +222,7 @@ def simulate(
         entry_index = signal_indexes[signal_cursor]
         is_short = signal_shorts[signal_cursor]
         signal_cursor += 1
-        entry_price = float(rows[entry_index]["bid_price"] if is_short else rows[entry_index]["ask_price"])
+        entry_price = quotes.bids[entry_index] if is_short else quotes.asks[entry_index]
         if entry_price <= 0:
             continue
 
@@ -223,7 +245,7 @@ def simulate(
 
         crossings = [index for index in (first_take, first_stop) if index is not None]
         exit_index = min(crossings) if crossings else count - 1
-        exit_price = float(rows[exit_index]["ask_price"] if is_short else rows[exit_index]["bid_price"])
+        exit_price = quotes.asks[exit_index] if is_short else quotes.bids[exit_index]
         if is_short:
             net_ratio = (entry_price * (1 - fee_rate) - exit_price * (1 + fee_rate)) / (entry_price * (1 + fee_rate))
         else:
@@ -318,6 +340,8 @@ def main() -> int:
                 rows = cursor.fetchall()
         finally:
             connection.close()
+        quotes = QuoteArrays.from_rows(rows)
+        del rows
 
         groups_specs = [
             ("fixed", "Автоматические · фиксированные Take Profit и Stop Loss", len(exit_values("fixed_tp", exit_profiles)) * len(exit_values("fixed_sl", exit_profiles))),
@@ -334,21 +358,22 @@ def main() -> int:
         started = time.monotonic()
         entries: list[dict[str, Any]] = []
 
-        if len(rows) >= 2:
-            bid_tree = PriceTree([float(row["bid_price"]) for row in rows])
-            ask_tree = PriceTree([float(row["ask_price"]) for row in rows])
+        if len(quotes) >= 2:
+            bid_tree = PriceTree(quotes.bids)
+            ask_tree = PriceTree(quotes.asks)
         else:
+            quotes = QuoteArrays([], [], [], [])
             bid_tree = PriceTree([])
             ask_tree = PriceTree([])
         fee_rate = args.fee_percent / 100
 
         for entry_id, entry_label, lookback, threshold_cents, entry_family, immediate_short in entry_specs_for_worker:
-                if len(rows) < 2:
+                if len(quotes) < 2:
                     signals, shorts = [], []
                 elif immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(rows, int(threshold_cents) / 100, int(lookback), entry_family or "both")
+                    signals, shorts = make_signals(quotes, int(threshold_cents) / 100, int(lookback), entry_family or "both")
                 if not signals or (
                     args.martingale_mode == "none" and len(signals) < args.min_trades
                 ):
@@ -378,7 +403,7 @@ def main() -> int:
                         nonlocal completed
                         for target_policy, policy_label in martingale_target_policies(args.martingale_mode, loss):
                             pnl, trade_count = simulate(
-                                rows, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
+                                quotes, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
                                 target, loss, args.martingale_mode, args.martingale_timing,
                                 args.martingale_attempts, target_policy,
                             )
