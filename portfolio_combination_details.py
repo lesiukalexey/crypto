@@ -76,7 +76,7 @@ def main() -> int:
             allowed = {policy for policy, _ in martingale_target_policies(args.martingale_mode, stop_loss)}
             if target_policy in allowed:
                 if args.martingale_mode != "none" and target_policy != "scaled":
-                    exit_label += " · TP/SL фиксированы в USDT"
+                    exit_label += " · цель рассчитана от стартового баланса"
                 elif args.martingale_mode != "none" and stop_loss is not None:
                     exit_label += " · TP/SL растут вместе с позицией"
                 selected_exit = (exit_id, exit_label, take_profit, stop_loss)
@@ -138,7 +138,7 @@ def main() -> int:
                 if immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(quotes, int(threshold) / 100, int(lookback), entry_family or "both")
+                    signals, shorts = make_signals(quotes, int(threshold) / 10, int(lookback), entry_family or "both")
                 if signals:
                     pnl, trade_count = simulate(
                         quotes,

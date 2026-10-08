@@ -21,15 +21,15 @@ try {
 $rankingRanges = $rankingParameters['ranges'];
 $rankingModes = $rankingParameters['modes'];
 $entryProfiles = $rankingParameters['worker']['entry_profiles'];
-$entryThresholdsCents = $entryProfiles['both']['thresholds_cents'];
+$entryThresholdsTenthsPercent = $entryProfiles['both']['thresholds_tenths_percent'];
 $entryWindows = $entryProfiles['both']['windows'];
-$entryThresholdSummary = implode(', ', array_map(static fn (int $cents): string => number_format($cents / 100, 2, ',', ' '), $entryThresholdsCents));
+$entryThresholdSummary = implode(', ', array_map(static fn (int $value): string => number_format($value / 10, 1, ',', ' '), $entryThresholdsTenthsPercent));
 $immediateEntryText = implode(' и ', array_map(static fn (string $direction): string => 'сразу — 1 заявка на ' . ($direction === 'short' ? 'продажу' : 'покупку'), $entryProfileConfig['immediate_directions'] ?? []));
 $exitRangeText = static function (array $range): string {
-    $min = number_format($range['from'] / 100, 2, ',', ' ');
-    $max = number_format($range['to'] / 100, 2, ',', ' ');
-    $step = number_format($range['step'] / 100, 2, ',', ' ');
-    return $min . '–' . $max . ' USDT (шаг ' . $step . ')';
+    $min = number_format($range['from'] / 10, 1, ',', ' ');
+    $max = number_format($range['to'] / 10, 1, ',', ' ');
+    $step = number_format($range['step'] / 10, 1, ',', ' ');
+    return $min . '–' . $max . '% от стартового баланса (шаг ' . $step . '%)';
 };
 $db = $config['mysql'];
 $symbols = [];
@@ -40,8 +40,8 @@ $today = new DateTimeImmutable('today', $timezone);
 $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
 $startDayInput = (string) ($_GET['start_day'] ?? $_GET['day'] ?? '2026-10-06');
 $endDayInput = (string) ($_GET['end_day'] ?? $_GET['day'] ?? $today->format('Y-m-d'));
-$defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThresholdsCents, true)
-    ? 'entry:10:1' : 'entry:' . $entryWindows[0] . ':' . $entryThresholdsCents[0];
+$defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThresholdsTenthsPercent, true)
+    ? 'entry:10:1' : 'entry:' . $entryWindows[0] . ':' . $entryThresholdsTenthsPercent[0];
 $entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
 $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
 $startingBalance = trim((string) ($_GET['balance'] ?? '10'));
@@ -54,6 +54,7 @@ if (!in_array($martingaleTiming, ['immediate', 'rules'], true)) $martingaleTimin
 if ($martingaleAttempts === false || $martingaleAttempts < 2 || $martingaleAttempts > 10) $martingaleAttempts = 3;
 $defaultExitConfig = 'fixed:' . $rankingRanges['fixed_tp']['from'] . ':' . $rankingRanges['fixed_sl']['from'];
 $exitConfig = (string) ($_GET['exit_config'] ?? $defaultExitConfig);
+$selectTopRankedResult = (string) ($_GET['select_top_ranked_result'] ?? '0') === '1';
 $martingaleTargetPolicy = 'scaled';
 if (preg_match('/:(scaled|fixed)$/', $exitConfig, $policyMatch)) {
     $martingaleTargetPolicy = $policyMatch[1];
@@ -88,26 +89,30 @@ $isImmediateEntry = $entrySelection['type'] === 'immediate';
 $immediateDirection = $isImmediateEntry ? $entrySelection['direction'] : null;
 $entryDirection = $isImmediateEntry ? 'both' : $entrySelection['family'];
 $momentumLookback = $isImmediateEntry ? 0 : $entrySelection['window'];
-$momentumThresholdCents = $isImmediateEntry ? 0 : $entrySelection['threshold_cents'];
-$momentumThreshold = $momentumThresholdCents / 100;
-$profitTarget = '0.10';
-$lossThreshold = '-0.10';
+$momentumThresholdTenthsPercent = $isImmediateEntry ? 0 : $entrySelection['threshold_tenths_percent'];
+$momentumThreshold = $momentumThresholdTenthsPercent / 10;
+$profitTarget = bcdiv($startingBalance, '1000', 24);
+$lossThreshold = bcsub('0', $profitTarget, 24);
 if (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
     && rankingHasValue((int) $matches[1], $rankingRanges['fixed_tp'])
     && rankingHasValue((int) $matches[2], $rankingRanges['fixed_sl'])) {
-    $profitTarget = bcdiv($matches[1], '100', 2);
-    $lossThreshold = bcdiv((string) (0 - (int) $matches[2]), '100', 2);
+    $profitTarget = bcdiv(bcmul($startingBalance, $matches[1], 24), '1000', 24);
+    $lossThreshold = bcdiv(bcmul($startingBalance, (string) (0 - (int) $matches[2]), 24), '1000', 24);
 } elseif (preg_match('/^loss:(\d+)$/', $exitConfig, $matches)
     && rankingHasValue((int) $matches[1], $rankingRanges['loss'])) {
     $profitTarget = null;
-    $lossThreshold = bcdiv((string) (0 - (int) $matches[1]), '100', 2);
+    $lossThreshold = bcdiv(bcmul($startingBalance, (string) (0 - (int) $matches[1]), 24), '1000', 24);
 } elseif (preg_match('/^profit:(\d+)$/', $exitConfig, $matches)
     && rankingHasValue((int) $matches[1], $rankingRanges['profit'])) {
-    $profitTarget = bcdiv($matches[1], '100', 2);
+    $profitTarget = bcdiv(bcmul($startingBalance, $matches[1], 24), '1000', 24);
     $lossThreshold = null;
 } else {
     $exitConfig = $defaultExitConfig;
 }
+$formatTargetPercent = static function (?string $amount, string $startingBalance): string {
+    if ($amount === null || bccomp($startingBalance, '0', 24) === 0) return '—';
+    return rtrim(rtrim(number_format((float) bcmul(bcdiv($amount, $startingBalance, 24), '100', 12), 4, '.', ''), '0'), '.') . '%';
+};
 $selectedExitConfig = $exitConfig . ($martingaleMode !== 'none' ? ':' . $martingaleTargetPolicy : '');
 
 try {
@@ -155,10 +160,10 @@ try {
 }
 
 function h(string $value): string { return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
-function rankingRangeRow(string $label, string $name, array $range, bool $money, array $defaultRange = []): string
+function rankingRangeRow(string $label, string $name, array $range, bool $money, array $defaultRange = [], bool $percent = false): string
 {
-    $format = static fn (int $value): string => $money ? number_format($value / 100, 2, '.', '') : (string) $value;
-    $step = $money ? '0.01' : '1';
+    $format = static fn (int $value): string => $percent ? number_format($value / 10, 1, '.', '') : ($money ? number_format($value / 100, 2, '.', '') : (string) $value);
+    $step = $percent ? '0.1' : ($money ? '0.01' : '1');
     $cells = '';
     foreach (['from' => 'От', 'to' => 'До', 'step' => 'Шаг'] as $key => $caption) {
         $cells .= '<label>' . $caption . '<input class="ranking-range-input" type="number" name="' . $name . '_' . $key
@@ -201,8 +206,8 @@ $findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $mo
         $pricePrevious = (float) $rows[$i - 1]['last_price'];
         $pricePreviousBefore = (float) $rows[$i - $momentumLookback - 1]['last_price'];
         if ($priceBefore <= 0 || $pricePreviousBefore <= 0) continue;
-        $move = $priceNow - $priceBefore;
-        $previousMove = $pricePrevious - $pricePreviousBefore;
+        $move = ($priceNow / $priceBefore - 1) * 100;
+        $previousMove = ($pricePrevious / $pricePreviousBefore - 1) * 100;
         if ($entryDirection !== 'short' && $move >= $momentumThreshold && $previousMove < $momentumThreshold) return [$i, false];
         if ($entryDirection !== 'long' && $move <= -$momentumThreshold && $previousMove > -$momentumThreshold) return [$i, true];
     }
@@ -259,7 +264,7 @@ if ($martingaleMode !== 'none') {
         [$tradeEntryIndex, $tradeIsShort] = $signal;
         $entryPrice = $tradeIsShort ? $rows[$tradeEntryIndex]['bid_price'] : $rows[$tradeEntryIndex]['ask_price'];
         if (bccomp($entryPrice, '0', 24) <= 0) { $tradeEntryIndex++; continue; }
-        $availableInitialStake = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
+        $availableInitialStake = bcdiv($startingBalance, bcadd('1', $feeRate, 24), 24);
         $stake = bccomp($baseStake, $availableInitialStake, 24) < 0 ? $baseStake : $availableInitialStake;
         $chainBaseStake = $stake;
         $legs = [];
@@ -297,10 +302,10 @@ if ($martingaleMode !== 'none') {
                 $exitFeeNow = bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24);
                 $netNow = bcsub(bcsub($grossNow, $entryFeesNow, 24), $exitFeeNow, 24);
                 if ($stageTarget !== null && bccomp($netNow, $stageTarget, 24) >= 0) {
-                    $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $stageTarget . ' USDT'; break;
+                    $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $formatTargetPercent($stageTarget, $startingBalance) . ' от стартового баланса'; break;
                 }
                 if ($stageLoss !== null && bccomp($netNow, $stageLoss, 24) <= 0) {
-                    $exitIndex = $i; $exitReason = 'Мартингейл · стоп чистого убытка ' . ltrim($stageLoss, '-'); $foundStop = true; break;
+                    $exitIndex = $i; $exitReason = 'Мартингейл · стоп чистого убытка ' . $formatTargetPercent(ltrim($stageLoss, '-'), $startingBalance) . ' от стартового баланса'; $foundStop = true; break;
                 }
             }
             if (!$foundStop || $stage >= $martingaleAttempts) {
@@ -386,7 +391,7 @@ while (bccomp($balance, '0', 24) > 0) {
 
     $entry = $rows[$tradeEntryIndex];
     $entryPrice = $tradeIsShort ? $entry['bid_price'] : $entry['ask_price'];
-    $quantity = bcdiv($balance, bcmul($entryPrice, bcadd('1', $feeRate, 24), 24), 24);
+    $quantity = bcdiv($startingBalance, bcmul($entryPrice, bcadd('1', $feeRate, 24), 24), 24);
     $entryFee = bcmul(bcmul($quantity, $entryPrice, 24), $feeRate, 24);
     $exitIndex = $rowCount - 1;
     $exitReason = $isCurrentDay ? 'Последний доступный снимок' : 'Конец выбранного периода';
@@ -399,12 +404,12 @@ while (bccomp($balance, '0', 24) > 0) {
         $tradeNet = bcsub(bcsub($gross, $entryFee, 24), $exitFee, 24);
         if ($profitTarget !== null && bccomp($tradeNet, $profitTarget, 24) >= 0) {
             $exitIndex = $i;
-            $exitReason = 'Цель: чистая прибыль ' . $profitTarget . ' USDT';
+            $exitReason = 'Цель: чистая прибыль ' . $formatTargetPercent($profitTarget, $startingBalance) . ' от стартового баланса';
             break;
         }
         if ($lossThreshold !== null && bccomp($tradeNet, $lossThreshold, 24) <= 0) {
             $exitIndex = $i;
-            $exitReason = 'Стоп: чистый убыток ' . ltrim($lossThreshold, '-') . ' USDT';
+            $exitReason = 'Стоп: чистый убыток ' . $formatTargetPercent(ltrim($lossThreshold, '-'), $startingBalance) . ' от стартового баланса';
             break;
         }
     }
@@ -480,6 +485,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <?php endif; ?>
 <input type="hidden" name="symbol_sort" id="symbol-sort-mode" value="<?= h($symbolSort) ?>">
 <input type="hidden" name="save_mode" id="save-mode-value" value="<?= $saveMode ? '1' : '0' ?>">
+<input type="hidden" name="select_top_ranked_result" id="select-top-ranked-result" value="<?= $selectTopRankedResult ? '1' : '0' ?>">
 <input type="hidden" name="martingale_mode" value="<?= h($martingaleMode) ?>">
 <input type="hidden" name="martingale_timing" value="<?= h($martingaleTiming) ?>">
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
@@ -492,17 +498,17 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<details class="martingale-block"><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Рейтинг мартингейла отдельно сравнивает два расчёта: TP/SL растут с суммой позиции или остаются фиксированными в USDT. Стартовая сумма подбирается под выбранный Stop Loss, комиссию и число попыток; при ценовом разрыве или задержке сигнала следующий шаг ограничивается балансом.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
+<details class="martingale-block"><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">TP/SL задаются в процентах от стартового баланса. При старте с 10 USDT значение 0,1% соответствует 0,01 USDT. Рейтинг мартингейла отдельно сравнивает цели, растущие с суммой позиции, и цели, рассчитанные от стартового баланса.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php
 $sharedThresholdMode = $rankingModes['threshold'];
-$sharedThresholdRange = $sharedThresholdMode === 'range' ? $rankingRanges['threshold'][0] : ['from' => 1, 'to' => 10, 'step' => 1];
-$thresholdValuesText = implode(', ', array_map(static fn (int $cents): string => '±' . number_format($cents / 100, 2, ',', ' '), $entryThresholdsCents));
+$sharedThresholdRange = $sharedThresholdMode === 'range' ? $rankingRanges['threshold'][0] : ['from' => 1, 'to' => 100, 'step' => 1];
+$thresholdValuesText = implode(', ', array_map(static fn (int $value): string => '±' . number_format($value / 10, 1, ',', ' '), $entryThresholdsTenthsPercent));
 ?>
-<div class="ranking-range-heading"><h3>Порог входа · движение Last (USDT) <small>общий набор для ±, + и −</small></h3><label class="ranking-mode-label"><select aria-label="Общий режим порогов входа" class="ranking-mode-input" name="threshold_mode" data-default-value="default" data-range="threshold"><option value="default" <?= $sharedThresholdMode === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $sharedThresholdMode === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
-<p class="small-note">Значения по умолчанию: <?= h($thresholdValuesText) ?> USDT. В режиме «Свой диапазон» его шаг и значения применяются ко всем трём направлениям.</p>
-<div class="ranking-custom" id="threshold-custom" <?= $sharedThresholdMode === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'threshold', $sharedThresholdRange, true, ['from' => 1, 'to' => 10, 'step' => 1]) ?></div>
+<div class="ranking-range-heading"><h3>Порог входа · % от стартового баланса <small>общий набор для ±, + и −</small></h3><label class="ranking-mode-label"><select aria-label="Общий режим порогов входа" class="ranking-mode-input" name="threshold_mode" data-default-value="default" data-range="threshold"><option value="default" <?= $sharedThresholdMode === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $sharedThresholdMode === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
+<p class="small-note">Порог входа задаёт ожидаемое движение в доле стартового баланса; при плече 1× и позиции на весь баланс это соответствует такому же проценту движения Last. Значения по умолчанию: <?= h($thresholdValuesText) ?>%. В режиме «Свой диапазон» шаг и значения применяются ко всем трём направлениям.</p>
+<div class="ranking-custom" id="threshold-custom" <?= $sharedThresholdMode === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон (%)', 'threshold', $sharedThresholdRange, false, ['from' => 1, 'to' => 100, 'step' => 1], true) ?></div>
 <?php
 $sharedWindowMode = $rankingModes['window'];
 $sharedWindowRange = $sharedWindowMode === 'range' ? $rankingRanges['window'][0] : ['from' => 5, 'to' => 40, 'step' => 5];
@@ -512,14 +518,14 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <p class="small-note">Значения по умолчанию: <?= h($windowValuesText) ?> снимков. Общие окна применяются к симметричному режиму ±, росту + и падению −.</p>
 <div class="ranking-custom" id="window-custom" <?= $sharedWindowMode === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'window', $sharedWindowRange, false, ['from' => 5, 'to' => 40, 'step' => 5]) ?></div>
 </div>
-<h3>TakeProfit &amp; StopLoss (USDT)</h3>
+<h3>TakeProfit &amp; StopLoss (% от стартового баланса)</h3>
 <p class="small-note">Совместный расчёт: каждый Take Profit проверяется с каждым Stop Loss.</p>
-<?= rankingRangeRow('Take Profit · совместный расчёт', 'fixed_tp', $rankingRanges['fixed_tp'], true, $defaultRankingRanges['fixed_tp']) ?>
-<?= rankingRangeRow('Stop Loss · совместный расчёт', 'fixed_sl', $rankingRanges['fixed_sl'], true, $defaultRankingRanges['fixed_sl']) ?>
-<?= rankingRangeRow('Только Take Profit', 'profit', $rankingRanges['profit'], true, $defaultRankingRanges['profit']) ?>
-<?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], true, $defaultRankingRanges['loss']) ?>
+<?= rankingRangeRow('Take Profit · совместный расчёт', 'fixed_tp', $rankingRanges['fixed_tp'], false, $defaultRankingRanges['fixed_tp'], true) ?>
+<?= rankingRangeRow('Stop Loss · совместный расчёт', 'fixed_sl', $rankingRanges['fixed_sl'], false, $defaultRankingRanges['fixed_sl'], true) ?>
+<?= rankingRangeRow('Только Take Profit', 'profit', $rankingRanges['profit'], false, $defaultRankingRanges['profit'], true) ?>
+<?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], false, $defaultRankingRanges['loss'], true) ?>
 <p class="small-note">Граница «до» включается, если на неё попадает шаг.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
-<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор <?= h($entryThresholdSummary) ?> USDT и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
+<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от стартового баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
 <section class="panel"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">Все рейтинги используют один фоновый обработчик. Ожидающие задачи показаны списком; система не гарантирует строгий порядок их запуска. Кнопка 🧹 останавливает индивидуальные рейтинги, рейтинг торговых пар и общий рейтинг.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= count($rows) ?> снимков</span></div>
@@ -530,7 +536,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <section class="panel" id="results"><div class="chart-head"><h2>Сделки стратегии</h2><span class="count"><?= $closedTradeCount ?> закрытых сделок<?php if ($openTradeCount > 0): ?> · <?= $openTradeCount ?> открыто на последнем снимке<?php endif; ?></span></div>
 <div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div></div>
 <?php if (count($rows) < 2): ?><div class="empty">Нужно минимум два снимка в выбранном периоде, чтобы выполнить симуляцию.</div>
-<?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 2, ',', ' ') . ' USDT за ' . $momentumLookback . ' интервалов между снимками.' ?></div>
+<?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 1, ',', ' ') . '% за ' . $momentumLookback . ' снимков.' ?></div>
 <?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Сумма входа</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>
 <?php foreach ($trades as $index => $trade): $resultCompare = bccomp($trade['net'], '0', 24); $tradeIsOpen = $isOpenTrade($trade); $rowClass = $tradeIsOpen ? ($resultCompare > 0 ? 'trade-open-positive' : ($resultCompare < 0 ? 'trade-open-negative' : 'trade-flat')) : ($resultCompare > 0 ? 'trade-positive' : ($resultCompare < 0 ? 'trade-negative' : 'trade-flat')); $totalFees = bcadd($trade['entry_fee'], $trade['exit_fee'], 24); $tradeNotional = bcmul($trade['quantity'], $trade['entry_price'], 24); $tradeEntryLabel = $trade['is_short'] ? 'Продажа Bid' : 'Покупка Ask'; $tradeExitLabel = $trade['is_short'] ? 'Покупка Ask' : 'Продажа Bid'; ?>
 <tr class="<?= $rowClass ?> trade-row" tabindex="0" data-entry-time="<?= epochMilliseconds($trade['entry']['received_at_utc']) ?>" data-exit-time="<?= epochMilliseconds($trade['exit']['received_at_utc']) ?>"><td><?= $index + 1 ?></td><td><?= h(formatKyivTime($trade['entry']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeEntryLabel . ' · ' . $trade['entry_price']) ?></td><td><?= h(formatKyivTime($trade['exit']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeExitLabel . ' · ' . $trade['exit_price']) ?></td><td><?= money($trade['quantity']) ?></td><td><?= money($tradeNotional) ?> USDT</td><td><?= money($trade['gross']) ?></td><td><?= money($totalFees) ?></td><td><?= $resultCompare > 0 ? '+' : '' ?><?= money($trade['net']) ?></td><td><?= money($trade['balance']) ?></td><td class="reason"><?= $tradeIsOpen ? 'Открыта · результат по последнему снимку' : h($trade['reason']) ?></td></tr>
@@ -546,7 +552,7 @@ const X=x=>p.l+(x-viewMin)/(viewMax-viewMin)*(W-p.l-p.r),Y=y=>p.t+(ymax-y)/(ymax
 function el(tag,attrs={},text=''){const n=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text)n.textContent=text;svg.appendChild(n);return n}
 svg.setAttribute('viewBox',`0 0 ${W} ${H}`);svg.setAttribute('preserveAspectRatio','none');
 for(let i=0;i<5;i++){const v=ymin+(ymax-ymin)*i/4,y=Y(v);el('line',{x1:p.l,y1:y,x2:W-p.r,y2:y,stroke:'#273149','stroke-width':1});el('text',{x:p.l-12,y:y+4,'text-anchor':'end',fill:'#8995ad','font-size':12},Number(v).toPrecision(7).replace(/\.?0+$/,''))}
-let xTicks=[];function buildXAxis(){for(const tick of xTicks){tick.line.remove();tick.label.remove()}xTicks=[];const tickCount=Math.max(4,Math.floor(svg.clientWidth/180));for(let i=0;i<=tickCount;i++){const line=el('line',{y1:p.t,y2:H-p.b,stroke:'#202a40','stroke-width':1}),label=el('text',{y:H-12,'text-anchor':'middle',fill:'#8995ad','font-size':12});xTicks.push({line,label,index:i/tickCount})}}function renderXAxis(){for(const tick of xTicks){const t=viewMin+(viewMax-viewMin)*tick.index,x=X(t);tick.line.setAttribute('x1',x);tick.line.setAttribute('x2',x);tick.label.setAttribute('x',x);tick.label.textContent=new Date(t).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}}buildXAxis();renderXAxis();window.addEventListener('resize',()=>{buildXAxis();renderXAxis()});
+let xTicks=[];function buildXAxis(){for(const tick of xTicks){tick.line.remove();tick.label.remove()}xTicks=[];const tickCount=Math.max(4,Math.floor(svg.clientWidth/180));for(let i=0;i<=tickCount;i++){const line=el('line',{y1:p.t,y2:H-p.b,stroke:'#202a40','stroke-width':1}),label=el('text',{y:H-12,'text-anchor':'middle',fill:'#8995ad','font-size':12});xTicks.push({line,label,index:i/tickCount})}}function renderXAxis(){const day=(t)=>new Date(t).toLocaleDateString('en-CA',{timeZone:'Europe/Kyiv'}),showDate=day(viewMin)!==day(viewMax);for(const tick of xTicks){const t=viewMin+(viewMax-viewMin)*tick.index,x=X(t),date=new Date(t);tick.line.setAttribute('x1',x);tick.line.setAttribute('x2',x);tick.label.setAttribute('x',x);const time=date.toLocaleTimeString('ru-RU',{timeZone:'Europe/Kyiv',hour:'2-digit',minute:'2-digit'});tick.label.textContent=showDate?`${date.toLocaleDateString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit'})} ${time}`:time}}buildXAxis();renderXAxis();window.addEventListener('resize',()=>{buildXAxis();renderXAxis()});
 const tradeInterval=el('rect',{y:p.t,height:H-p.t-p.b,fill:'#c4a7ff',opacity:.18,visibility:'hidden','pointer-events':'none'}),tradeEntryLine=el('line',{y1:p.t,y2:H-p.b,stroke:'#d9c6ff','stroke-width':2,'stroke-dasharray':'5 4',visibility:'hidden','pointer-events':'none'}),tradeExitLine=el('line',{y1:p.t,y2:H-p.b,stroke:'#d9c6ff','stroke-width':2,'stroke-dasharray':'5 4',visibility:'hidden','pointer-events':'none'});
 const defs=el('defs'),clipPath=document.createElementNS(ns,'clipPath'),clipRect=document.createElementNS(ns,'rect'),clipId='chart-plot-clip';clipPath.setAttribute('id',clipId);clipRect.setAttribute('x',p.l);clipRect.setAttribute('y',p.t);clipRect.setAttribute('width',W-p.l-p.r);clipRect.setAttribute('height',H-p.t-p.b);clipPath.appendChild(clipRect);defs.appendChild(clipPath);const markers={},paths={};for(const[key,arr]of Object.entries(datasets)){const path=el('path',{d:arr.map((q,i)=>`${i?'L':'M'}${X(q.t).toFixed(2)},${Y(q.v).toFixed(2)}`).join(' '),fill:'none',stroke:colors[key],'stroke-width':2.2,'stroke-linejoin':'round','stroke-linecap':'round',opacity:.94,'clip-path':`url(#${clipId})`});paths[key]=path;markers[key]=el('circle',{r:5,fill:colors[key],stroke:'#0b1020','stroke-width':2,visibility:'hidden','pointer-events':'none'})}function renderSeries(){for(const[key,arr]of Object.entries(datasets)){paths[key].setAttribute('d',arr.map((q,i)=>`${i?'L':'M'}${X(q.t).toFixed(2)},${Y(q.v).toFixed(2)}`).join(' '))}}
 const crosshair=el('line',{y1:p.t,y2:H-p.b,stroke:'#d5defa','stroke-width':1,'stroke-dasharray':'4 5',opacity:.65,visibility:'hidden','pointer-events':'none'}),tip=document.querySelector('#tooltip'),wrap=document.querySelector('.chart-wrap'),sampleTimes=datasets.last_price.map(q=>q.t);
@@ -565,6 +571,47 @@ const saveModeToggle = document.querySelector('#save-mode-toggle');
 const saveModeValue = document.querySelector('#save-mode-value');
 const symbolSortMode = document.querySelector('#symbol-sort-mode');
 const symbolSelect = document.querySelector('#symbol-select');
+const knownTickerBestResults = new Map();
+function renderTickerBestResults(items) {
+    for (const item of items) {
+        if (item.pnl === null || item.pnl === undefined || item.pnl === '') continue;
+        const pnl = Number(item.pnl);
+        if (!item.symbol || !Number.isFinite(pnl)) continue;
+        const previous = knownTickerBestResults.get(item.symbol);
+        if (!previous || pnl > previous.pnl) {
+            knownTickerBestResults.set(item.symbol, {pnl, title: item.title || 'Лучший сохранённый результат тикера'});
+        }
+    }
+    const currentSymbol = symbolSelect.value;
+    const options = new Map([...symbolSelect.options].map(option => [option.value, option]));
+    const ranked = [...knownTickerBestResults.entries()]
+        .filter(([symbol]) => options.has(symbol))
+        .sort(([leftSymbol, left], [rightSymbol, right]) => (right.pnl - left.pnl) || leftSymbol.localeCompare(rightSymbol));
+    const ordered = [];
+    for (const [symbol, result] of ranked) {
+        const option = options.get(symbol);
+        option.textContent = symbol + ' · ' + pnlText(result.pnl);
+        option.title = result.title;
+        ordered.push(option);
+    }
+    for (const option of options.values()) if (!ordered.includes(option)) ordered.push(option);
+    symbolSelect.replaceChildren(...ordered);
+    symbolSelect.value = currentSymbol;
+}
+async function loadCachedTickerBestResults() {
+    try {
+        const params = new URLSearchParams(new FormData(filtersForm));
+        const response = await fetch('cached-strategy-symbols.php?' + params.toString(), {headers:{Accept:'application/json'}, cache:'no-store'});
+        const result = await response.json();
+        if (response.ok && result.status === 'ready' && Array.isArray(result.symbols)) {
+            renderTickerBestResults(result.symbols.map(item => ({
+                symbol: item.symbol,
+                pnl: item.best_pnl,
+                title: item.entry_label ? 'Лучший сохранённый вариант входа: ' + item.entry_label : 'Лучший сохранённый результат тикера',
+            })));
+        }
+    } catch (_) {}
+}
 const refreshSymbolsButton = document.querySelector('#refresh-symbols');
 const resetSymbolCacheButton = document.querySelector('#reset-symbol-cache');
 const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel');
@@ -699,7 +746,7 @@ function updateMartingaleInitialNotional() {
     const exitId = selectedExit.replace(/:(scaled|fixed)$/, '');
     let stopLoss = null;
     let match = exitId.match(/^fixed:\d+:(\d+)$/) || exitId.match(/^loss:(\d+)$/);
-    if (match) stopLoss = Number(match[1]) / 100;
+    if (match) stopLoss = balance * Number(match[1]) / 1000;
 
     if (!(balance > 0) || !(attempts >= 2) || !Number.isFinite(fee)) {
         martingaleInitialNotional.textContent = 'Проверьте баланс и комиссию';
@@ -762,7 +809,10 @@ function resetPortfolioRankingForRelevantFilterChange() {
     symbolSortMode.value = '';
     resetRefreshButton('Пересчитать рейтинг для измененных фильтров');
 }
-document.querySelector('#apply-ranking-ranges').addEventListener('click', resetPortfolioRankingForRelevantFilterChange);
+document.querySelector('#apply-ranking-ranges').addEventListener('click', () => {
+    document.querySelector('#select-top-ranked-result').value = '1';
+    resetPortfolioRankingForRelevantFilterChange();
+});
 document.querySelectorAll('.ranking-mode-input').forEach(control => {
     const update = () => {
         const custom = document.querySelector('#' + control.dataset.range + '-custom');
@@ -781,6 +831,7 @@ document.querySelector('#reset-ranking-parameters').addEventListener('click', ()
         control.value = control.dataset.defaultValue;
         control.dispatchEvent(new Event('change', {bubbles:true}));
     });
+    document.querySelector('#select-top-ranked-result').value = '1';
     resetPortfolioRankingForRelevantFilterChange();
     filtersForm.requestSubmit();
 });
@@ -862,6 +913,8 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
 });
 const exitConfigSelect = document.querySelector('#exit-config');
 const entryConfigSelect = document.querySelector('#entry-config');
+const selectTopRankedResultInput = document.querySelector('#select-top-ranked-result');
+let selectTopRankedResult = selectTopRankedResultInput.value === '1';
 function renderEntryOptions(entries, selected) {
     if (!Array.isArray(entries) || entries.length === 0) return;
     entryConfigSelect.replaceChildren();
@@ -874,12 +927,6 @@ function renderEntryOptions(entries, selected) {
     }
     if (![...entryConfigSelect.options].some(option => option.value === selected)) {
         entryConfigSelect.options[0].selected = true;
-    }
-}
-function promoteRankedSymbol(symbol) {
-    const rankedOption = [...symbolSelect.options].find(option => option.value === symbol);
-    if (rankedOption && symbolSelect.options[0] !== rankedOption) {
-        symbolSelect.insertBefore(rankedOption, symbolSelect.options[0]);
     }
 }
 let exitRankingRequestVersion = 0;
@@ -988,6 +1035,11 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         }
         renderEntryOptions(ranking.entries, params.get('entry_config'));
         if (ranking.status === 'entry_unavailable') {
+            if (selectTopRankedResult && ranking.entries?.[0]) {
+                entryConfigSelect.value = ranking.entries[0].id;
+                loadExitRanking(null, true);
+                return;
+            }
             if (entryConfigSelect.value && entryConfigSelect.value !== params.get('entry_config')) filtersForm.requestSubmit();
             return;
         }
@@ -1004,7 +1056,14 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             exitConfigSelect.options[0].textContent = ranking.message || 'Рейтинг временно недоступен';
             return;
         }
-        const selected = preferredExit ?? exitConfigSelect.value;
+        if (selectTopRankedResult && ranking.entries?.[0] && params.get('entry_config') !== ranking.entries[0].id) {
+            entryConfigSelect.value = ranking.entries[0].id;
+            loadExitRanking(null, true);
+            return;
+        }
+        const selected = selectTopRankedResult
+            ? ranking.groups?.[0]?.items?.[0]?.id
+            : preferredExit ?? exitConfigSelect.value;
         exitConfigSelect.replaceChildren();
         for (const group of ranking.groups) {
             const optgroup = document.createElement('optgroup');
@@ -1025,8 +1084,15 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
                 if (selected && fallback.value !== selected) filtersForm.requestSubmit();
             }
         }
+        if (selectTopRankedResult) {
+            selectTopRankedResult = false;
+            selectTopRankedResultInput.value = '0';
+            const finalParams = new URLSearchParams(new FormData(filtersForm));
+            finalParams.delete('select_top_ranked_result');
+            history.replaceState(null, '', location.pathname + '?' + finalParams.toString());
+        }
         updateMartingaleInitialNotional();
-        promoteRankedSymbol(params.get('symbol'));
+        void loadCachedTickerBestResults();
     } catch (_) {
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
         strategyRankingTimer.finish('Общее время до ошибки', {persist: false});
@@ -1284,16 +1350,16 @@ async function loadPortfolioRanking() {
             return;
         }
         if (ranking.status !== 'ready') throw new Error(ranking.message || 'Общий рейтинг пока недоступен');
-        const globalRows = (ranking.global_top || []).map((item, index) => {
+        const globalRows = (ranking.global_top || []).map(item => {
             const detailLink = portfolioCombinationDetailLink(params, item);
             return [
-                String(index + 1), detailLink?.entry || item.entry_label, detailLink?.exit || item.exit_label, pnlText(item.average_pnl),
+                detailLink?.entry || item.entry_label, detailLink?.exit || item.exit_label, pnlText(item.average_pnl),
                 item.eligible_symbols + ' из ' + ranking.universe_size,
                 String(item.profitable_symbols),
             ];
         });
         rankingTable(document.querySelector('#portfolio-global-table'), [
-            {label:'#'}, {label:'Порог входа'}, {label:'TakeProfit & StopLoss'},
+            {label:'Порог входа'}, {label:'TakeProfit & StopLoss'},
             {label:'Средний итог на тикер',numeric:true}, {label:'Подходят по SAVE MODE',numeric:true}, {label:'В плюсе',numeric:true},
         ], globalRows);
         const tickerRows = (ranking.ticker_leaders || []).map(item => {
@@ -1302,13 +1368,12 @@ async function loadPortfolioRanking() {
             const exitCell = detailLink?.exit || item.exit_label;
             return {
                 cells: [
-                    item.global_rank === null ? '—' : String(item.global_rank), item.symbol, entryCell, exitCell,
+                    item.symbol, entryCell, exitCell,
                     pnlText(item.pnl), pnlText(item.market_average_pnl),
                     item.market_eligible_symbols === undefined ? '—' : item.market_eligible_symbols + ' из ' + ranking.universe_size,
                     item.trade_count ? String(item.trade_count) : 'нет надежных данных',
                 ],
                 sortValues: {
-                    globalRank: item.global_rank === null || item.global_rank === undefined ? null : Number(item.global_rank),
                     tickerPnl: item.pnl === null || item.pnl === undefined ? null : Number(item.pnl),
                     marketAverage: item.market_average_pnl === null || item.market_average_pnl === undefined ? null : Number(item.market_average_pnl),
                 },
@@ -1316,34 +1381,23 @@ async function loadPortfolioRanking() {
             };
         });
         rankingTable(document.querySelector('#portfolio-ticker-table'), [
-            {label:'Место комбинации в общем рейтинге',sortKey:'globalRank',defaultDirection:'asc'}, {label:'Тикер'}, {label:'Лучший порог входа'}, {label:'Лучший TakeProfit & StopLoss'},
+            {label:'Тикер'}, {label:'Лучший порог входа'}, {label:'Лучший TakeProfit & StopLoss'},
             {label:'Итог тикера',numeric:true,sortKey:'tickerPnl',defaultDirection:'desc'}, {label:'Средний итог этой пары на рынке',numeric:true,sortKey:'marketAverage',defaultDirection:'desc'},
             {label:'Поддержка',numeric:true}, {label:'Сделок',numeric:true},
-        ], tickerRows, {initialKey:'globalRank',initialDirection:'asc'});
+        ], tickerRows, {initialKey:'tickerPnl',initialDirection:'desc'});
         portfolioRankingStatus.textContent = 'Средний итог рассчитан по ' + ranking.universe_size
             + ' тикерам с данными за период; пары без подходящей выборки учитываются как 0. SAVE MODE требует минимум '
             + ranking.min_trades + (ranking.min_trades === 1 ? ' сделку.' : ' сделки.');
-        const currentSymbol = symbolSelect.value;
-        const options = new Map([...symbolSelect.options].map(option => [option.value, option]));
-        const sortedOptions = [];
-        let rankedCount = 0;
-        for (const item of ranking.symbols || []) {
-            const option = options.get(item.symbol);
-            if (!option) continue;
-            if (item.best_pnl === null || item.best_pnl === undefined) {
-                option.textContent = item.symbol + ' · нет надежного рейтинга';
-                option.title = params.get('save_mode') === '0' ? 'Нет варианта выхода хотя бы с одной сделкой' : 'Ни один вариант не дал минимум две сделки';
-            } else {
-                rankedCount++;
-                option.textContent = item.symbol + ' · ' + pnlText(item.best_pnl);
-                option.title = 'Лучший результат выбранного порога входа: ' + (item.best_exit || 'нет данных');
-            }
-            sortedOptions.push(option);
-        }
-        for (const option of options.values()) if (!sortedOptions.includes(option)) sortedOptions.push(option);
-        symbolSelect.replaceChildren(...sortedOptions);
-        symbolSelect.value = currentSymbol;
-        buttonTitle = 'Пары отсортированы по выбранному порогу входа: надежных рейтингов ' + rankedCount + ' из ' + sortedOptions.length + '.';
+        const tickerResults = (ranking.ticker_leaders || []).map(item => ({
+            symbol: item.symbol,
+            pnl: item.pnl,
+            title: item.entry_label
+                ? 'Лучшая комбинация: ' + item.entry_label + ' · ' + (item.exit_label || 'TP/SL не указаны')
+                : (params.get('save_mode') === '0' ? 'Нет варианта выхода хотя бы с одной сделкой' : 'Нет варианта выхода минимум с двумя сделками'),
+        }));
+        renderTickerBestResults(tickerResults);
+        const rankedCount = tickerResults.filter(item => item.pnl !== null && item.pnl !== undefined).length;
+        buttonTitle = 'Пары отсортированы по их лучшему результату: надежных рейтингов ' + rankedCount + ' из ' + symbolSelect.options.length + '.';
     } catch (error) {
         if (requestVersion === portfolioRankingRequestVersion) {
             portfolioRankingStatus.textContent = error.message || 'Не удалось рассчитать общий рейтинг';
@@ -1426,5 +1480,6 @@ updateMartingaleInitialNotional();
 if (symbolSortMode.value === 'profit') {
     loadPortfolioRanking();
 }
+loadCachedTickerBestResults();
 loadExitRanking();
 </script></body></html>

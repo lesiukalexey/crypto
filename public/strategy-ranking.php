@@ -96,7 +96,7 @@ try {
     }
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $maxId = (int) ($snapshotIds[$symbol] ?? 0);
-    $key = hash('sha256', json_encode(['ranking-v21-martingale-exit-policies-first-snapshot-per-generation', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
+    $key = hash('sha256', json_encode(['ranking-v25-percent-entry-tpsl', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/' . $key . '.json';
     $statusPath = $cacheDir . '/' . $key . '.status.json';
     $profilePath = $cacheDir . '/' . $key . '.' . $entryConfig . '.json';
@@ -120,7 +120,15 @@ try {
 
     $status = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
     if (is_array($status) && ($status['status'] ?? '') === 'error' && time() - (int) filemtime($statusPath) < 300) {
-        respond($status, 503);
+        $workerLogPath = $cacheDir . '/' . $key . '.log';
+        $workerLog = is_file($workerLogPath) ? (string) file_get_contents($workerLogPath) : '';
+        if (str_contains($workerLog, "cannot import name 'simulate_standard_stateful_days'")) {
+            // A prior run may have failed before the compatible Python fallback
+            // was deployed. Let the corrected worker retry immediately.
+            $status = null;
+        } else {
+            respond($status, 503);
+        }
     }
     $statusAge = is_file($statusPath) ? time() - (int) filemtime($statusPath) : PHP_INT_MAX;
     $workerBusy = false;

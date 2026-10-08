@@ -1,36 +1,41 @@
 <?php
 declare(strict_types=1);
 
-function rankingCents(mixed $value): int
+function rankingTenthsPercent(mixed $value): int
 {
     if (!is_string($value) && !is_int($value)) throw new InvalidArgumentException('Укажите числовые границы диапазонов.');
     $text = (string) $value;
-    if (!preg_match('/^\d+(?:\.\d{1,2})?$/', $text)) throw new InvalidArgumentException('Суммы диапазонов указываются с точностью до 0,01 USDT.');
+    if (!preg_match('/^\d+(?:\.\d)?$/', $text)) throw new InvalidArgumentException('Процентные пороги указываются с точностью до 0,1%.');
     [$whole, $fraction] = array_pad(explode('.', $text, 2), 2, '');
-    return (int) $whole * 100 + (int) str_pad($fraction, 2, '0');
+    return (int) $whole * 10 + (int) str_pad($fraction, 1, '0');
 }
 
-function rankingRange(mixed $from, mixed $to, mixed $step, bool $money): array
+function rankingRange(mixed $from, mixed $to, mixed $step): array
 {
-    $convert = static function (mixed $value) use ($money): int {
-        if ($money) return rankingCents($value);
+    $convert = static function (mixed $value): int {
         if ((!is_string($value) && !is_int($value)) || !preg_match('/^\d+$/', (string) $value)) {
             throw new InvalidArgumentException('Окно входа должно быть целым числом снимков.');
         }
         return (int) $value;
     };
     $range = ['from' => $convert($from), 'to' => $convert($to), 'step' => $convert($step)];
-    $limit = $money ? 10000 : 1000;
+    $limit = 1000;
     if ($range['from'] < 1 || $range['to'] > $limit || $range['to'] < $range['from'] || $range['step'] < 1) {
         throw new InvalidArgumentException('Проверьте диапазон: от > 0, до ≥ от, шаг > 0.');
     }
     return $range;
 }
 
-function rankingSingle(array $query, string $name, array $default): array
+function rankingSinglePercent(array $query, string $name, array $default): array
 {
     if (!array_key_exists($name . '_from', $query)) return $default;
-    return rankingRange($query[$name . '_from'], $query[$name . '_to'] ?? null, $query[$name . '_step'] ?? null, true);
+    $range = ['from' => rankingTenthsPercent($query[$name . '_from']),
+        'to' => rankingTenthsPercent($query[$name . '_to'] ?? null),
+        'step' => rankingTenthsPercent($query[$name . '_step'] ?? null)];
+    if ($range['from'] < 1 || $range['to'] > 10000 || $range['to'] < $range['from'] || $range['step'] < 1) {
+        throw new InvalidArgumentException('Проверьте процентный диапазон TP/SL: от > 0, до ≥ от, шаг > 0.');
+    }
+    return $range;
 }
 
 function rankingValues(array $ranges): array
@@ -47,17 +52,17 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
 {
     $thresholdDefaults = array_map(
         static fn (array $row): array => ['from' => $row[0], 'to' => $row[1], 'step' => $row[2]],
-        $entryDefaults['threshold_ranges_cents']
+        $entryDefaults['threshold_ranges_tenths_percent']
     );
     $windowDefaults = array_map(
         static fn (array $row): array => ['from' => $row[0], 'to' => $row[1], 'step' => $row[2]],
         $entryDefaults['window_ranges']
     );
-    if (rankingValues($thresholdDefaults) !== array_map('intval', $entryDefaults['thresholds_cents'])
+    if (rankingValues($thresholdDefaults) !== array_map('intval', $entryDefaults['thresholds_tenths_percent'])
         || rankingValues($windowDefaults) !== array_map('intval', $entryDefaults['snapshot_windows'])) {
         throw new LogicException('Наборы значений входа не совпадают с настройками диапазонов.');
     }
-    $thresholdDefault = ['from' => 1, 'to' => 10, 'step' => 1];
+    $thresholdDefault = ['from' => 1, 'to' => 100, 'step' => 1];
     $thresholdMode = (string) ($query['threshold_mode'] ?? 'default');
     $thresholdSource = 'threshold';
     if ($thresholdMode !== 'range') {
@@ -75,7 +80,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         throw new InvalidArgumentException('Неизвестный режим диапазона.');
     }
     $thresholdRanges = $thresholdMode === 'range'
-        ? [rankingSingle($query, $thresholdSource, $thresholdDefault)]
+        ? [rankingSinglePercent($query, $thresholdSource, $thresholdDefault)]
         : $thresholdDefaults;
     $windowDefault = ['from' => 5, 'to' => 40, 'step' => 5];
     $windowMode = (string) ($query['window_mode'] ?? 'default');
@@ -95,7 +100,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         throw new InvalidArgumentException('Неизвестный режим диапазона.');
     }
     $windowRanges = $windowMode === 'range'
-        ? [rankingRange($query[$windowSource . '_from'] ?? $windowDefault['from'], $query[$windowSource . '_to'] ?? $windowDefault['to'], $query[$windowSource . '_step'] ?? $windowDefault['step'], false)]
+        ? [rankingRange($query[$windowSource . '_from'] ?? $windowDefault['from'], $query[$windowSource . '_to'] ?? $windowDefault['to'], $query[$windowSource . '_step'] ?? $windowDefault['step'])]
         : $windowDefaults;
     $families = ['both', 'long', 'short'];
     $ranges = [];
@@ -107,7 +112,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         $modes[$family . '_threshold'] = $thresholdMode;
         $modes[$family . '_window'] = $windowMode;
         $entryProfiles[$family] = [
-            'thresholds_cents' => rankingValues($thresholdRanges),
+            'thresholds_tenths_percent' => rankingValues($thresholdRanges),
             'windows' => rankingValues($windowRanges),
         ];
     }
@@ -118,18 +123,18 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
     $modes['window'] = $modes['both_window'];
     foreach (['fixed_tp' => 'fixed', 'fixed_sl' => 'fixed', 'profit' => 'profit', 'loss' => 'loss'] as $name => $family) {
         $profile = $exitDefaults[$family];
-        $default = ['from' => (int) $profile['min_cents'], 'to' => (int) $profile['max_cents'], 'step' => (int) $profile['step_cents']];
-        $ranges[$name] = rankingSingle($query, $name, $default);
+        $default = ['from' => (int) $profile['min_tenths_percent'], 'to' => (int) $profile['max_tenths_percent'], 'step' => (int) $profile['step_tenths_percent']];
+        $ranges[$name] = rankingSinglePercent($query, $name, $default);
     }
     $entryVariantCount = array_sum(array_map(
-        static fn (array $profile): int => count($profile['thresholds_cents']) * count($profile['windows']),
+        static fn (array $profile): int => count($profile['thresholds_tenths_percent']) * count($profile['windows']),
         $entryProfiles
     )) + count($entryDefaults['immediate_directions'] ?? []);
     $count = $entryVariantCount
         * (count(rankingValues([$ranges['fixed_tp']])) * count(rankingValues([$ranges['fixed_sl']]))
             + count(rankingValues([$ranges['profit']])) + count(rankingValues([$ranges['loss']])));
     foreach ($entryProfiles as $profile) {
-        if (count($profile['thresholds_cents']) > 100 || count($profile['windows']) > 50) {
+        if (count($profile['thresholds_tenths_percent']) > 100 || count($profile['windows']) > 50) {
             throw new InvalidArgumentException('Слишком много сочетаний. Увеличьте шаг или сузьте диапазон.');
         }
     }
@@ -140,7 +145,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         'ranges' => $ranges,
         'modes' => $modes,
         'worker' => [
-            'entry_thresholds_cents' => $entryProfiles['both']['thresholds_cents'],
+            'entry_thresholds_tenths_percent' => $entryProfiles['both']['thresholds_tenths_percent'],
             'entry_windows' => $entryProfiles['both']['windows'],
             'entry_profiles' => $entryProfiles,
             'immediate_directions' => $entryDefaults['immediate_directions'] ?? [],
@@ -169,10 +174,10 @@ function rankingEntryConfig(string $entryConfig, array $ranking, array $immediat
     $profile = $ranking['entry_profiles'][$family] ?? null;
     if (!is_array($profile)
         || !in_array($window, $profile['windows'], true)
-        || !in_array($threshold, $profile['thresholds_cents'], true)) {
+        || !in_array($threshold, $profile['thresholds_tenths_percent'], true)) {
         return null;
     }
-    return ['type' => 'momentum', 'family' => $family, 'window' => $window, 'threshold_cents' => $threshold];
+    return ['type' => 'momentum', 'family' => $family, 'window' => $window, 'threshold_tenths_percent' => $threshold];
 }
 
 function rankingHasValue(int $value, array $range): bool

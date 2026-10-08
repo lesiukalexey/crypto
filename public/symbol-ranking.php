@@ -89,7 +89,7 @@ try {
         respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
     }
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
-    $key = hash('sha256', json_encode(['symbol-ranking-v9-martingale-first-snapshot-per-generation', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
+    $key = hash('sha256', json_encode(['symbol-ranking-v13-percent-entry-tpsl', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/symbols-' . $key . '.json';
     $statusPath = $cacheDir . '/symbols-' . $key . '.status.json';
     if (is_file($resultPath)) {

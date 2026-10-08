@@ -56,8 +56,8 @@ try {
                 'short' => '−',
                 default => '±',
             };
-            $entry = 'порог ' . $direction . number_format(((int) $entryMatch[3]) / 100, 2, ',', ' ')
-                . ' USDT · окно ' . $entryMatch[2];
+            $entry = 'порог ' . $direction . number_format(((int) $entryMatch[3]) / 10, 1, ',', ' ')
+                . '% от стартового баланса · окно ' . $entryMatch[2];
         } else {
             $entry = match (true) {
                 str_starts_with($entryConfig, 'immediate:short') => 'сразу · продажа',

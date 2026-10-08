@@ -102,18 +102,18 @@ def simulate_numba(
         first_take = -1
         first_stop = -1
         if is_short:
-            if has_take and take_profit < balance:
-                take_price = entry_price * inverse_fee_factor * (1.0 - take_profit / balance)
+            if has_take and take_profit < start_balance:
+                take_price = entry_price * inverse_fee_factor * (1.0 - take_profit / start_balance)
                 first_take = _first_le(ask_minimum, tree_size, tree_length, entry_index + 1, take_price)
             if has_stop:
-                stop_price = entry_price * inverse_fee_factor * (1.0 + stop_loss / balance)
+                stop_price = entry_price * inverse_fee_factor * (1.0 + stop_loss / start_balance)
                 first_stop = _first_ge(ask_maximum, tree_size, tree_length, entry_index + 1, stop_price)
         else:
             if has_take:
-                take_price = entry_price * fee_factor * (1.0 + take_profit / balance)
+                take_price = entry_price * fee_factor * (1.0 + take_profit / start_balance)
                 first_take = _first_ge(bid_maximum, tree_size, tree_length, entry_index + 1, take_price)
-            if has_stop and stop_loss < balance:
-                stop_price = entry_price * fee_factor * (1.0 - stop_loss / balance)
+            if has_stop and stop_loss < start_balance:
+                stop_price = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
                 first_stop = _first_le(bid_minimum, tree_size, tree_length, entry_index + 1, stop_price)
 
         has_crossing = first_take >= 0 or first_stop >= 0
@@ -131,7 +131,7 @@ def simulate_numba(
             net_ratio = (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
         else:
             net_ratio = (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
-        balance *= 1.0 + net_ratio
+        balance += start_balance * net_ratio
         trades_closed += 1
 
         if not has_crossing:
@@ -139,6 +139,194 @@ def simulate_numba(
         signal_cursor = _lower_bound(signal_indexes, signal_cursor, exit_index + 1)
 
     return balance - start_balance, trades_closed
+
+
+@njit(cache=True)
+def simulate_standard_stateful_numba(
+    bids: np.ndarray,
+    asks: np.ndarray,
+    bid_maximum: np.ndarray,
+    bid_minimum: np.ndarray,
+    ask_maximum: np.ndarray,
+    ask_minimum: np.ndarray,
+    tree_size: int,
+    tree_length: int,
+    signal_indexes: np.ndarray,
+    signal_shorts: np.ndarray,
+    start_balance: float,
+    fee_rate: float,
+    take_profit: float,
+    stop_loss: float,
+    closed_balance: float,
+    signal_from: int,
+    closed_trades: int,
+    open_entry_index: int,
+    open_is_short: bool,
+) -> tuple[float, int, float, int, int, bool]:
+    """Resume a fixed-initial-stake run, retaining any open position at the boundary."""
+    balance = closed_balance
+    count = tree_length
+    fee_factor = (1.0 + fee_rate) / (1.0 - fee_rate)
+    inverse_fee_factor = (1.0 - fee_rate) / (1.0 + fee_rate)
+    has_take = not np.isnan(take_profit)
+    has_stop = not np.isnan(stop_loss)
+    signal_cursor = _lower_bound(signal_indexes, 0, signal_from)
+    open_index = open_entry_index
+    open_short = open_is_short
+
+    if open_index >= 0:
+        first_take = -1
+        first_stop = -1
+        entry_price = bids[open_index] if open_short else asks[open_index]
+        if open_short:
+            if has_take and take_profit < start_balance:
+                target = entry_price * inverse_fee_factor * (1.0 - take_profit / start_balance)
+                first_take = _first_le(ask_minimum, tree_size, count, open_index + 1, target)
+            if has_stop:
+                target = entry_price * inverse_fee_factor * (1.0 + stop_loss / start_balance)
+                first_stop = _first_ge(ask_maximum, tree_size, count, open_index + 1, target)
+        else:
+            if has_take:
+                target = entry_price * fee_factor * (1.0 + take_profit / start_balance)
+                first_take = _first_ge(bid_maximum, tree_size, count, open_index + 1, target)
+            if has_stop and stop_loss < start_balance:
+                target = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
+                first_stop = _first_le(bid_minimum, tree_size, count, open_index + 1, target)
+
+        if first_take >= 0 or first_stop >= 0:
+            if first_take >= 0 and first_stop >= 0:
+                exit_index = min(first_take, first_stop)
+            elif first_take >= 0:
+                exit_index = first_take
+            else:
+                exit_index = first_stop
+            exit_price = asks[exit_index] if open_short else bids[exit_index]
+            if open_short:
+                net_ratio = (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+            else:
+                net_ratio = (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+            balance += start_balance * net_ratio
+            closed_trades += 1
+            open_index = -1
+            signal_cursor = _lower_bound(signal_indexes, signal_cursor, exit_index + 1)
+            signal_from = exit_index + 1
+
+    while open_index < 0 and balance > 0.0 and signal_cursor < len(signal_indexes):
+        entry_index = signal_indexes[signal_cursor]
+        is_short = signal_shorts[signal_cursor]
+        signal_cursor += 1
+        entry_price = bids[entry_index] if is_short else asks[entry_index]
+        if entry_price <= 0.0:
+            continue
+
+        first_take = -1
+        first_stop = -1
+        if is_short:
+            if has_take and take_profit < start_balance:
+                target = entry_price * inverse_fee_factor * (1.0 - take_profit / start_balance)
+                first_take = _first_le(ask_minimum, tree_size, count, entry_index + 1, target)
+            if has_stop:
+                target = entry_price * inverse_fee_factor * (1.0 + stop_loss / start_balance)
+                first_stop = _first_ge(ask_maximum, tree_size, count, entry_index + 1, target)
+        else:
+            if has_take:
+                target = entry_price * fee_factor * (1.0 + take_profit / start_balance)
+                first_take = _first_ge(bid_maximum, tree_size, count, entry_index + 1, target)
+            if has_stop and stop_loss < start_balance:
+                target = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
+                first_stop = _first_le(bid_minimum, tree_size, count, entry_index + 1, target)
+
+        if first_take >= 0 and first_stop >= 0:
+            exit_index = min(first_take, first_stop)
+        elif first_take >= 0:
+            exit_index = first_take
+        elif first_stop >= 0:
+            exit_index = first_stop
+        else:
+            open_index = entry_index
+            open_short = is_short
+            break
+
+        exit_price = asks[exit_index] if is_short else bids[exit_index]
+        if is_short:
+            net_ratio = (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+        else:
+            net_ratio = (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+        balance += start_balance * net_ratio
+        closed_trades += 1
+        signal_cursor = _lower_bound(signal_indexes, signal_cursor, exit_index + 1)
+        signal_from = exit_index + 1
+
+    if open_index >= 0 and count > 0:
+        entry_price = bids[open_index] if open_short else asks[open_index]
+        exit_price = asks[count - 1] if open_short else bids[count - 1]
+        if open_short:
+            net_ratio = (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+        else:
+            net_ratio = (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+        marked_balance = balance + start_balance * net_ratio
+        return marked_balance - start_balance, closed_trades + 1, balance, max(0, signal_from), open_index, open_short
+
+    return balance - start_balance, closed_trades, balance, max(0, count - 1, signal_from), -1, False
+
+
+@njit(cache=True)
+def simulate_standard_stateful_days_numba(
+    bids: np.ndarray,
+    asks: np.ndarray,
+    bid_maximum: np.ndarray,
+    bid_minimum: np.ndarray,
+    ask_maximum: np.ndarray,
+    ask_minimum: np.ndarray,
+    tree_size: int,
+    signal_indexes: np.ndarray,
+    signal_shorts: np.ndarray,
+    start_balance: float,
+    fee_rate: float,
+    take_profit: float,
+    stop_loss: float,
+    day_quote_counts: np.ndarray,
+    closed_balance: float,
+    signal_from: int,
+    closed_trades: int,
+    open_entry_index: int,
+    open_is_short: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    day_count = len(day_quote_counts)
+    pnls = np.empty(day_count, dtype=np.float64)
+    trade_counts = np.empty(day_count, dtype=np.int64)
+    balances = np.empty(day_count, dtype=np.float64)
+    signal_positions = np.empty(day_count, dtype=np.int64)
+    closed_counts = np.empty(day_count, dtype=np.int64)
+    open_indexes = np.empty(day_count, dtype=np.int32)
+    open_shorts = np.empty(day_count, dtype=np.bool_)
+    current_balance = closed_balance
+    current_signal_from = signal_from
+    current_closed_trades = closed_trades
+    current_open_index = open_entry_index
+    current_open_short = open_is_short
+
+    for day_index in range(day_count):
+        quote_count = int(day_quote_counts[day_index])
+        signal_count = _lower_bound(signal_indexes, 0, quote_count)
+        result = simulate_standard_stateful_numba(
+            bids, asks, bid_maximum, bid_minimum, ask_maximum, ask_minimum,
+            tree_size, quote_count, signal_indexes[:signal_count], signal_shorts[:signal_count],
+            start_balance, fee_rate, take_profit, stop_loss,
+            current_balance, current_signal_from, current_closed_trades,
+            current_open_index, current_open_short,
+        )
+        pnls[day_index], trade_counts[day_index] = result[0], result[1]
+        current_balance, current_signal_from = result[2], result[3]
+        current_open_index, current_open_short = result[4], result[5]
+        current_closed_trades = result[1] - 1 if current_open_index >= 0 else result[1]
+        balances[day_index] = current_balance
+        signal_positions[day_index] = current_signal_from
+        closed_counts[day_index] = current_closed_trades
+        open_indexes[day_index] = current_open_index
+        open_shorts[day_index] = current_open_short
+
+    return pnls, trade_counts, balances, signal_positions, closed_counts, open_indexes, open_shorts
 
 
 @njit(cache=True)
@@ -192,7 +380,7 @@ def simulate_martingale_numba(
         price = bids[entry_index] if is_short else asks[entry_index]
         if price <= 0.0:
             continue
-        notional = min(base_notional, balance / (1.0 + fee_rate))
+        notional = base_notional
         if notional <= 0.0:
             break
 

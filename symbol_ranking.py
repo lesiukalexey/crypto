@@ -117,7 +117,7 @@ def main() -> int:
             raise ValueError("Unknown entry profile")
         is_immediate = entry_selection["type"] == "immediate"
         lookback = None if is_immediate else entry_selection["window"]
-        threshold = None if is_immediate else entry_selection["threshold_cents"] / 100
+        threshold = None if is_immediate else entry_selection["threshold_tenths_percent"] / 10
         entry_direction = "both" if is_immediate else entry_selection["family"]
         immediate_short = entry_selection["direction"] == "short" if is_immediate else None
 
@@ -169,13 +169,13 @@ def main() -> int:
                                 progress = int((symbol_index + symbol_completed / variants_per_symbol) * 100 / max(1, len(max_ids)))
                                 progress_reporter.update(status_path, {"status": "pending", "progress": min(99, progress), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
 
-                    for take_cents in exit_values("fixed_tp", exit_profiles):
-                        for loss_cents in exit_values("fixed_sl", exit_profiles):
-                            consider(take_cents / 100, loss_cents / 100, f"TP {take_cents / 100:.2f} / SL {loss_cents / 100:.2f}")
-                    for loss_cents in exit_values("loss", exit_profiles):
-                        consider(None, loss_cents / 100, f"SL {loss_cents / 100:.2f}")
-                    for take_cents in exit_values("profit", exit_profiles):
-                        consider(take_cents / 100, None, f"TP {take_cents / 100:.2f}")
+                    for take_tenths_percent in exit_values("fixed_tp", exit_profiles):
+                        for loss_tenths_percent in exit_values("fixed_sl", exit_profiles):
+                            consider(float(take_tenths_percent), float(loss_tenths_percent), f"TP {take_tenths_percent / 10:.1f}% / SL {loss_tenths_percent / 10:.1f}% от стартового баланса")
+                    for loss_tenths_percent in exit_values("loss", exit_profiles):
+                        consider(None, float(loss_tenths_percent), f"SL {loss_tenths_percent / 10:.1f}% от стартового баланса")
+                    for take_tenths_percent in exit_values("profit", exit_profiles):
+                        consider(float(take_tenths_percent), None, f"TP {take_tenths_percent / 10:.1f}% от стартового баланса")
             results.append({
                 "symbol": symbol,
                 "best_pnl": best_pnl if math.isfinite(best_pnl) else None,

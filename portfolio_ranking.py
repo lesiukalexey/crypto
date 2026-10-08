@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from array import array
 from concurrent.futures import ProcessPoolExecutor
 import fcntl
 import hashlib
@@ -14,9 +13,7 @@ import math
 import multiprocessing
 import os
 import shutil
-import struct
 import sys
-import tempfile
 import time
 import zlib
 from datetime import date, datetime, time as day_time, timedelta, timezone
@@ -29,20 +26,50 @@ import pymysql
 
 from app import load_config
 from database import connect_mysql
+from ranking_checkpoints import (
+    CHECKPOINT_MIN_FREE_BYTES,
+    STATE_DTYPE,
+    daily_quote_boundaries,
+    dated_state_checkpoint_path,
+    load_best_state_checkpoint,
+    quote_prefix_fingerprint,
+    write_state_checkpoint,
+)
 from strategy_ranking import (
     PriceTree,
     ProgressReporter,
     QuoteArrays,
     build_entry_specs,
     exit_values,
+    finalize_standard_checkpoints,
     make_signal_profiles,
     martingale_target_policies,
     simulate,
+    simulate_standard_checkpoint,
+    simulate_standard_checkpoint_days,
     write_json,
 )
 
 KYIV = ZoneInfo("Europe/Kyiv")
-CANDIDATE_RECORD = struct.Struct("<dII")
+PORTFOLIO_RESULT_DTYPE = np.dtype([("pnl", "<f8"), ("trade_count", "<u4")])
+
+
+def durable_result_path(
+    cache_dir: Path, args: argparse.Namespace, category: str,
+    max_ids: dict[str, int], quotes_by_symbol: dict[str, QuoteArrays],
+) -> Path:
+    quote_versions = [
+        (symbol, max_ids[symbol], quote_prefix_fingerprint(quotes_by_symbol[symbol], len(quotes_by_symbol[symbol]))
+         if symbol in quotes_by_symbol else None)
+        for symbol in sorted(max_ids)
+    ]
+    key = hashlib.sha256(json.dumps([
+        "portfolio-durable-result-v4-percent-entry-tpsl", category, args.start_day, args.end_day,
+        args.balance, args.fee_percent, args.min_trades, args.entry_config,
+        args.ranking_params, args.martingale_mode, args.martingale_timing,
+        args.martingale_attempts, quote_versions,
+    ], separators=(",", ":")).encode("utf-8")).hexdigest()
+    return cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-results-v1" / key[:2] / f"{key}.json"
 
 
 def exit_specs(profiles: dict[str, Any]) -> Iterator[tuple[str, str, float | None, float | None]]:
@@ -50,14 +77,14 @@ def exit_specs(profiles: dict[str, Any]) -> Iterator[tuple[str, str, float | Non
         for loss in exit_values("fixed_sl", profiles):
             yield (
                 f"fixed:{target}:{loss}",
-                f"TP {target / 100:.2f} / SL {loss / 100:.2f} USDT",
-                target / 100,
-                loss / 100,
+                f"TP {target / 10:.1f}% / SL {loss / 10:.1f}% от стартового баланса",
+                float(target),
+                float(loss),
             )
     for loss in exit_values("loss", profiles):
-        yield f"loss:{loss}", f"Stop Loss {loss / 100:.2f} USDT", None, loss / 100
+        yield f"loss:{loss}", f"Stop Loss {loss / 10:.1f}% от стартового баланса", None, float(loss)
     for target in exit_values("profit", profiles):
-        yield f"profit:{target}", f"Take Profit {target / 100:.2f} USDT", target / 100, None
+        yield f"profit:{target}", f"Take Profit {target / 10:.1f}% от стартового баланса", float(target), None
 
 
 def exit_count(profiles: dict[str, Any]) -> int:
@@ -89,7 +116,7 @@ def pair_result_cache_paths(
 
     scope_keys = {
         symbol: hashlib.sha256(json.dumps([
-            "portfolio-pair-simulation-v1",
+            "portfolio-pair-simulation-v5-percent-entry-tpsl",
             category,
             symbol,
             max_ids[symbol],
@@ -152,7 +179,7 @@ _PORTFOLIO_WORKER_STATE: dict[str, Any] | None = None
 _PORTFOLIO_WORKER_PRICE_TREES: dict[str, tuple[PriceTree, PriceTree]] = {}
 
 
-def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | None, str | None, bool | None], bool]) -> tuple[str, list[tuple[float, int]] | None, int, int, bool]:
+def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | None, str | None, bool | None], bool]) -> tuple[str, np.ndarray | None, int, int, int, bool, str]:
     symbol, entry_spec, include_results = task
     state = _PORTFOLIO_WORKER_STATE
     if state is None:
@@ -161,7 +188,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
     quotes_by_symbol = state["quotes_by_symbol"]
     quotes = quotes_by_symbol.get(symbol)
     if quotes is None or len(quotes) < 2:
-        return symbol, None, 0, 0, False
+        return symbol, None, 0, 0, 0, False, "unused"
 
     if immediate_short is not None:
         signals, shorts = np.array([0], dtype=np.int64), np.array([immediate_short], dtype=np.bool_)
@@ -170,51 +197,133 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
             (int(lookback), entry_family or "both", int(threshold))
         ]
     args = state["args"]
-    if len(signals) == 0 or (args.min_trades > len(signals) and args.martingale_mode == "none"):
-        return symbol, None, 0, 0, False
+    use_checkpoint = args.martingale_mode == "none"
+    if not use_checkpoint and (len(signals) == 0 or args.min_trades > len(signals)):
+        return symbol, None, 0, 0, 0, False, "unused"
+
+    cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
+    cache_path = state["pair_cache_scopes"][symbol] / cache_filename
+    checkpoint_path = dated_state_checkpoint_path(state, symbol, entry_id, args.end_day) if use_checkpoint else None
+    all_day_boundaries = daily_quote_boundaries(quotes.timestamps, args.start_day, args.end_day) if use_checkpoint else []
+    first_missing_day = next((index for index, (day, _) in enumerate(all_day_boundaries)
+        if not dated_state_checkpoint_path(state, symbol, entry_id, day).is_file()), None) if use_checkpoint else None
+    resume_until_day = (
+        all_day_boundaries[first_missing_day - 1][0]
+        if first_missing_day is not None and first_missing_day > 0
+        else (None if first_missing_day == 0 else args.end_day)
+    ) if use_checkpoint else None
+    previous_checkpoint = load_best_state_checkpoint(
+        state, symbol, entry_id, resume_until_day, quotes, len(state["exit_options"]),
+    ) if checkpoint_path is not None and resume_until_day is not None else None
+    previous_states = previous_checkpoint[0] if previous_checkpoint is not None else None
+    previous_quote_count = previous_checkpoint[1] if previous_checkpoint is not None else 0
+    previous_checkpoint_day = previous_checkpoint[2] if previous_checkpoint is not None else None
+    if use_checkpoint and first_missing_day is None and previous_states is not None and previous_quote_count == len(quotes):
+        result_pnls, result_trades = finalize_standard_checkpoints(
+            quotes, args.balance, state["fee_rate"], previous_states,
+        )
+        results = np.empty(len(result_pnls), dtype=PORTFOLIO_RESULT_DTYPE)
+        results["pnl"] = result_pnls
+        results["trade_count"] = result_trades
+        # The durable checkpoint already contains the full simulation state;
+        # no per-exit kernel call or broom-reset pair-result file is needed.
+        return symbol, results, 0, 0, len(result_pnls), True, "unused"
+
+    boundaries_to_capture = [
+        (day, count) for day, count in all_day_boundaries
+        if use_checkpoint and count > 0 and (
+            previous_checkpoint_day is None
+            or day > previous_checkpoint_day
+            or (day == previous_checkpoint_day and count > previous_quote_count)
+        )
+    ]
+    day_quote_counts_to_capture = np.fromiter((count for _, count in boundaries_to_capture), dtype=np.int64)
 
     price_trees = _PORTFOLIO_WORKER_PRICE_TREES.get(symbol)
     if price_trees is None:
         price_trees = (PriceTree(quotes.bids), PriceTree(quotes.asks))
         _PORTFOLIO_WORKER_PRICE_TREES[symbol] = price_trees
-
-    cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
-    cache_path = state["pair_cache_scopes"][symbol] / cache_filename
     cached_results = load_pair_result_cache(cache_path)
     cache_updated = False
+    checkpoint_updated = bool(boundaries_to_capture)
     hits = 0
     misses = 0
-    results: list[tuple[float, int]] | None = [] if include_results else None
-    for exit_id, _, take_profit, stop_loss, target_policy in state["exit_options"]:
+    results = np.empty(len(state["exit_options"]), dtype=PORTFOLIO_RESULT_DTYPE) if include_results else None
+    next_states: list[tuple[float, int, int, int, bool]] = []
+    states_by_day: dict[str, np.ndarray] = {
+        day: np.empty(len(state["exit_options"]), dtype=STATE_DTYPE) for day, _ in boundaries_to_capture
+    }
+    state_counts_by_day = {day: 0 for day, _ in boundaries_to_capture}
+    for exit_index, (exit_id, _, take_profit, stop_loss, target_policy) in enumerate(state["exit_options"]):
         cached_result = cached_results.get(exit_id)
+        if use_checkpoint and (previous_states is None or previous_quote_count != len(quotes)):
+            # Cached endpoint PnL cannot stand in for a state checkpoint at this
+            # endpoint. Recompute this option once so the next extension is safe.
+            cached_result = None
         if cached_result is None:
-            pnl, trade_count = simulate(
-                quotes,
-                signals,
-                shorts,
-                price_trees[0],
-                price_trees[1],
-                args.balance,
-                state["fee_rate"],
-                take_profit,
-                stop_loss,
-                args.martingale_mode,
-                args.martingale_timing,
-                args.martingale_attempts,
-                target_policy,
-            )
+            if use_checkpoint:
+                previous_state = previous_states[exit_index] if previous_states is not None else (args.balance, 0, 0, -1, False)
+                if boundaries_to_capture:
+                    state_index = len(next_states)
+                    pnl, trade_count, next_state, day_states = simulate_standard_checkpoint_days(
+                        quotes, signals, shorts, price_trees[0], price_trees[1],
+                        args.balance, state["fee_rate"], take_profit, stop_loss,
+                        day_quote_counts_to_capture, previous_state,
+                    )
+                    for index, (day, _) in enumerate(boundaries_to_capture):
+                        states_by_day[day][state_index] = day_states[index]
+                        state_counts_by_day[day] += 1
+                else:
+                    pnl, trade_count, next_state = simulate_standard_checkpoint(
+                        quotes, signals, shorts, price_trees[0], price_trees[1],
+                        args.balance, state["fee_rate"], take_profit, stop_loss, previous_state,
+                    )
+                next_states.append(next_state)
+                checkpoint_updated = True
+            else:
+                pnl, trade_count = simulate(
+                    quotes,
+                    signals,
+                    shorts,
+                    price_trees[0],
+                    price_trees[1],
+                    args.balance,
+                    state["fee_rate"],
+                    take_profit,
+                    stop_loss,
+                    args.martingale_mode,
+                    args.martingale_timing,
+                    args.martingale_attempts,
+                    target_policy,
+                )
             cached_results[exit_id] = (pnl, trade_count)
             cache_updated = True
             misses += 1
         else:
             pnl, trade_count = cached_result
+            if use_checkpoint and previous_states is not None:
+                previous_state = previous_states[exit_index]
+                next_states.append(previous_state)
+                for day, count in boundaries_to_capture:
+                    if count <= previous_quote_count:
+                        state_index = len(next_states) - 1
+                        states_by_day[day][state_index] = previous_state
+                        state_counts_by_day[day] += 1
             hits += 1
         if results is not None:
-            results.append((pnl, trade_count))
+            results[exit_index] = (pnl, trade_count)
 
     if cache_updated:
         write_pair_result_cache(cache_path, cached_results)
-    return symbol, results, hits, misses, True
+    checkpoint_status = "unused"
+    if checkpoint_updated and len(next_states) == len(state["exit_options"]):
+        checkpoint_status = "saved"
+        for day, day_states in states_by_day.items():
+            day_quote_count = next(count for current_day, count in boundaries_to_capture if current_day == day)
+            day_path = dated_state_checkpoint_path(state, symbol, entry_id, day)
+            if state_counts_by_day[day] != len(state["exit_options"]) or not write_state_checkpoint(day_path, day, quotes, day_states, day_quote_count):
+                checkpoint_status = "skipped_low_disk"
+    return symbol, results, hits, misses, 0, True, checkpoint_status
 
 
 def main() -> int:
@@ -269,7 +378,6 @@ def main() -> int:
 
     started = time.monotonic()
     progress_reporter = ProgressReporter()
-    batch_temp = None
     process_pool: ProcessPoolExecutor | None = None
     write_json(status_path, {"status": "pending", "progress": 0, "queued": False})
     try:
@@ -324,6 +432,21 @@ def main() -> int:
             args.martingale_timing,
             args.martingale_attempts,
         )
+        saved_result_path = durable_result_path(
+            args.cache_dir, args, config["category"], max_ids, quotes_by_symbol,
+        )
+        try:
+            saved_result = json.loads(saved_result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            saved_result = None
+        if isinstance(saved_result, dict) and saved_result.get("status") == "ready":
+            write_json(result_path, saved_result)
+            write_json(status_path, {
+                "status": "ready", "progress": 100,
+                "elapsed_seconds": int(time.monotonic() - started),
+                "durable_result_reuse": True,
+            })
+            return 0
         signals_by_symbol = {
             symbol: make_signal_profiles(quotes, ranking)
             for symbol, quotes in quotes_by_symbol.items()
@@ -341,6 +464,9 @@ def main() -> int:
         fee_rate = args.fee_percent / 100
         pair_cache_hits = 0
         pair_cache_misses = 0
+        checkpoint_result_reuses = 0
+        checkpoint_writes = 0
+        checkpoint_skips = 0
         global_top: list[tuple[float, int, str, dict[str, Any]]] = []
         exit_options = [
             (
@@ -353,10 +479,16 @@ def main() -> int:
             for base_exit_id, base_exit_label, take_profit, stop_loss in exit_specs(exit_profiles)
             for target_policy, policy_label in martingale_target_policies(args.martingale_mode, stop_loss)
         ]
+        exit_lexical_ranks = np.empty(len(exit_options), dtype=np.int32)
+        for lexical_rank, exit_index in enumerate(sorted(range(len(exit_options)), key=lambda index: exit_options[index][0])):
+            exit_lexical_ranks[exit_index] = lexical_rank
+        exit_index_by_id = {option[0]: index for index, option in enumerate(exit_options)}
         _PORTFOLIO_WORKER_STATE = {
             "quotes_by_symbol": quotes_by_symbol,
             "signals_by_symbol": signals_by_symbol,
             "pair_cache_scopes": pair_cache_scopes,
+            "checkpoint_root": args.cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-state-v1",
+            "category": config["category"],
             "exit_options": exit_options,
             "args": args,
             "fee_rate": fee_rate,
@@ -367,21 +499,15 @@ def main() -> int:
                 max_workers=worker_count,
                 mp_context=multiprocessing.get_context("fork"),
             )
-        batch_temp = tempfile.TemporaryDirectory(prefix=f"portfolio-ranking-{args.cache_key[:12]}-", dir=args.cache_dir)
-        batch_directory = Path(batch_temp.name)
-        candidate_batches: list[tuple[str, Path]] = []
         best_by_symbol: dict[str, dict[str, Any]] = {}
         selected_entry_best: dict[str, dict[str, Any]] = {}
 
         for entry_batch_index, (entry_id, entry_label, lookback, threshold, entry_family, immediate_short) in enumerate(specs):
-            batch_average_pnls = array("d")
-            batch_eligible_counts = array("I")
-            batch_exit_indexes = array("I")
-            batch_aggregate_pnls = array("d", [0.0]) * len(exit_options)
-            batch_eligible_symbols = array("I", [0]) * len(exit_options)
-            batch_profitable_symbols = array("I", [0]) * len(exit_options)
+            batch_aggregate_pnls = np.zeros(len(exit_options), dtype=np.float64)
+            batch_eligible_symbols = np.zeros(len(exit_options), dtype=np.uint32)
+            batch_profitable_symbols = np.zeros(len(exit_options), dtype=np.uint32)
             ticker_tasks = [
-                (symbol, (entry_id, entry_label, lookback, threshold, entry_family, immediate_short), process_pool is None)
+                (symbol, (entry_id, entry_label, lookback, threshold, entry_family, immediate_short), True)
                 for symbol, quotes in quotes_by_symbol.items()
                 if len(quotes) >= 2
             ]
@@ -391,49 +517,69 @@ def main() -> int:
                 else (simulate_symbol_entry(task) for task in ticker_tasks)
             )
             active_symbols = 0
-            for symbol, pair_results, hits, misses, active in simulation_results:
+            ticker_results: dict[str, np.ndarray] = {}
+            for symbol, pair_results, hits, misses, checkpoint_reuses, active, checkpoint_status in simulation_results:
                 pair_cache_hits += hits
                 pair_cache_misses += misses
+                checkpoint_result_reuses += checkpoint_reuses
+                checkpoint_writes += checkpoint_status == "saved"
+                checkpoint_skips += checkpoint_status == "skipped_low_disk"
                 if not active:
                     continue
                 active_symbols += 1
-                cached_results = None
                 if pair_results is None:
                     cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
                     cached_results = load_pair_result_cache(pair_cache_scopes[symbol] / cache_filename)
-                for exit_index, (exit_id, exit_label, _, _, _) in enumerate(exit_options):
-                    pnl, trade_count = pair_results[exit_index] if pair_results is not None else cached_results[exit_id]
-                    if trade_count < args.min_trades:
-                        continue
-                    batch_aggregate_pnls[exit_index] += pnl
-                    batch_eligible_symbols[exit_index] += 1
-                    if pnl > 0:
-                        batch_profitable_symbols[exit_index] += 1
-                    ticker_candidate = {
-                        "symbol": symbol,
-                        "entry_id": entry_id,
-                        "entry_label": entry_label,
-                        "exit_id": exit_id,
-                        "exit_label": exit_label,
-                        "pnl": pnl,
-                        "trade_count": trade_count,
-                    }
-                    previous = best_by_symbol.get(symbol)
-                    if previous is None or (pnl, entry_id, exit_id) > (
-                        previous["pnl"], previous["entry_id"], previous["exit_id"]
+                    pair_results = np.empty(len(exit_options), dtype=PORTFOLIO_RESULT_DTYPE)
+                    pair_results["pnl"] = np.fromiter(
+                        (cached_results[option[0]][0] for option in exit_options),
+                        dtype=np.float64, count=len(exit_options),
+                    )
+                    pair_results["trade_count"] = np.fromiter(
+                        (cached_results[option[0]][1] for option in exit_options),
+                        dtype=np.uint32, count=len(exit_options),
+                    )
+                ticker_results[symbol] = pair_results
+
+            for symbol, pair_results in ticker_results.items():
+                pnls = pair_results["pnl"]
+                trade_counts = pair_results["trade_count"]
+                eligible = trade_counts >= args.min_trades
+                batch_aggregate_pnls += np.where(eligible, pnls, 0.0)
+                batch_eligible_symbols += eligible
+                batch_profitable_symbols += eligible & (pnls > 0.0)
+                if not np.any(eligible):
+                    continue
+                best_pnl = float(np.max(pnls[eligible]))
+                tied_indexes = np.flatnonzero(eligible & (pnls == best_pnl))
+                best_exit_index = int(tied_indexes[np.argmax(exit_lexical_ranks[tied_indexes])])
+                exit_id, exit_label = exit_options[best_exit_index][:2]
+                trade_count = int(trade_counts[best_exit_index])
+                ticker_candidate = {
+                    "symbol": symbol,
+                    "entry_id": entry_id,
+                    "entry_label": entry_label,
+                    "exit_id": exit_id,
+                    "exit_label": exit_label,
+                    "pnl": best_pnl,
+                    "trade_count": trade_count,
+                }
+                previous = best_by_symbol.get(symbol)
+                if previous is None or (best_pnl, entry_id, exit_id) > (
+                    previous["pnl"], previous["entry_id"], previous["exit_id"]
+                ):
+                    best_by_symbol[symbol] = ticker_candidate
+                if entry_id == args.entry_config:
+                    previous_selected = selected_entry_best.get(symbol)
+                    if previous_selected is None or (best_pnl, exit_id) > (
+                        previous_selected["best_pnl"], previous_selected["best_exit_id"]
                     ):
-                        best_by_symbol[symbol] = ticker_candidate
-                    if entry_id == args.entry_config:
-                        previous_selected = selected_entry_best.get(symbol)
-                        if previous_selected is None or (pnl, exit_id) > (
-                            previous_selected["best_pnl"], previous_selected["best_exit_id"]
-                        ):
-                            selected_entry_best[symbol] = {
-                                "symbol": symbol,
-                                "best_pnl": pnl,
-                                "best_exit": exit_label,
-                                "best_exit_id": exit_id,
-                            }
+                        selected_entry_best[symbol] = {
+                            "symbol": symbol,
+                            "best_pnl": best_pnl,
+                            "best_exit": exit_label,
+                            "best_exit_id": exit_id,
+                        }
 
             if not active_symbols:
                 # No ticker can meet the trade minimum for this entry. Count
@@ -446,69 +592,50 @@ def main() -> int:
                     "entry_profile": entry_label,
                     "completed_entry_profiles": entry_batch_index + 1,
                     "total_entry_profiles": len(specs),
+                    "checkpoint_result_reuses": checkpoint_result_reuses,
                 })
                 continue
 
-            entry_winners_by_exit: dict[str, list[dict[str, Any]]] = {}
+            average_all_symbols = batch_aggregate_pnls / universe_size
             for winner in best_by_symbol.values():
                 if winner["entry_id"] == entry_id:
-                    entry_winners_by_exit.setdefault(winner["exit_id"], []).append(winner)
+                    exit_index = exit_index_by_id[winner["exit_id"]]
+                    winner["market_average_pnl"] = float(average_all_symbols[exit_index])
+                    winner["market_eligible_symbols"] = int(batch_eligible_symbols[exit_index])
+                    winner["market_profitable_symbols"] = int(batch_profitable_symbols[exit_index])
 
-            for exit_index, (exit_id, exit_label, _, _, _) in enumerate(exit_options):
-                eligible_symbols = batch_eligible_symbols[exit_index]
-                if eligible_symbols:
-                    aggregate_pnl = batch_aggregate_pnls[exit_index]
-                    profitable_symbols = batch_profitable_symbols[exit_index]
-                    average_all_symbols = aggregate_pnl / universe_size
-                    for winner in entry_winners_by_exit.get(exit_id, []):
-                        winner["market_average_pnl"] = average_all_symbols
-                        winner["market_eligible_symbols"] = eligible_symbols
-                        winner["market_profitable_symbols"] = profitable_symbols
+            eligible_indexes = np.flatnonzero(batch_eligible_symbols)
+            if eligible_indexes.size:
+                batch_order = np.lexsort((
+                    exit_lexical_ranks[eligible_indexes],
+                    batch_eligible_symbols[eligible_indexes],
+                    average_all_symbols[eligible_indexes],
+                ))
+                for ranked_index in eligible_indexes[batch_order[-5:][::-1]]:
+                    exit_index = int(ranked_index)
+                    exit_id, exit_label = exit_options[exit_index][:2]
+                    eligible_symbols = int(batch_eligible_symbols[exit_index])
+                    aggregate_pnl = float(batch_aggregate_pnls[exit_index])
+                    average_pnl = float(average_all_symbols[exit_index])
                     candidate = {
                         "entry_id": entry_id,
                         "entry_label": entry_label,
                         "exit_id": exit_id,
                         "exit_label": exit_label,
-                        "average_pnl": average_all_symbols,
+                        "average_pnl": average_pnl,
                         "total_pnl": aggregate_pnl,
                         "eligible_symbols": eligible_symbols,
-                        "profitable_symbols": profitable_symbols,
+                        "profitable_symbols": int(batch_profitable_symbols[exit_index]),
                     }
-                    batch_average_pnls.append(average_all_symbols)
-                    batch_eligible_counts.append(eligible_symbols)
-                    batch_exit_indexes.append(exit_index)
                     combination_key = f"{entry_id}|{exit_id}"
-                    heap_item = (average_all_symbols, eligible_symbols, combination_key, candidate)
+                    heap_item = (average_pnl, eligible_symbols, combination_key, candidate)
                     if len(global_top) < 5:
                         heapq.heappush(global_top, heap_item)
                     elif heap_item[:3] > global_top[0][:3]:
                         heapq.heapreplace(global_top, heap_item)
 
-                completed += 1
-                if completed % 5000 == 0:
-                    progress_reporter.update(status_path, {
-                        "status": "pending",
-                        "progress": min(99, int(completed * 100 / total)),
-                        "elapsed_seconds": int(time.monotonic() - started),
-                        "entry_profile": entry_label,
-                        "completed_entry_profiles": entry_batch_index,
-                        "total_entry_profiles": len(specs),
-                    })
+            completed += candidate_count
 
-            if batch_average_pnls:
-                batch_order = list(range(len(batch_average_pnls)))
-                batch_order.sort(key=lambda index: exit_options[batch_exit_indexes[index]][0])
-                batch_order.sort(key=batch_eligible_counts.__getitem__, reverse=True)
-                batch_order.sort(key=batch_average_pnls.__getitem__, reverse=True)
-                batch_path = batch_directory / f"entry-{entry_batch_index:04d}.bin"
-                with batch_path.open("wb") as batch_file:
-                    for index in batch_order:
-                        batch_file.write(CANDIDATE_RECORD.pack(
-                            batch_average_pnls[index],
-                            batch_eligible_counts[index],
-                            batch_exit_indexes[index],
-                        ))
-                candidate_batches.append((entry_id, batch_path))
             progress_reporter.update(status_path, {
                 "status": "pending",
                 "progress": min(99, int(completed * 100 / total)),
@@ -516,51 +643,15 @@ def main() -> int:
                 "entry_profile": entry_label,
                 "completed_entry_profiles": entry_batch_index + 1,
                 "total_entry_profiles": len(specs),
+                "checkpoint_result_reuses": checkpoint_result_reuses,
+                "checkpoint_writes": checkpoint_writes,
+                "checkpoint_skips_low_disk": checkpoint_skips,
             })
 
         if process_pool is not None:
             process_pool.shutdown(wait=True)
             process_pool = None
         ranked_ticker_leaders = sorted(best_by_symbol.values(), key=lambda item: (-item["pnl"], item["symbol"]))
-        for rank, leader in enumerate(ranked_ticker_leaders, start=1):
-            leader["rank"] = rank
-        winning_combinations = {
-            f"{leader['entry_id']}|{leader['exit_id']}"
-            for leader in ranked_ticker_leaders
-        }
-        global_rank_by_combination: dict[str, int] = {}
-        batch_streams = []
-        merge_heap = []
-        try:
-            for batch_index, (entry_id, batch_path) in enumerate(candidate_batches):
-                batch_stream = batch_path.open("rb")
-                batch_streams.append(batch_stream)
-                record = batch_stream.read(CANDIDATE_RECORD.size)
-                if record:
-                    average_pnl, eligible_count, exit_index = CANDIDATE_RECORD.unpack(record)
-                    combination_key = f"{entry_id}|{exit_options[exit_index][0]}"
-                    heapq.heappush(merge_heap, (-average_pnl, -eligible_count, combination_key, batch_index, exit_index))
-
-            global_rank = 0
-            while merge_heap:
-                _, _, combination_key, batch_index, _ = heapq.heappop(merge_heap)
-                global_rank += 1
-                if combination_key in winning_combinations:
-                    global_rank_by_combination[combination_key] = global_rank
-                record = batch_streams[batch_index].read(CANDIDATE_RECORD.size)
-                if record:
-                    if len(record) != CANDIDATE_RECORD.size:
-                        raise OSError("Incomplete overall-ranking score batch")
-                    average_pnl, eligible_count, exit_index = CANDIDATE_RECORD.unpack(record)
-                    entry_id = candidate_batches[batch_index][0]
-                    next_key = f"{entry_id}|{exit_options[exit_index][0]}"
-                    heapq.heappush(merge_heap, (-average_pnl, -eligible_count, next_key, batch_index, exit_index))
-        finally:
-            for batch_stream in batch_streams:
-                batch_stream.close()
-        for leader in ranked_ticker_leaders:
-            combination_key = f"{leader['entry_id']}|{leader['exit_id']}"
-            leader["global_rank"] = global_rank_by_combination.get(combination_key)
         ticker_leaders = ranked_ticker_leaders + [
             {
                 "symbol": symbol,
@@ -570,8 +661,6 @@ def main() -> int:
                 "exit_label": None,
                 "pnl": None,
                 "trade_count": 0,
-                "rank": None,
-                "global_rank": None,
             }
             for symbol in sorted(max_ids)
             if symbol not in best_by_symbol
@@ -586,30 +675,39 @@ def main() -> int:
             })
         symbols.sort(key=lambda item: (item["best_pnl"] is None, -(item["best_pnl"] or 0), item["symbol"]))
         sorted_global = [item[3] for item in sorted(global_top, key=lambda item: (-item[0], -item[1], item[2]))]
-        batch_temp.cleanup()
-        batch_temp = None
-        write_json(result_path, {
+        result_payload = {
             "status": "ready",
             "global_top": sorted_global,
             "ticker_leaders": ticker_leaders,
             "symbols": symbols,
             "universe_size": universe_size,
             "min_trades": args.min_trades,
-        })
+        }
+        durable_result_saved = False
+        try:
+            saved_result_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if shutil.disk_usage(saved_result_path.parent).free >= CHECKPOINT_MIN_FREE_BYTES:
+                write_json(saved_result_path, result_payload)
+                durable_result_saved = True
+        except OSError:
+            pass
+        write_json(result_path, result_payload)
         write_json(status_path, {
             "status": "ready",
             "progress": 100,
             "elapsed_seconds": int(time.monotonic() - started),
             "pair_cache_hits": pair_cache_hits,
             "pair_cache_misses": pair_cache_misses,
+            "checkpoint_result_reuses": checkpoint_result_reuses,
+            "checkpoint_writes": checkpoint_writes,
+            "checkpoint_skips_low_disk": checkpoint_skips,
+            "durable_result_saved": durable_result_saved,
             "workers": worker_count,
         })
         return 0
     except Exception as exc:
         if process_pool is not None:
             process_pool.shutdown(wait=True, cancel_futures=True)
-        if batch_temp is not None:
-            batch_temp.cleanup()
         write_json(status_path, {"status": "error", "progress": 0, "message": "Не удалось рассчитать общий рейтинг комбинаций."})
         print(f"portfolio ranking failed: {exc}", file=sys.stderr)
         return 1

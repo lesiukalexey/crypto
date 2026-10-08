@@ -93,7 +93,7 @@ try {
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $key = hash('sha256', json_encode([
-        'portfolio-ranking-v10-pair-result-cache', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
+        'portfolio-ranking-v14-percent-entry-tpsl', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
         $minTrades, $entryConfig, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';

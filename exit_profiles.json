@@ -1,5 +1,5 @@
 {
-  "fixed": {"min_cents": 1, "max_cents": 500, "step_cents": 1},
-  "loss": {"min_cents": 1, "max_cents": 300, "step_cents": 1},
-  "profit": {"min_cents": 1, "max_cents": 300, "step_cents": 1}
+  "fixed": {"min_tenths_percent": 1, "max_tenths_percent": 500, "step_tenths_percent": 1},
+  "loss": {"min_tenths_percent": 1, "max_tenths_percent": 300, "step_tenths_percent": 1},
+  "profit": {"min_tenths_percent": 1, "max_tenths_percent": 300, "step_tenths_percent": 1}
 }
