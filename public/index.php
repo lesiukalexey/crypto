@@ -1235,19 +1235,13 @@ async function loadPortfolioRanking() {
             let exitCell = item.exit_label;
             if (item.entry_id && item.exit_id) {
                 const detailParams = new URLSearchParams(params);
-                detailParams.set('combination_detail', '1');
-                detailParams.set('symbol', item.symbol);
+                detailParams.delete('symbol');
+                detailParams.delete('symbol_sort');
                 detailParams.set('entry_config', item.entry_id);
                 detailParams.set('exit_config', item.exit_id);
-                detailParams.set('detail_entry_label', item.entry_label || '');
-                detailParams.set('detail_exit_label', item.exit_label || '');
-                detailParams.set('detail_rank', item.global_rank ?? '');
-                detailParams.set('detail_ticker_pnl', item.pnl ?? '');
-                detailParams.set('detail_market_average', item.market_average_pnl ?? '');
-                detailParams.set('detail_support', item.market_eligible_symbols ?? '');
-                detailParams.set('detail_universe_size', ranking.universe_size ?? '');
-                detailParams.set('detail_trade_count', item.trade_count ?? '');
-                const href = location.pathname + '?' + detailParams.toString();
+                detailParams.set('entry_label', item.entry_label || '');
+                detailParams.set('exit_label', item.exit_label || '');
+                const href = 'portfolio-combination.php?' + detailParams.toString();
                 entryCell = {text: item.entry_label || '—', href};
                 exitCell = {text: item.exit_label || '—', href};
             }
