@@ -6,14 +6,17 @@ from __future__ import annotations
 import argparse
 from array import array
 import fcntl
+import hashlib
 import heapq
 import json
 import math
 import os
+import shutil
 import struct
 import sys
 import tempfile
 import time
+import zlib
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -58,9 +61,94 @@ def exit_count(profiles: dict[str, Any]) -> int:
     return len(exit_values("fixed_tp", profiles)) * len(exit_values("fixed_sl", profiles)) + len(exit_values("loss", profiles)) + len(exit_values("profit", profiles))
 
 
+def pair_result_cache_paths(
+    cache_dir: Path,
+    cache_generation: str,
+    category: str,
+    max_ids: dict[str, int],
+    start_day: str,
+    end_day: str,
+    balance: float,
+    fee_percent: float,
+    min_trades: int,
+    martingale_mode: str,
+    martingale_timing: str,
+    martingale_attempts: int,
+) -> tuple[Path, dict[str, Path]]:
+    cache_root = cache_dir / "portfolio-pair-results"
+    cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    generation_key = hashlib.sha256(cache_generation.encode("utf-8")).hexdigest()
+    generation_dir = cache_root / generation_key
+    generation_dir.mkdir(mode=0o700, exist_ok=True)
+    for old_generation in cache_root.iterdir():
+        if old_generation != generation_dir and old_generation.is_dir():
+            shutil.rmtree(old_generation, ignore_errors=True)
+
+    scope_keys = {
+        symbol: hashlib.sha256(json.dumps([
+            "portfolio-pair-simulation-v1",
+            category,
+            symbol,
+            max_ids[symbol],
+            start_day,
+            end_day,
+            balance,
+            fee_percent,
+            min_trades,
+            martingale_mode,
+            martingale_timing,
+            martingale_attempts,
+        ], separators=(",", ":")).encode("utf-8")).hexdigest()
+        for symbol in max_ids
+    }
+    active_scopes = set(scope_keys.values())
+    for old_scope in generation_dir.iterdir():
+        if old_scope.is_dir() and old_scope.name not in active_scopes:
+            shutil.rmtree(old_scope, ignore_errors=True)
+    return generation_dir, {
+        symbol: generation_dir / scope_key
+        for symbol, scope_key in scope_keys.items()
+    }
+
+
+def load_pair_result_cache(path: Path) -> dict[str, tuple[float, int]]:
+    try:
+        payload = json.loads(zlib.decompress(path.read_bytes()))
+    except (OSError, UnicodeDecodeError, zlib.error, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    results: dict[str, tuple[float, int]] = {}
+    for exit_id, result in payload.items():
+        if not isinstance(exit_id, str) or not isinstance(result, list) or len(result) != 2:
+            continue
+        try:
+            pnl = float(result[0])
+            trade_count = int(result[1])
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(pnl) and trade_count >= 0:
+            results[exit_id] = (pnl, trade_count)
+    return results
+
+
+def write_pair_result_cache(path: Path, results: dict[str, tuple[float, int]]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = json.dumps(
+        {exit_id: [pnl, trade_count] for exit_id, (pnl, trade_count) in results.items()},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    compressed = zlib.compress(payload, level=1)
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary_path.write_bytes(compressed)
+    temporary_path.replace(path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache-key", required=True)
+    parser.add_argument("--cache-generation", default="benchmark")
     parser.add_argument("--start-day", required=True)
     parser.add_argument("--end-day", required=True)
     parser.add_argument("--balance", required=True, type=float)
@@ -147,6 +235,20 @@ def main() -> int:
 
         quotes_by_symbol = {symbol: QuoteArrays.from_rows(rows) for symbol, rows in rows_by_symbol.items() if rows}
         del raw_rows, rows_by_symbol
+        _, pair_cache_scopes = pair_result_cache_paths(
+            args.cache_dir,
+            args.cache_generation,
+            config["category"],
+            max_ids,
+            args.start_day,
+            args.end_day,
+            args.balance,
+            args.fee_percent,
+            args.min_trades,
+            args.martingale_mode,
+            args.martingale_timing,
+            args.martingale_attempts,
+        )
         signals_by_symbol = {
             symbol: make_signal_profiles(quotes, ranking)
             for symbol, quotes in quotes_by_symbol.items()
@@ -163,6 +265,8 @@ def main() -> int:
         completed = 0
         universe_size = len(max_ids)
         fee_rate = args.fee_percent / 100
+        pair_cache_hits = 0
+        pair_cache_misses = 0
         global_top: list[tuple[float, int, str, dict[str, Any]]] = []
         exit_options = [
             (
@@ -185,6 +289,9 @@ def main() -> int:
             batch_average_pnls = array("d")
             batch_eligible_counts = array("I")
             batch_exit_indexes = array("I")
+            batch_aggregate_pnls = array("d", [0.0]) * len(exit_options)
+            batch_eligible_symbols = array("I", [0]) * len(exit_options)
+            batch_profitable_symbols = array("I", [0]) * len(exit_options)
             contexts: dict[str, tuple[QuoteArrays, list[int], list[bool], PriceTree, PriceTree]] = {}
             for symbol, quotes in quotes_by_symbol.items():
                 if len(quotes) < 2:
@@ -226,33 +333,42 @@ def main() -> int:
                 })
                 continue
 
-            for exit_index, (exit_id, exit_label, take_profit, stop_loss, target_policy) in enumerate(exit_options):
-                aggregate_pnl = 0.0
-                eligible_symbols = 0
-                profitable_symbols = 0
-                local_winners_for_candidate: list[tuple[str, dict[str, Any]]] = []
-                for symbol, (quotes, signals, shorts, bid_tree, ask_tree) in contexts.items():
-                    pnl, trade_count = simulate(
-                        quotes,
-                        signals,
-                        shorts,
-                        bid_tree,
-                        ask_tree,
-                        args.balance,
-                        fee_rate,
-                        take_profit,
-                        stop_loss,
-                        args.martingale_mode,
-                        args.martingale_timing,
-                        args.martingale_attempts,
-                        target_policy,
-                    )
+            entry_cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
+            for symbol, (quotes, signals, shorts, bid_tree, ask_tree) in contexts.items():
+                cache_path = pair_cache_scopes[symbol] / entry_cache_filename
+                cached_results = load_pair_result_cache(cache_path)
+                cache_updated = False
+                for exit_index, (exit_id, exit_label, take_profit, stop_loss, target_policy) in enumerate(exit_options):
+                    cached_result = cached_results.get(exit_id)
+                    if cached_result is None:
+                        pnl, trade_count = simulate(
+                            quotes,
+                            signals,
+                            shorts,
+                            bid_tree,
+                            ask_tree,
+                            args.balance,
+                            fee_rate,
+                            take_profit,
+                            stop_loss,
+                            args.martingale_mode,
+                            args.martingale_timing,
+                            args.martingale_attempts,
+                            target_policy,
+                        )
+                        cached_results[exit_id] = (pnl, trade_count)
+                        cache_updated = True
+                        pair_cache_misses += 1
+                    else:
+                        pnl, trade_count = cached_result
+                        pair_cache_hits += 1
+
                     if trade_count < args.min_trades:
                         continue
-                    eligible_symbols += 1
-                    aggregate_pnl += pnl
+                    batch_aggregate_pnls[exit_index] += pnl
+                    batch_eligible_symbols[exit_index] += 1
                     if pnl > 0:
-                        profitable_symbols += 1
+                        batch_profitable_symbols[exit_index] += 1
                     ticker_candidate = {
                         "symbol": symbol,
                         "entry_id": entry_id,
@@ -267,7 +383,6 @@ def main() -> int:
                         previous["pnl"], previous["entry_id"], previous["exit_id"]
                     ):
                         best_by_symbol[symbol] = ticker_candidate
-                        local_winners_for_candidate.append((symbol, ticker_candidate))
                     if entry_id == args.entry_config:
                         previous_selected = selected_entry_best.get(symbol)
                         if previous_selected is None or (pnl, exit_id) > (
@@ -279,14 +394,24 @@ def main() -> int:
                                 "best_exit": exit_label,
                                 "best_exit_id": exit_id,
                             }
+                if cache_updated:
+                    write_pair_result_cache(cache_path, cached_results)
 
+            entry_winners_by_exit: dict[str, list[dict[str, Any]]] = {}
+            for winner in best_by_symbol.values():
+                if winner["entry_id"] == entry_id:
+                    entry_winners_by_exit.setdefault(winner["exit_id"], []).append(winner)
+
+            for exit_index, (exit_id, exit_label, _, _, _) in enumerate(exit_options):
+                eligible_symbols = batch_eligible_symbols[exit_index]
                 if eligible_symbols:
+                    aggregate_pnl = batch_aggregate_pnls[exit_index]
+                    profitable_symbols = batch_profitable_symbols[exit_index]
                     average_all_symbols = aggregate_pnl / universe_size
-                    for symbol, winner in local_winners_for_candidate:
-                        if best_by_symbol.get(symbol) is winner:
-                            winner["market_average_pnl"] = average_all_symbols
-                            winner["market_eligible_symbols"] = eligible_symbols
-                            winner["market_profitable_symbols"] = profitable_symbols
+                    for winner in entry_winners_by_exit.get(exit_id, []):
+                        winner["market_average_pnl"] = average_all_symbols
+                        winner["market_eligible_symbols"] = eligible_symbols
+                        winner["market_profitable_symbols"] = profitable_symbols
                     candidate = {
                         "entry_id": entry_id,
                         "entry_label": entry_label,
@@ -416,7 +541,13 @@ def main() -> int:
             "universe_size": universe_size,
             "min_trades": args.min_trades,
         })
-        write_json(status_path, {"status": "ready", "progress": 100, "elapsed_seconds": int(time.monotonic() - started)})
+        write_json(status_path, {
+            "status": "ready",
+            "progress": 100,
+            "elapsed_seconds": int(time.monotonic() - started),
+            "pair_cache_hits": pair_cache_hits,
+            "pair_cache_misses": pair_cache_misses,
+        })
         return 0
     except Exception as exc:
         if batch_temp is not None:

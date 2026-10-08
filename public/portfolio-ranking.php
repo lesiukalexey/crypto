@@ -93,7 +93,7 @@ try {
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $key = hash('sha256', json_encode([
-        'portfolio-ranking-v9-martingale-first-snapshot-per-generation', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
+        'portfolio-ranking-v10-pair-result-cache', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
         $minTrades, $entryConfig, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';
@@ -129,6 +129,7 @@ try {
             $command = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/launch-ranking-worker.py')
                 . ' ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/portfolio_ranking.py')
                 . ' --cache-key ' . escapeshellarg($key)
+                . ' --cache-generation ' . escapeshellarg($cacheGeneration)
                 . ' --start-day ' . escapeshellarg($startValue)
                 . ' --end-day ' . escapeshellarg($endValue)
                 . ' --balance ' . escapeshellarg($balance)
