@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
+require_once __DIR__ . '/ranking-parameters.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -16,6 +17,7 @@ try {
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $entryConfigData = json_decode((string) file_get_contents($root . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
     $exitConfigData = json_decode((string) file_get_contents($root . '/exit_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
+    $ranking = rankingParameters($_GET, $entryConfigData, $exitConfigData)['worker'];
     $timezone = new DateTimeZone('Europe/Kyiv');
     $today = new DateTimeImmutable('today', $timezone);
     $startValue = (string) ($_GET['start_day'] ?? '2026-06-10');
@@ -28,8 +30,8 @@ try {
     $isImmediate = preg_match('/^immediate:(short|long)$/', $entryConfig, $matches) === 1
         && in_array($matches[1], $entryConfigData['immediate_directions'] ?? [], true);
     $isMomentum = preg_match('/^entry:(\d+):(\d+)$/', $entryConfig, $matches) === 1
-        && in_array((int) $matches[1], array_map('intval', $entryConfigData['snapshot_windows'] ?? []), true)
-        && in_array((int) $matches[2], array_map('intval', $entryConfigData['thresholds_cents'] ?? []), true);
+        && in_array((int) $matches[1], $ranking['entry_windows'], true)
+        && in_array((int) $matches[2], $ranking['entry_thresholds_cents'], true);
     if (!$isImmediate && !$isMomentum) respond(['status' => 'error', 'message' => 'Неизвестный порог входа.'], 400);
     if (!preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $balance) || (float) $balance <= 0 || (float) $balance > 1000000000) {
         respond(['status' => 'error', 'message' => 'Некорректный стартовый баланс.'], 400);
@@ -87,8 +89,8 @@ try {
     }
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $key = hash('sha256', json_encode([
-        'portfolio-ranking-v2', $config['category'], $startValue, $endValue, $balance, $fee,
-        $minTrades, $entryConfig, $maxIds, $entryConfigData, $exitConfigData,
+        'portfolio-ranking-v3-custom-ranges', $config['category'], $startValue, $endValue, $balance, $fee,
+        $minTrades, $entryConfig, $maxIds, $ranking,
     ], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';
     $statusPath = $cacheDir . '/portfolio-' . $key . '.status.json';
@@ -130,6 +132,7 @@ try {
                 . ' --entry-config ' . escapeshellarg($entryConfig)
                 . ' --max-ids ' . escapeshellarg($snapshotJson)
                 . ' --cache-dir ' . escapeshellarg($cacheDir)
+                . ' --ranking-params ' . escapeshellarg(json_encode($ranking, JSON_THROW_ON_ERROR))
                 . ' >> ' . escapeshellarg($cacheDir . '/portfolio-' . $key . '.log') . ' 2>&1 < /dev/null &';
             exec($command);
             flock($lock, LOCK_UN);
@@ -138,6 +141,8 @@ try {
         $status = ['status' => 'pending', 'progress' => 0];
     }
     respond((is_array($status) ? $status : ['status' => 'pending', 'progress' => 0]) + $snapshotPayload);
+} catch (InvalidArgumentException $error) {
+    respond(['status' => 'error', 'message' => $error->getMessage()], 400);
 } catch (Throwable $error) {
     respond(['status' => 'error', 'message' => 'Не удалось рассчитать общий рейтинг комбинаций.'], 503);
 }

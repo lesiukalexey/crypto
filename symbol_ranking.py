@@ -40,7 +40,10 @@ def main() -> int:
     parser.add_argument("--entry-config", required=True)
     parser.add_argument("--max-ids", required=True)
     parser.add_argument("--cache-dir", required=True, type=Path)
+    parser.add_argument("--ranking-params", required=True)
     args = parser.parse_args()
+    ranking = json.loads(args.ranking_params)
+    exit_profiles = ranking["exit_profiles"]
 
     status_path = args.cache_dir / f"symbols-{args.cache_key}.status.json"
     result_path = args.cache_dir / f"symbols-{args.cache_key}.json"
@@ -93,16 +96,15 @@ def main() -> int:
             if len(parts) != 3 or parts[0] != "entry":
                 raise ValueError("Invalid entry configuration")
             lookback, threshold_cents = int(parts[1]), int(parts[2])
-            entry_config = json.loads(Path(__file__).with_name("entry_profiles.json").read_text(encoding="utf-8"))
-            if lookback not in entry_config["snapshot_windows"] or threshold_cents not in entry_config["thresholds_cents"]:
+            if lookback not in ranking["entry_windows"] or threshold_cents not in ranking["entry_thresholds_cents"]:
                 raise ValueError("Unknown entry profile")
             threshold = threshold_cents / 100
             immediate_short = None
 
         exit_counts = {
-            "fixed": len(exit_values("fixed")) ** 2,
-            "loss": len(exit_values("loss")),
-            "profit": len(exit_values("profit")),
+            "fixed": len(exit_values("fixed_tp", exit_profiles)) * len(exit_values("fixed_sl", exit_profiles)),
+            "loss": len(exit_values("loss", exit_profiles)),
+            "profit": len(exit_values("profit", exit_profiles)),
         }
         variants_per_symbol = sum(exit_counts.values())
         started = time.monotonic()
@@ -130,15 +132,15 @@ def main() -> int:
                             best_pnl, best_label = pnl, label
                         symbol_completed += 1
 
-                    for take_cents in exit_values("fixed"):
-                        for loss_cents in exit_values("fixed"):
+                    for take_cents in exit_values("fixed_tp", exit_profiles):
+                        for loss_cents in exit_values("fixed_sl", exit_profiles):
                             consider(take_cents / 100, loss_cents / 100, f"TP {take_cents / 100:.2f} / SL {loss_cents / 100:.2f}")
                             if symbol_completed % 1000 == 0:
                                 progress = int((symbol_index + symbol_completed / variants_per_symbol) * 100 / max(1, len(max_ids)))
                                 write_json(status_path, {"status": "pending", "progress": min(99, progress), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
-                    for loss_cents in exit_values("loss"):
+                    for loss_cents in exit_values("loss", exit_profiles):
                         consider(None, loss_cents / 100, f"SL {loss_cents / 100:.2f}")
-                    for take_cents in exit_values("profit"):
+                    for take_cents in exit_values("profit", exit_profiles):
                         consider(take_cents / 100, None, f"TP {take_cents / 100:.2f}")
             results.append({
                 "symbol": symbol,

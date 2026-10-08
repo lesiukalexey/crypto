@@ -31,9 +31,12 @@ IMMEDIATE_DIRECTIONS = tuple(str(value) for value in ENTRY_PROFILE_CONFIG.get("i
 EXIT_PROFILE_CONFIG = json.loads(Path(__file__).with_name("exit_profiles.json").read_text(encoding="utf-8"))
 
 
-def exit_values(family: str) -> range:
-    profile = EXIT_PROFILE_CONFIG[family]
-    return range(int(profile["min_cents"]), int(profile["max_cents"]) + 1, int(profile["step_cents"]))
+def exit_values(family: str, profiles: dict[str, Any] | None = None) -> range:
+    profile = (profiles or EXIT_PROFILE_CONFIG)[family]
+    start = profile.get("from", profile.get("min_cents"))
+    end = profile.get("to", profile.get("max_cents"))
+    step = profile.get("step", profile.get("step_cents"))
+    return range(int(start), int(end) + 1, int(step))
 
 
 class PriceTree:
@@ -183,7 +186,13 @@ def main() -> int:
     parser.add_argument("--min-trades", required=True, type=int, choices=(1, 2))
     parser.add_argument("--max-id", required=True, type=int)
     parser.add_argument("--cache-dir", required=True, type=Path)
+    parser.add_argument("--ranking-params", required=True)
     args = parser.parse_args()
+    ranking = json.loads(args.ranking_params)
+    entry_windows = ranking["entry_windows"]
+    entry_thresholds = ranking["entry_thresholds_cents"]
+    immediate_directions = ranking["immediate_directions"]
+    exit_profiles = ranking["exit_profiles"]
 
     status_path = args.cache_dir / f"{args.cache_key}.status.json"
     result_path = args.cache_dir / f"{args.cache_key}.json"
@@ -217,16 +226,16 @@ def main() -> int:
             connection.close()
 
         groups_specs = [
-            ("fixed", "Автоматические · фиксированные Take Profit и Stop Loss", len(exit_values("fixed")) ** 2),
-            ("loss", "Автоматические · фиксированный Stop Loss", len(exit_values("loss"))),
-            ("profit", "Автоматические · фиксированный Take Profit", len(exit_values("profit"))),
+            ("fixed", "Автоматические · фиксированные Take Profit и Stop Loss", len(exit_values("fixed_tp", exit_profiles)) * len(exit_values("fixed_sl", exit_profiles))),
+            ("loss", "Автоматические · фиксированный Stop Loss", len(exit_values("loss", exit_profiles))),
+            ("profit", "Автоматические · фиксированный Take Profit", len(exit_values("profit", exit_profiles))),
         ]
         total_per_entry = sum(spec[2] for spec in groups_specs)
         entry_specs: list[tuple[str, str, int | None, int | None, bool | None]] = []
-        for lookback in ENTRY_WINDOWS:
-            for threshold_cents in ENTRY_THRESHOLDS_CENTS:
+        for lookback in entry_windows:
+            for threshold_cents in entry_thresholds:
                 entry_specs.append((f"entry:{lookback}:{threshold_cents}", f"±{threshold_cents / 100:.2f} USDT за {lookback} снимков", lookback, threshold_cents, None))
-        for direction in IMMEDIATE_DIRECTIONS:
+        for direction in immediate_directions:
             is_short = direction == "short"
             entry_specs.append((f"immediate:{direction}", f"Сразу · 1 заявка на {'продажу' if is_short else 'покупку'}", None, None, is_short))
         total = total_per_entry * len(entry_specs)
@@ -277,14 +286,14 @@ def main() -> int:
                             write_json(status_path, {"status": "pending", "progress": int(completed * 100 / total), "elapsed_seconds": int(time.monotonic() - started)})
 
                     if family == "fixed":
-                        for target_cents in exit_values("fixed"):
-                            for loss_cents in exit_values("fixed"):
+                        for target_cents in exit_values("fixed_tp", exit_profiles):
+                            for loss_cents in exit_values("fixed_sl", exit_profiles):
                                 consider(f"fixed:{target_cents}:{loss_cents}", f"TP {target_cents / 100:.2f} / SL {loss_cents / 100:.2f} USDT", target_cents / 100, loss_cents / 100)
                     elif family == "loss":
-                        for loss_cents in exit_values("loss"):
+                        for loss_cents in exit_values("loss", exit_profiles):
                             consider(f"loss:{loss_cents}", f"Stop Loss {loss_cents / 100:.2f} USDT · без фиксации прибыли", None, loss_cents / 100)
                     else:
-                        for target_cents in exit_values("profit"):
+                        for target_cents in exit_values("profit", exit_profiles):
                             consider(f"profit:{target_cents}", f"Take Profit {target_cents / 100:.2f} USDT · без фиксации убытка", target_cents / 100, None)
 
                     best.sort(key=lambda current: (-current[0], current[1]))

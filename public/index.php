@@ -2,35 +2,50 @@
 declare(strict_types=1);
 
 date_default_timezone_set('Europe/Kyiv');
+require_once __DIR__ . '/ranking-parameters.php';
 $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
 $entryProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
 $exitProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/exit_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
-$entryThresholdsCents = array_map('intval', $entryProfileConfig['thresholds_cents'] ?? []);
-$entryWindows = array_map('intval', $entryProfileConfig['snapshot_windows'] ?? []);
+$rankingError = null;
+try {
+    $rankingParameters = rankingParameters($_GET, $entryProfileConfig, $exitProfileConfig);
+} catch (InvalidArgumentException $exception) {
+    $rankingError = $exception->getMessage();
+    $rankingParameters = rankingParameters([], $entryProfileConfig, $exitProfileConfig);
+}
+$rankingRanges = $rankingParameters['ranges'];
+$rankingModes = $rankingParameters['modes'];
+$thresholdCustomRange = $rankingModes['threshold'] === 'range' ? $rankingRanges['threshold'][0] : ['from' => 1, 'to' => 10, 'step' => 1];
+$windowCustomRange = $rankingModes['window'] === 'range' ? $rankingRanges['window'][0] : ['from' => 5, 'to' => 40, 'step' => 5];
+$entryThresholdsCents = $rankingParameters['worker']['entry_thresholds_cents'];
+$entryWindows = $rankingParameters['worker']['entry_windows'];
 $entryThresholdText = implode(', ', array_map(static fn (int $cents): string => '±' . number_format($cents / 100, 2, ',', ' '), $entryThresholdsCents));
 $entryWindowText = implode(', ', array_map(static fn (int $window): string => (string) $window, $entryWindows));
+$defaultThresholdText = implode(', ', array_map(static fn (int $cents): string => '±' . number_format($cents / 100, 2, ',', ' '), $entryProfileConfig['thresholds_cents']));
+$defaultWindowText = implode(', ', array_map('strval', $entryProfileConfig['snapshot_windows']));
 $immediateEntryText = implode(' и ', array_map(static fn (string $direction): string => 'сразу — 1 заявка на ' . ($direction === 'short' ? 'продажу' : 'покупку'), $entryProfileConfig['immediate_directions'] ?? []));
-$exitRangeText = static function (array $profile): string {
-    $min = number_format(((int) $profile['min_cents']) / 100, 2, ',', ' ');
-    $max = number_format(((int) $profile['max_cents']) / 100, 2, ',', ' ');
-    $step = number_format(((int) $profile['step_cents']) / 100, 2, ',', ' ');
+$exitRangeText = static function (array $range): string {
+    $min = number_format($range['from'] / 100, 2, ',', ' ');
+    $max = number_format($range['to'] / 100, 2, ',', ' ');
+    $step = number_format($range['step'] / 100, 2, ',', ' ');
     return $min . '–' . $max . ' USDT (шаг ' . $step . ')';
 };
 $db = $config['mysql'];
 $symbols = [];
 $rows = [];
-$error = null;
+$error = $rankingError;
 $timezone = new DateTimeZone('Europe/Kyiv');
 $today = new DateTimeImmutable('today', $timezone);
 $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
 $startDayInput = (string) ($_GET['start_day'] ?? $_GET['day'] ?? '2026-10-06');
 $endDayInput = (string) ($_GET['end_day'] ?? $_GET['day'] ?? $today->format('Y-m-d'));
-$entryConfig = (string) ($_GET['entry_config'] ?? 'entry:10:1');
+$defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThresholdsCents, true)
+    ? 'entry:10:1' : 'entry:' . $entryWindows[0] . ':' . $entryThresholdsCents[0];
+$entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
 $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
 $startingBalance = trim((string) ($_GET['balance'] ?? '10'));
 $feePercent = trim((string) ($_GET['fee'] ?? '0.06'));
-$defaultExitCents = (int) $exitProfileConfig['fixed']['min_cents'];
-$defaultExitConfig = 'fixed:' . $defaultExitCents . ':' . $defaultExitCents;
+$defaultExitConfig = 'fixed:' . $rankingRanges['fixed_tp']['from'] . ':' . $rankingRanges['fixed_sl']['from'];
 $exitConfig = (string) ($_GET['exit_config'] ?? $defaultExitConfig);
 $symbolSort = (string) ($_GET['symbol_sort'] ?? '') === 'profit' ? 'profit' : '';
 $isCurrentDay = false;
@@ -48,25 +63,25 @@ $isImmediateEntry = preg_match('/^immediate:(short|long)$/', $entryConfig, $imme
 if (!$isImmediateEntry && (!preg_match('/^entry:(\d+):(\d+)$/', $entryConfig, $entryMatches)
     || !in_array((int) $entryMatches[1], $entryWindows, true)
     || !in_array((int) $entryMatches[2], $entryThresholdsCents, true))) {
-    $entryConfig = 'entry:10:1';
-    $entryMatches = [null, '10', '1'];
+    $entryConfig = $defaultEntryConfig;
+    $entryMatches = [null, (string) $entryWindows[0], (string) $entryThresholdsCents[0]];
 }
 $momentumLookback = $isImmediateEntry ? 0 : (int) $entryMatches[1];
 $momentumThresholdCents = $isImmediateEntry ? 0 : (int) $entryMatches[2];
 $momentumThreshold = $momentumThresholdCents / 100;
 $profitTarget = '0.10';
 $lossThreshold = '-0.10';
-if (preg_match('/^fixed:(\d{1,3}):(\d{1,3})$/', $exitConfig, $matches)
-    && (int) $matches[1] >= 1 && (int) $matches[1] <= 500
-    && (int) $matches[2] >= 1 && (int) $matches[2] <= 500) {
+if (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
+    && rankingHasValue((int) $matches[1], $rankingRanges['fixed_tp'])
+    && rankingHasValue((int) $matches[2], $rankingRanges['fixed_sl'])) {
     $profitTarget = bcdiv($matches[1], '100', 2);
     $lossThreshold = bcdiv((string) (0 - (int) $matches[2]), '100', 2);
-} elseif (preg_match('/^loss:(\d{1,3})$/', $exitConfig, $matches)
-    && (int) $matches[1] >= 1 && (int) $matches[1] <= 300) {
+} elseif (preg_match('/^loss:(\d+)$/', $exitConfig, $matches)
+    && rankingHasValue((int) $matches[1], $rankingRanges['loss'])) {
     $profitTarget = null;
     $lossThreshold = bcdiv((string) (0 - (int) $matches[1]), '100', 2);
-} elseif (preg_match('/^profit:(\d{1,3})$/', $exitConfig, $matches)
-    && (int) $matches[1] >= 1 && (int) $matches[1] <= 300) {
+} elseif (preg_match('/^profit:(\d+)$/', $exitConfig, $matches)
+    && rankingHasValue((int) $matches[1], $rankingRanges['profit'])) {
     $profitTarget = bcdiv($matches[1], '100', 2);
     $lossThreshold = null;
 } else {
@@ -118,6 +133,17 @@ try {
 }
 
 function h(string $value): string { return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+function rankingRangeRow(string $label, string $name, array $range, bool $money): string
+{
+    $format = static fn (int $value): string => $money ? number_format($value / 100, 2, '.', '') : (string) $value;
+    $step = $money ? '0.01' : '1';
+    $cells = '';
+    foreach (['from' => 'От', 'to' => 'До', 'step' => 'Шаг'] as $key => $caption) {
+        $cells .= '<label>' . $caption . '<input class="ranking-range-input" type="number" name="' . $name . '_' . $key
+            . '" min="' . $step . '" step="' . $step . '" value="' . h($format($range[$key])) . '" required></label>';
+    }
+    return '<div class="ranking-range-row"><span>' . h($label) . '</span>' . $cells . '</div>';
+}
 function money(string $value): string { return number_format((float) $value, 6, '.', ' '); }
 function formatKyivTime(string $value, DateTimeZone $timezone): string { return (new DateTimeImmutable($value, new DateTimeZone('UTC')))->setTimezone($timezone)->format('d.m H:i:s'); }
 function epochMilliseconds(string $value): int { $time = new DateTimeImmutable($value, new DateTimeZone('UTC')); return ((int) $time->format('U')) * 1000 + (int) $time->format('v'); }
@@ -225,6 +251,8 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head h2{flex:1}.portfolio-ranking-head .refresh-symbols{margin-left:auto}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.reset-symbol-cache{flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:18px;line-height:1}.reset-symbol-cache:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}.symbol-select-row .reset-symbol-cache{width:42px}}
+.ranking-parameters{flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{cursor:pointer;color:var(--text);font-weight:700}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:minmax(170px,1fr) repeat(3,minmax(90px,130px));gap:8px;align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,1fr))}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}}
+.ranking-mode-label{display:grid;gap:5px;width:min(100%,240px);color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 2 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
@@ -236,11 +264,29 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов пар и пересчитать выбранную пару" title="Сбросить кэш рейтингов ранее рассчитанных пар и пересчитать только выбранную пару">🧹</button></div>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label>
+
 <label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($exitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-</form><p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Диапазоны входа:</strong> <?= h($entryThresholdText) ?> USDT. <strong>Окна:</strong> <?= h($entryWindowText) ?> снимков. Каждый порог проверяется на каждом окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Каждый порог задает движение Last в обе стороны за выбранное число снимков. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($exitProfileConfig['fixed'])) ?>; SL <?= h($exitRangeText($exitProfileConfig['fixed'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($exitProfileConfig['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($exitProfileConfig['loss'])) ?>, без фиксации прибыли.</li></ul></section>
+<details class="ranking-parameters" open><summary>Параметры расчёта · диапазоны от / до / шаг</summary>
+<h3>Порог входа · движение Last (USDT)</h3>
+<label class="ranking-mode-label">Набор значений<select class="ranking-mode-input" name="threshold_mode" data-range="threshold"><option value="default" <?= $rankingModes['threshold'] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes['threshold'] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label>
+<p class="small-note">Текущие значения: <?= h($defaultThresholdText) ?> USDT.</p>
+<div class="ranking-custom" id="threshold-custom" <?= $rankingModes['threshold'] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'threshold', $thresholdCustomRange, true) ?></div>
+<h3>Порог входа · окно (число снимков)</h3>
+<label class="ranking-mode-label">Набор значений<select class="ranking-mode-input" name="window_mode" data-range="window"><option value="default" <?= $rankingModes['window'] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes['window'] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label>
+<p class="small-note">Текущие значения: <?= h($defaultWindowText) ?> снимков.</p>
+<div class="ranking-custom" id="window-custom" <?= $rankingModes['window'] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'window', $windowCustomRange, false) ?></div>
+<h3>TakeProfit &amp; StopLoss (USDT)</h3>
+<p class="small-note">Совместный расчёт: каждый Take Profit проверяется с каждым Stop Loss.</p>
+<?= rankingRangeRow('Take Profit · совместный расчёт', 'fixed_tp', $rankingRanges['fixed_tp'], true) ?>
+<?= rankingRangeRow('Stop Loss · совместный расчёт', 'fixed_sl', $rankingRanges['fixed_sl'], true) ?>
+<?= rankingRangeRow('Только Take Profit', 'profit', $rankingRanges['profit'], true) ?>
+<?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], true) ?>
+<p class="small-note">Граница «до» включается, если на неё попадает шаг.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
+</details>
+</form><p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Диапазоны входа:</strong> <?= h($entryThresholdText) ?> USDT. <strong>Окна:</strong> <?= h($entryWindowText) ?> снимков. Каждый порог проверяется на каждом окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Каждый порог задает движение Last в обе стороны за выбранное число снимков. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">Для каждой пары показано её место среди всех комбинаций по среднему итогу на рынке.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= count($rows) ?> снимков</span></div>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
@@ -322,6 +368,17 @@ function resetPortfolioRankingForRelevantFilterChange() {
     portfolioSnapshotIds.value = '';
     resetRefreshButton('Пересчитать рейтинг для измененных фильтров');
 }
+document.querySelector('#apply-ranking-ranges').addEventListener('click', resetPortfolioRankingForRelevantFilterChange);
+document.querySelectorAll('.ranking-mode-input').forEach(control => {
+    const update = () => {
+        const custom = document.querySelector('#' + control.dataset.range + '-custom');
+        const enabled = control.value === 'range';
+        custom.hidden = !enabled;
+        custom.querySelectorAll('input').forEach(input => { input.disabled = !enabled; });
+    };
+    control.addEventListener('change', update);
+    update();
+});
 saveModeToggle.addEventListener('change', () => {
     saveModeValue.value = saveModeToggle.checked ? '1' : '0';
     document.querySelector('#save-mode-detail').textContent = saveModeToggle.checked ? 'минимум 2 сделки' : 'от 1 сделки';
@@ -355,6 +412,7 @@ async function refreshStrategyResults() {
 }
 filtersForm.querySelectorAll('select, input').forEach(control => {
     control.addEventListener('change', () => {
+        if (control.classList.contains('ranking-range-input') || control.classList.contains('ranking-mode-input')) return;
         if (control.id === 'entry-config' || control.id === 'exit-config') {
             refreshStrategyResults();
             return;
@@ -365,11 +423,13 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
         }
         filtersForm.requestSubmit();
     });
-    if (control.type === 'number') {
+    if (control.type === 'number' && !control.classList.contains('ranking-range-input')) {
         control.addEventListener('input', () => {
             clearTimeout(filterSubmitTimer);
             filterSubmitTimer = setTimeout(() => {
-                if (control.value !== '' && control.checkValidity()) filtersForm.requestSubmit();
+                if (control.value !== '' && control.checkValidity()) {
+                    filtersForm.requestSubmit();
+                }
             }, 700);
         });
     }

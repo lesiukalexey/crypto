@@ -21,11 +21,6 @@ import pymysql
 from app import load_config
 from database import connect_mysql
 from strategy_ranking import (
-    ENTRY_PROFILE_CONFIG,
-    ENTRY_THRESHOLDS_CENTS,
-    ENTRY_WINDOWS,
-    IMMEDIATE_DIRECTIONS,
-    EXIT_PROFILE_CONFIG,
     PriceTree,
     exit_values,
     make_signals,
@@ -36,7 +31,7 @@ from strategy_ranking import (
 KYIV = ZoneInfo("Europe/Kyiv")
 
 
-def entry_specs() -> list[tuple[str, str, int | None, int | None, bool | None]]:
+def entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | None, int | None, bool | None]]:
     specs = [
         (
             f"entry:{window}:{threshold}",
@@ -45,10 +40,10 @@ def entry_specs() -> list[tuple[str, str, int | None, int | None, bool | None]]:
             threshold,
             None,
         )
-        for window in ENTRY_WINDOWS
-        for threshold in ENTRY_THRESHOLDS_CENTS
+        for window in ranking["entry_windows"]
+        for threshold in ranking["entry_thresholds_cents"]
     ]
-    for direction in IMMEDIATE_DIRECTIONS:
+    for direction in ranking["immediate_directions"]:
         is_short = direction == "short"
         specs.append((
             f"immediate:{direction}",
@@ -60,24 +55,23 @@ def entry_specs() -> list[tuple[str, str, int | None, int | None, bool | None]]:
     return specs
 
 
-def exit_specs() -> Iterator[tuple[str, str, float | None, float | None]]:
-    fixed = exit_values("fixed")
-    for target in fixed:
-        for loss in fixed:
+def exit_specs(profiles: dict[str, Any]) -> Iterator[tuple[str, str, float | None, float | None]]:
+    for target in exit_values("fixed_tp", profiles):
+        for loss in exit_values("fixed_sl", profiles):
             yield (
                 f"fixed:{target}:{loss}",
                 f"TP {target / 100:.2f} / SL {loss / 100:.2f} USDT",
                 target / 100,
                 loss / 100,
             )
-    for loss in exit_values("loss"):
+    for loss in exit_values("loss", profiles):
         yield f"loss:{loss}", f"Stop Loss {loss / 100:.2f} USDT", None, loss / 100
-    for target in exit_values("profit"):
+    for target in exit_values("profit", profiles):
         yield f"profit:{target}", f"Take Profit {target / 100:.2f} USDT", target / 100, None
 
 
-def exit_count() -> int:
-    return len(exit_values("fixed")) ** 2 + len(exit_values("loss")) + len(exit_values("profit"))
+def exit_count(profiles: dict[str, Any]) -> int:
+    return len(exit_values("fixed_tp", profiles)) * len(exit_values("fixed_sl", profiles)) + len(exit_values("loss", profiles)) + len(exit_values("profit", profiles))
 
 
 def main() -> int:
@@ -91,7 +85,10 @@ def main() -> int:
     parser.add_argument("--entry-config", required=True)
     parser.add_argument("--max-ids", required=True)
     parser.add_argument("--cache-dir", required=True, type=Path)
+    parser.add_argument("--ranking-params", required=True)
     args = parser.parse_args()
+    ranking = json.loads(args.ranking_params)
+    exit_profiles = ranking["exit_profiles"]
 
     status_path = args.cache_dir / f"portfolio-{args.cache_key}.status.json"
     result_path = args.cache_dir / f"portfolio-{args.cache_key}.json"
@@ -156,8 +153,8 @@ def main() -> int:
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
 
-        specs = entry_specs()
-        candidate_count = exit_count()
+        specs = entry_specs(ranking)
+        candidate_count = exit_count(exit_profiles)
         total = len(specs) * candidate_count
         completed = 0
         universe_size = len(max_ids)
@@ -186,7 +183,7 @@ def main() -> int:
                     PriceTree([float(row["ask_price"]) for row in rows]),
                 )
 
-            for exit_id, exit_label, take_profit, stop_loss in exit_specs():
+            for exit_id, exit_label, take_profit, stop_loss in exit_specs(exit_profiles):
                 aggregate_pnl = 0.0
                 eligible_symbols = 0
                 profitable_symbols = 0

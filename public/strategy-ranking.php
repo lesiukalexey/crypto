@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
+require_once __DIR__ . '/ranking-parameters.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -15,8 +16,10 @@ try {
     $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $entryProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
     $exitProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/exit_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
-    $entryThresholdsCents = array_map('intval', $entryProfileConfig['thresholds_cents'] ?? []);
-    $entryWindows = array_map('intval', $entryProfileConfig['snapshot_windows'] ?? []);
+    $rankingParameters = rankingParameters($_GET, $entryProfileConfig, $exitProfileConfig);
+    $ranking = $rankingParameters['worker'];
+    $entryThresholdsCents = $ranking['entry_thresholds_cents'];
+    $entryWindows = $ranking['entry_windows'];
     $timezone = new DateTimeZone('Europe/Kyiv');
     $today = new DateTimeImmutable('today', $timezone);
     $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
@@ -89,12 +92,34 @@ try {
         }
         $cacheGeneration = trim($generationValue);
     }
-    $key = hash('sha256', json_encode(['ranking-v14-cache-generation', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $entryWindows, $entryThresholdsCents, $entryProfileConfig['immediate_directions'] ?? [], $exitProfileConfig], JSON_THROW_ON_ERROR));
+    $key = hash('sha256', json_encode(['ranking-v15-custom-ranges', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/' . $key . '.json';
     $statusPath = $cacheDir . '/' . $key . '.status.json';
     $profilePath = $cacheDir . '/' . $key . '.' . $entryConfig . '.json';
     $legacyScanPath = $cacheDir . '/' . $key . '.legacy-scan.json';
-    if ($cacheGeneration === 'initial' && !is_file($resultPath) && !is_file($legacyScanPath)) {
+    if ($ranking === rankingParameters([], $entryProfileConfig, $exitProfileConfig)['worker'] && !is_file($resultPath)) {
+        $oldKey = hash('sha256', json_encode([
+            'ranking-v14-cache-generation', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue,
+            $balance, $fee, $minTrades, $entryWindows, $entryThresholdsCents,
+            $entryProfileConfig['immediate_directions'] ?? [], $exitProfileConfig,
+        ], JSON_THROW_ON_ERROR));
+        $oldResultPath = $cacheDir . '/' . $oldKey . '.json';
+        $oldResult = is_file($oldResultPath) ? json_decode((string) file_get_contents($oldResultPath), true) : null;
+        if (is_array($oldResult) && ($oldResult['status'] ?? '') === 'ready') {
+            $profilesCopied = true;
+            foreach ($oldResult['entries'] ?? [] as $entry) {
+                $entryId = (string) ($entry['id'] ?? '');
+                $oldProfile = $cacheDir . '/' . $oldKey . '.' . $entryId . '.json';
+                $newProfile = $cacheDir . '/' . $key . '.' . $entryId . '.json';
+                if (!is_file($oldProfile) || !copy($oldProfile, $newProfile)) $profilesCopied = false;
+            }
+            if ($profilesCopied && copy($oldResultPath, $resultPath)) {
+                file_put_contents($statusPath, json_encode(['status' => 'ready', 'progress' => 100]));
+            }
+        }
+    }
+    if ($cacheGeneration === 'initial' && $ranking === rankingParameters([], $entryProfileConfig, $exitProfileConfig)['worker']
+        && !is_file($resultPath) && !is_file($legacyScanPath)) {
         $legacyCacheArgs = ['ranking-v12-save-mode', $config['category'], $symbol, $startValue, $endValue, $balance, $fee, 0, $minTrades, $entryWindows, $entryThresholdsCents, $entryProfileConfig['immediate_directions'] ?? [], $exitProfileConfig];
         $candidateIds = [$maxId];
         if ($maxId > 0) {
@@ -182,6 +207,7 @@ try {
                 . ' --min-trades ' . escapeshellarg((string) $minTrades)
                 . ' --max-id ' . escapeshellarg((string) $maxId)
                 . ' --cache-dir ' . escapeshellarg($cacheDir)
+                . ' --ranking-params ' . escapeshellarg(json_encode($ranking, JSON_THROW_ON_ERROR))
                 . ' >> ' . escapeshellarg($logPath) . ' 2>&1 < /dev/null &';
             exec($command);
             flock($lock, LOCK_UN);
@@ -192,6 +218,8 @@ try {
         $status = ['status' => 'pending', 'progress' => 0];
     }
     respond((is_array($status) ? $status : ['status' => 'pending', 'progress' => 0]) + ['entries' => $entries]);
+} catch (InvalidArgumentException $error) {
+    respond(['status' => 'error', 'message' => $error->getMessage()], 400);
 } catch (Throwable $error) {
     respond(['status' => 'error', 'message' => 'Не удалось загрузить рейтинг стратегий.'], 503);
 }
