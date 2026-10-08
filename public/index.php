@@ -579,6 +579,7 @@ function createElapsedTimer(element, label) {
     let startedAt = null;
     let elapsedMs = 0;
     let intervalId = null;
+    let finished = false;
     const render = () => {
         const totalSeconds = Math.floor((startedAt === null ? elapsedMs : performance.now() - startedAt) / 1000);
         const hours = Math.floor(totalSeconds / 3600);
@@ -591,7 +592,7 @@ function createElapsedTimer(element, label) {
     };
     return {
         start() {
-            if (startedAt !== null) return;
+            if (startedAt !== null || finished) return;
             elapsedMs = 0;
             startedAt = performance.now();
             element.hidden = false;
@@ -600,7 +601,7 @@ function createElapsedTimer(element, label) {
         },
         setLabel(nextLabel) {
             currentLabel = nextLabel;
-            if (startedAt !== null || elapsedMs > 0) render();
+            if (startedAt !== null || elapsedMs > 0 || finished) render();
         },
         finish(finalLabel = null) {
             if (finalLabel !== null) currentLabel = finalLabel;
@@ -610,6 +611,7 @@ function createElapsedTimer(element, label) {
             }
             elapsedMs = performance.now() - startedAt;
             startedAt = null;
+            finished = true;
             window.clearInterval(intervalId);
             intervalId = null;
             render();
@@ -619,6 +621,7 @@ function createElapsedTimer(element, label) {
             intervalId = null;
             startedAt = null;
             elapsedMs = 0;
+            finished = false;
             element.textContent = '';
             element.hidden = true;
         },
