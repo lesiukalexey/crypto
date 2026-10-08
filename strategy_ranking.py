@@ -267,6 +267,21 @@ def main() -> int:
 
     status_path = args.cache_dir / f"{args.cache_key}.status.json"
     result_path = args.cache_dir / f"{args.cache_key}.json"
+    job_lock = (args.cache_dir / f"strategy-worker-{args.cache_key}.lock").open("a", encoding="utf-8")
+    while True:
+        try:
+            fcntl.flock(job_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            return 0
+    if result_path.is_file():
+        try:
+            cached_result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached_result = None
+        if isinstance(cached_result, dict) and cached_result.get("status") == "ready":
+            write_json(status_path, {"status": "ready", "progress": 100})
+            return 0
     worker_lock = (args.cache_dir / "ranking-worker.lock").open("a", encoding="utf-8")
     while True:
         try:
@@ -275,6 +290,14 @@ def main() -> int:
         except BlockingIOError:
             write_json(status_path, {"status": "pending", "progress": 0, "queued": True})
             time.sleep(10)
+    if result_path.is_file():
+        try:
+            cached_result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached_result = None
+        if isinstance(cached_result, dict) and cached_result.get("status") == "ready":
+            write_json(status_path, {"status": "ready", "progress": 100})
+            return 0
     try:
         config = load_config(Path(__file__).with_name("config.json"))
         connection = connect_mysql(config["mysql"])

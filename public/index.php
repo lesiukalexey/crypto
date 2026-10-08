@@ -441,6 +441,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .wrap{max-width:none;padding-left:20px;padding-right:20px}.chart-wrap{container-type:inline-size}#chart{height:27.1cqw}@media(max-width:600px){#chart{height:69cqw}}
 .ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
+.calculation-queue{width:100%}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}}
 .ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head h2{flex:1}.portfolio-ranking-head .refresh-symbols{margin-left:auto}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
@@ -502,6 +503,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], true, $defaultRankingRanges['loss']) ?>
 <p class="small-note">Граница «до» включается, если на неё попадает шаг.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 <p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> <?= h($entryThresholdSummaries['both']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['both']['windows']))) ?> снимков. Рост +: <?= h($entryThresholdSummaries['long']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['long']['windows']))) ?>. Падение −: <?= h($entryThresholdSummaries['short']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['short']['windows']))) ?>. У каждого направления свои диапазоны и окна; каждый порог проверяется на каждом окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
+<section class="panel"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">Все рейтинги используют один фоновый обработчик. Ожидающие задачи показаны списком; система не гарантирует строгий порядок их запуска. Кнопка 🧹 останавливает индивидуальные рейтинги, рейтинг торговых пар и общий рейтинг.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= count($rows) ?> снимков</span></div>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
@@ -551,6 +553,10 @@ const resetSymbolCacheButton = document.querySelector('#reset-symbol-cache');
 const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel');
 const portfolioRankingContent = document.querySelector('#portfolio-ranking-content');
 const portfolioRankingStatus = document.querySelector('#portfolio-ranking-status');
+const calculationQueueCount = document.querySelector('#calculation-queue-count');
+const calculationQueueActive = document.querySelector('#calculation-queue-active');
+const calculationQueueWaiting = document.querySelector('#calculation-queue-waiting');
+const calculationQueueUpdated = document.querySelector('#calculation-queue-updated');
 function createElapsedTimer(element, label) {
     let currentLabel = label;
     let startedAt = null;
@@ -978,6 +984,11 @@ resetSymbolCacheButton.addEventListener('click', async () => {
     let stoppedProcesses = 0;
     let resetError = '';
     exitRankingRequestVersion++;
+    portfolioRankingRequestVersion++;
+    strategyRankingTimer.finish('Остановлено кнопкой сброса');
+    portfolioRankingTimer.finish('Остановлено кнопкой сброса');
+    refreshSymbolsButton.disabled = true;
+    portfolioRankingStatus.textContent = 'Останавливаю все фоновые расчёты…';
     resetSymbolCacheButton.disabled = true;
     resetSymbolCacheButton.textContent = '…';
     resetSymbolCacheButton.title = 'Сбрасываю кэш рейтингов…';
@@ -1000,6 +1011,7 @@ resetSymbolCacheButton.addEventListener('click', async () => {
     } finally {
         isResettingSymbolCache = false;
         resetSymbolCacheButton.disabled = false;
+        resetRefreshButton(resetSucceeded ? 'Кэш сброшен кнопкой 🧹' : 'Расчёты не удалось остановить');
         resetSymbolCacheButton.textContent = '🧹';
         resetSymbolCacheButton.title = resetSucceeded
             ? `Остановлено расчётов: ${stoppedProcesses}. Кэш сброшен; пересчитываю выбранную пару.`
@@ -1260,6 +1272,7 @@ async function loadPortfolioRanking() {
     }
 }
 refreshSymbolsButton.addEventListener('click', () => {
+    if (isResettingSymbolCache) return;
     symbolSortMode.value = 'profit';
     portfolioSnapshotIds.value = '';
     loadPortfolioRanking();
@@ -1278,8 +1291,53 @@ async function refreshCollectorStatus() {
         collectorStatus.title = 'Проверьте доступность базы данных';
     }
 }
+function renderQueueJobs(container, jobs, state) {
+    container.replaceChildren();
+    if (!jobs.length) {
+        const empty = document.createElement('li');
+        empty.className = 'calculation-queue-empty';
+        empty.textContent = state === 'active' ? 'Сейчас нет выполняющихся расчётов.' : 'Ожидающих расчётов нет.';
+        container.appendChild(empty);
+        return;
+    }
+    for (const job of jobs) {
+        const item = document.createElement('li');
+        const title = document.createElement('strong');
+        title.textContent = job.label || 'Расчёт рейтинга';
+        const period = document.createElement('span');
+        period.textContent = job.start_day && job.end_day
+            ? `Период: ${job.start_day} — ${job.end_day}`
+            : 'Период не указан';
+        const progress = document.createElement('span');
+        progress.textContent = state === 'waiting'
+            ? (job.duplicate ? 'Повтор того же расчёта · ждёт завершения первого запроса' : 'Ожидает свободный обработчик')
+            : `Выполняется · ${job.progress || 0}%`;
+        item.append(title, period, progress);
+        container.appendChild(item);
+    }
+}
+async function refreshCalculationQueue() {
+    try {
+        const response = await fetch('ranking-queue.php', {headers:{Accept:'application/json'}, cache:'no-store'});
+        const queue = await response.json();
+        if (!response.ok) throw new Error(queue.error || 'Не удалось получить очередь');
+        const active = Array.isArray(queue.active) ? queue.active : [];
+        const waiting = Array.isArray(queue.waiting) ? queue.waiting : [];
+        calculationQueueCount.textContent = `${active.length} выполняется · ${waiting.length} ожидает`;
+        renderQueueJobs(calculationQueueActive, active, 'active');
+        renderQueueJobs(calculationQueueWaiting, waiting, 'waiting');
+        calculationQueueUpdated.textContent = `Обновлено: ${new Date(queue.updated_at * 1000).toLocaleTimeString('ru-RU')}`;
+    } catch (_) {
+        calculationQueueCount.textContent = 'Статус недоступен';
+        calculationQueueActive.replaceChildren();
+        calculationQueueWaiting.replaceChildren();
+        calculationQueueUpdated.textContent = 'Не удалось прочитать состояние фоновых расчётов.';
+    }
+}
 refreshCollectorStatus();
 window.setInterval(refreshCollectorStatus, 30000);
+refreshCalculationQueue();
+window.setInterval(refreshCalculationQueue, 5000);
 updateMartingaleInitialNotional();
 if (symbolSortMode.value === 'profit') {
     loadPortfolioRanking();

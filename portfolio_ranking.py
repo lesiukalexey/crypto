@@ -79,7 +79,7 @@ def main() -> int:
             fcntl.flock(job_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except BlockingIOError:
-            time.sleep(1)
+            return 0
 
     if result_path.is_file():
         try:

@@ -4,6 +4,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
+require_once __DIR__ . '/ranking-worker-state.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -171,6 +172,12 @@ try {
             fclose($lock);
         }
         $status = ['status' => 'pending', 'progress' => 0];
+    }
+    if (is_array($status) && ($status['status'] ?? '') === 'pending' && ($status['queued'] ?? false) === true) {
+        $workerOwner = rankingWorkerLockOwner($cacheDir);
+        if (($workerOwner['script'] ?? '') === 'strategy_ranking.py' && ($workerOwner['cache_key'] ?? '') === $key) {
+            $status['queued'] = false;
+        }
     }
     respond((is_array($status) ? $status : ['status' => 'pending', 'progress' => 0]) + ['entries' => $entries]);
 } catch (InvalidArgumentException $error) {
