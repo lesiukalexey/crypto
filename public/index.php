@@ -1219,6 +1219,7 @@ async function loadPortfolioRanking() {
 }
 refreshSymbolsButton.addEventListener('click', () => {
     symbolSortMode.value = 'profit';
+    portfolioSnapshotIds.value = '';
     loadPortfolioRanking();
 });
 const collectorStatus = document.querySelector('#collector-status');
