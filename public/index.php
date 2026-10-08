@@ -1263,12 +1263,17 @@ async function loadPortfolioRanking() {
             if (requestVersion !== portfolioRankingRequestVersion) return;
             if (!response.ok || ranking.status === 'error') throw new Error(ranking.message || 'Не удалось рассчитать общий рейтинг');
             if (ranking.status === 'pending') {
+                const completedProfiles = Number(ranking.completed_entry_profiles);
+                const totalProfiles = Number(ranking.total_entry_profiles);
+                const profileProgress = Number.isFinite(completedProfiles) && Number.isFinite(totalProfiles) && totalProfiles > 0
+                    ? `Порог входа ${completedProfiles} из ${totalProfiles}${ranking.entry_profile ? ` · ${ranking.entry_profile}` : ''}`
+                    : '';
                 const progressText = ranking.queued
                     ? 'Расчет рейтинга ожидает очереди…'
-                    : 'Идет расчет рейтинга для всех тикеров… ' + (ranking.progress || 0) + '%';
+                    : 'Идет расчет рейтинга для всех тикеров… ' + (ranking.progress || 0) + '%' + (profileProgress ? ' · ' + profileProgress : '');
                 portfolioRankingStatus.textContent = ranking.queued
                     ? 'Расчет ожидает очереди общего обработчика.'
-                    : 'Перебираю комбинации для всех тикеров… ' + (ranking.progress || 0) + '%';
+                    : 'Перебираю комбинации для всех тикеров… ' + (ranking.progress || 0) + '%' + (profileProgress ? ' · ' + profileProgress : '');
                 setRefreshProgress(ranking.progress, progressText);
                 await wait(1500);
             }

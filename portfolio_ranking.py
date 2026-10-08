@@ -10,7 +10,9 @@ import heapq
 import json
 import math
 import os
+import struct
 import sys
+import tempfile
 import time
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
@@ -34,6 +36,7 @@ from strategy_ranking import (
 )
 
 KYIV = ZoneInfo("Europe/Kyiv")
+CANDIDATE_RECORD = struct.Struct("<dII")
 
 
 def exit_specs(profiles: dict[str, Any]) -> Iterator[tuple[str, str, float | None, float | None]]:
@@ -104,6 +107,7 @@ def main() -> int:
 
     started = time.monotonic()
     progress_reporter = ProgressReporter()
+    batch_temp = None
     write_json(status_path, {"status": "pending", "progress": 0, "queued": False})
     try:
         max_ids = {str(symbol): int(max_id) for symbol, max_id in json.loads(args.max_ids).items()}
@@ -160,13 +164,27 @@ def main() -> int:
         universe_size = len(max_ids)
         fee_rate = args.fee_percent / 100
         global_top: list[tuple[float, int, str, dict[str, Any]]] = []
-        global_average_pnls = array("d")
-        global_eligible_counts = array("I")
-        global_combination_keys: list[str] = []
+        exit_options = [
+            (
+                f"{base_exit_id}:{target_policy}" if policy_label else base_exit_id,
+                base_exit_label + (f" · {policy_label}" if policy_label else ""),
+                take_profit,
+                stop_loss,
+                target_policy,
+            )
+            for base_exit_id, base_exit_label, take_profit, stop_loss in exit_specs(exit_profiles)
+            for target_policy, policy_label in martingale_target_policies(args.martingale_mode, stop_loss)
+        ]
+        batch_temp = tempfile.TemporaryDirectory(prefix=f"portfolio-ranking-{args.cache_key[:12]}-", dir=args.cache_dir)
+        batch_directory = Path(batch_temp.name)
+        candidate_batches: list[tuple[str, Path]] = []
         best_by_symbol: dict[str, dict[str, Any]] = {}
         selected_entry_best: dict[str, dict[str, Any]] = {}
 
-        for entry_id, entry_label, lookback, threshold, entry_family, immediate_short in specs:
+        for entry_batch_index, (entry_id, entry_label, lookback, threshold, entry_family, immediate_short) in enumerate(specs):
+            batch_average_pnls = array("d")
+            batch_eligible_counts = array("I")
+            batch_exit_indexes = array("I")
             contexts: dict[str, tuple[QuoteArrays, list[int], list[bool], PriceTree, PriceTree]] = {}
             for symbol, quotes in quotes_by_symbol.items():
                 if len(quotes) < 2:
@@ -202,117 +220,164 @@ def main() -> int:
                     "status": "pending",
                     "progress": min(99, int(completed * 100 / total)),
                     "elapsed_seconds": int(time.monotonic() - started),
+                    "entry_profile": entry_label,
+                    "completed_entry_profiles": entry_batch_index + 1,
+                    "total_entry_profiles": len(specs),
                 })
                 continue
 
-            for base_exit_id, base_exit_label, take_profit, stop_loss in exit_specs(exit_profiles):
-                for target_policy, policy_label in martingale_target_policies(args.martingale_mode, stop_loss):
-                    exit_id = f"{base_exit_id}:{target_policy}" if policy_label else base_exit_id
-                    exit_label = base_exit_label + (f" · {policy_label}" if policy_label else "")
-                    aggregate_pnl = 0.0
-                    eligible_symbols = 0
-                    profitable_symbols = 0
-                    local_winners_for_candidate: list[tuple[str, dict[str, Any]]] = []
-                    for symbol, (quotes, signals, shorts, bid_tree, ask_tree) in contexts.items():
-                        pnl, trade_count = simulate(
-                            quotes,
-                            signals,
-                            shorts,
-                            bid_tree,
-                            ask_tree,
-                            args.balance,
-                            fee_rate,
-                            take_profit,
-                            stop_loss,
-                            args.martingale_mode,
-                            args.martingale_timing,
-                            args.martingale_attempts,
-                            target_policy,
-                        )
-                        if trade_count < args.min_trades:
-                            continue
-                        eligible_symbols += 1
-                        aggregate_pnl += pnl
-                        if pnl > 0:
-                            profitable_symbols += 1
-                        ticker_candidate = {
-                            "symbol": symbol,
-                            "entry_id": entry_id,
-                            "entry_label": entry_label,
-                            "exit_id": exit_id,
-                            "exit_label": exit_label,
-                            "pnl": pnl,
-                            "trade_count": trade_count,
-                        }
-                        previous = best_by_symbol.get(symbol)
-                        if previous is None or (pnl, entry_id, exit_id) > (
-                            previous["pnl"], previous["entry_id"], previous["exit_id"]
+            for exit_index, (exit_id, exit_label, take_profit, stop_loss, target_policy) in enumerate(exit_options):
+                aggregate_pnl = 0.0
+                eligible_symbols = 0
+                profitable_symbols = 0
+                local_winners_for_candidate: list[tuple[str, dict[str, Any]]] = []
+                for symbol, (quotes, signals, shorts, bid_tree, ask_tree) in contexts.items():
+                    pnl, trade_count = simulate(
+                        quotes,
+                        signals,
+                        shorts,
+                        bid_tree,
+                        ask_tree,
+                        args.balance,
+                        fee_rate,
+                        take_profit,
+                        stop_loss,
+                        args.martingale_mode,
+                        args.martingale_timing,
+                        args.martingale_attempts,
+                        target_policy,
+                    )
+                    if trade_count < args.min_trades:
+                        continue
+                    eligible_symbols += 1
+                    aggregate_pnl += pnl
+                    if pnl > 0:
+                        profitable_symbols += 1
+                    ticker_candidate = {
+                        "symbol": symbol,
+                        "entry_id": entry_id,
+                        "entry_label": entry_label,
+                        "exit_id": exit_id,
+                        "exit_label": exit_label,
+                        "pnl": pnl,
+                        "trade_count": trade_count,
+                    }
+                    previous = best_by_symbol.get(symbol)
+                    if previous is None or (pnl, entry_id, exit_id) > (
+                        previous["pnl"], previous["entry_id"], previous["exit_id"]
+                    ):
+                        best_by_symbol[symbol] = ticker_candidate
+                        local_winners_for_candidate.append((symbol, ticker_candidate))
+                    if entry_id == args.entry_config:
+                        previous_selected = selected_entry_best.get(symbol)
+                        if previous_selected is None or (pnl, exit_id) > (
+                            previous_selected["best_pnl"], previous_selected["best_exit_id"]
                         ):
-                            best_by_symbol[symbol] = ticker_candidate
-                            local_winners_for_candidate.append((symbol, ticker_candidate))
-                        if entry_id == args.entry_config:
-                            previous_selected = selected_entry_best.get(symbol)
-                            if previous_selected is None or (pnl, exit_id) > (
-                                previous_selected["best_pnl"], previous_selected["best_exit_id"]
-                            ):
-                                selected_entry_best[symbol] = {
-                                    "symbol": symbol,
-                                    "best_pnl": pnl,
-                                    "best_exit": exit_label,
-                                    "best_exit_id": exit_id,
-                                }
+                            selected_entry_best[symbol] = {
+                                "symbol": symbol,
+                                "best_pnl": pnl,
+                                "best_exit": exit_label,
+                                "best_exit_id": exit_id,
+                            }
 
-                    if eligible_symbols:
-                        average_all_symbols = aggregate_pnl / universe_size
-                        for symbol, winner in local_winners_for_candidate:
-                            if best_by_symbol.get(symbol) is winner:
-                                winner["market_average_pnl"] = average_all_symbols
-                                winner["market_eligible_symbols"] = eligible_symbols
-                                winner["market_profitable_symbols"] = profitable_symbols
-                        candidate = {
-                            "entry_id": entry_id,
-                            "entry_label": entry_label,
-                            "exit_id": exit_id,
-                            "exit_label": exit_label,
-                            "average_pnl": average_all_symbols,
-                            "total_pnl": aggregate_pnl,
-                            "eligible_symbols": eligible_symbols,
-                            "profitable_symbols": profitable_symbols,
-                        }
-                        combination_key = f"{entry_id}|{exit_id}"
-                        global_average_pnls.append(average_all_symbols)
-                        global_eligible_counts.append(eligible_symbols)
-                        global_combination_keys.append(combination_key)
-                        heap_item = (average_all_symbols, eligible_symbols, combination_key, candidate)
-                        if len(global_top) < 5:
-                            heapq.heappush(global_top, heap_item)
-                        elif heap_item[:3] > global_top[0][:3]:
-                            heapq.heapreplace(global_top, heap_item)
+                if eligible_symbols:
+                    average_all_symbols = aggregate_pnl / universe_size
+                    for symbol, winner in local_winners_for_candidate:
+                        if best_by_symbol.get(symbol) is winner:
+                            winner["market_average_pnl"] = average_all_symbols
+                            winner["market_eligible_symbols"] = eligible_symbols
+                            winner["market_profitable_symbols"] = profitable_symbols
+                    candidate = {
+                        "entry_id": entry_id,
+                        "entry_label": entry_label,
+                        "exit_id": exit_id,
+                        "exit_label": exit_label,
+                        "average_pnl": average_all_symbols,
+                        "total_pnl": aggregate_pnl,
+                        "eligible_symbols": eligible_symbols,
+                        "profitable_symbols": profitable_symbols,
+                    }
+                    batch_average_pnls.append(average_all_symbols)
+                    batch_eligible_counts.append(eligible_symbols)
+                    batch_exit_indexes.append(exit_index)
+                    combination_key = f"{entry_id}|{exit_id}"
+                    heap_item = (average_all_symbols, eligible_symbols, combination_key, candidate)
+                    if len(global_top) < 5:
+                        heapq.heappush(global_top, heap_item)
+                    elif heap_item[:3] > global_top[0][:3]:
+                        heapq.heapreplace(global_top, heap_item)
 
-                    completed += 1
-                    if completed % 5000 == 0:
-                        progress_reporter.update(status_path, {
-                            "status": "pending",
-                            "progress": min(99, int(completed * 100 / total)),
-                            "elapsed_seconds": int(time.monotonic() - started),
-                        })
+                completed += 1
+                if completed % 5000 == 0:
+                    progress_reporter.update(status_path, {
+                        "status": "pending",
+                        "progress": min(99, int(completed * 100 / total)),
+                        "elapsed_seconds": int(time.monotonic() - started),
+                        "entry_profile": entry_label,
+                        "completed_entry_profiles": entry_batch_index,
+                        "total_entry_profiles": len(specs),
+                    })
+
+            if batch_average_pnls:
+                batch_order = list(range(len(batch_average_pnls)))
+                batch_order.sort(key=lambda index: exit_options[batch_exit_indexes[index]][0])
+                batch_order.sort(key=batch_eligible_counts.__getitem__, reverse=True)
+                batch_order.sort(key=batch_average_pnls.__getitem__, reverse=True)
+                batch_path = batch_directory / f"entry-{entry_batch_index:04d}.bin"
+                with batch_path.open("wb") as batch_file:
+                    for index in batch_order:
+                        batch_file.write(CANDIDATE_RECORD.pack(
+                            batch_average_pnls[index],
+                            batch_eligible_counts[index],
+                            batch_exit_indexes[index],
+                        ))
+                candidate_batches.append((entry_id, batch_path))
+            progress_reporter.update(status_path, {
+                "status": "pending",
+                "progress": min(99, int(completed * 100 / total)),
+                "elapsed_seconds": int(time.monotonic() - started),
+                "entry_profile": entry_label,
+                "completed_entry_profiles": entry_batch_index + 1,
+                "total_entry_profiles": len(specs),
+            })
 
         ranked_ticker_leaders = sorted(best_by_symbol.values(), key=lambda item: (-item["pnl"], item["symbol"]))
         for rank, leader in enumerate(ranked_ticker_leaders, start=1):
             leader["rank"] = rank
-        ranked_candidate_indexes = list(range(len(global_combination_keys)))
-        ranked_candidate_indexes.sort(key=global_combination_keys.__getitem__)
-        ranked_candidate_indexes.sort(key=global_eligible_counts.__getitem__, reverse=True)
-        ranked_candidate_indexes.sort(key=global_average_pnls.__getitem__, reverse=True)
         winning_combinations = {
             f"{leader['entry_id']}|{leader['exit_id']}"
             for leader in ranked_ticker_leaders
         }
         global_rank_by_combination: dict[str, int] = {}
-        for rank, candidate_index in enumerate(ranked_candidate_indexes, start=1):
-            combination_key = global_combination_keys[candidate_index]
-            if combination_key in winning_combinations:
-                global_rank_by_combination[combination_key] = rank
+        batch_streams = []
+        merge_heap = []
+        try:
+            for batch_index, (entry_id, batch_path) in enumerate(candidate_batches):
+                batch_stream = batch_path.open("rb")
+                batch_streams.append(batch_stream)
+                record = batch_stream.read(CANDIDATE_RECORD.size)
+                if record:
+                    average_pnl, eligible_count, exit_index = CANDIDATE_RECORD.unpack(record)
+                    combination_key = f"{entry_id}|{exit_options[exit_index][0]}"
+                    heapq.heappush(merge_heap, (-average_pnl, -eligible_count, combination_key, batch_index, exit_index))
+
+            global_rank = 0
+            while merge_heap:
+                _, _, combination_key, batch_index, _ = heapq.heappop(merge_heap)
+                global_rank += 1
+                if combination_key in winning_combinations:
+                    global_rank_by_combination[combination_key] = global_rank
+                record = batch_streams[batch_index].read(CANDIDATE_RECORD.size)
+                if record:
+                    if len(record) != CANDIDATE_RECORD.size:
+                        raise OSError("Incomplete overall-ranking score batch")
+                    average_pnl, eligible_count, exit_index = CANDIDATE_RECORD.unpack(record)
+                    entry_id = candidate_batches[batch_index][0]
+                    next_key = f"{entry_id}|{exit_options[exit_index][0]}"
+                    heapq.heappush(merge_heap, (-average_pnl, -eligible_count, next_key, batch_index, exit_index))
+        finally:
+            for batch_stream in batch_streams:
+                batch_stream.close()
         for leader in ranked_ticker_leaders:
             combination_key = f"{leader['entry_id']}|{leader['exit_id']}"
             leader["global_rank"] = global_rank_by_combination.get(combination_key)
@@ -341,6 +406,8 @@ def main() -> int:
             })
         symbols.sort(key=lambda item: (item["best_pnl"] is None, -(item["best_pnl"] or 0), item["symbol"]))
         sorted_global = [item[3] for item in sorted(global_top, key=lambda item: (-item[0], -item[1], item[2]))]
+        batch_temp.cleanup()
+        batch_temp = None
         write_json(result_path, {
             "status": "ready",
             "global_top": sorted_global,
@@ -352,6 +419,8 @@ def main() -> int:
         write_json(status_path, {"status": "ready", "progress": 100, "elapsed_seconds": int(time.monotonic() - started)})
         return 0
     except Exception as exc:
+        if batch_temp is not None:
+            batch_temp.cleanup()
         write_json(status_path, {"status": "error", "progress": 0, "message": "Не удалось рассчитать общий рейтинг комбинаций."})
         print(f"portfolio ranking failed: {exc}", file=sys.stderr)
         return 1
