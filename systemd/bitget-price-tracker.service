@@ -1,0 +1,16 @@
+[Unit]
+Description=Bitget quote collector
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=%h/.ai/home/.local/bitget-price-tracker.env
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/bitget
+EnvironmentFile=%h/.ai/home/.local/bitget-price-tracker.env
+ExecStart=/var/www/bitget/.venv/bin/python /var/www/bitget/app.py
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

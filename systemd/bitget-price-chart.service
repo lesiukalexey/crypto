@@ -1,0 +1,16 @@
+[Unit]
+Description=Bitget quote history browser chart
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=%h/.ai/home/.local/bitget-price-tracker.env
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/bitget
+EnvironmentFile=%h/.ai/home/.local/bitget-price-tracker.env
+ExecStart=/usr/bin/php -S 127.0.0.1:18083 -t /var/www/bitget/public
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

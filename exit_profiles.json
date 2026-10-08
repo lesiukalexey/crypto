@@ -1,0 +1,5 @@
+{
+  "fixed": {"min_cents": 1, "max_cents": 500, "step_cents": 1},
+  "loss": {"min_cents": 1, "max_cents": 300, "step_cents": 1},
+  "profit": {"min_cents": 1, "max_cents": 300, "step_cents": 1}
+}

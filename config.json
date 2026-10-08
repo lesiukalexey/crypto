@@ -1,0 +1,43 @@
+{
+  "category": "USDT-FUTURES",
+  "symbols": [
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "SNDKUSDT",
+    "SPCXUSDT",
+    "XAUUSDT",
+    "XAGUSDT",
+    "NVDAUSDT",
+    "BTCUSDT",
+    "MUUUSDT",
+    "MSTRUSDT",
+    "TSLAUSDT",
+    "QQQUSDT",
+    "WDCUSDT",
+    "AMZNUSDT",
+    "GOOGLUSDT",
+    "ORCLUSDT",
+    "HOODUSDT",
+    "AAPLUSDT",
+    "METAUSDT",
+    "BABAUSDT",
+    "SPYUSDT",
+    "TSMUSDT",
+    "NKEUSDT",
+    "NFLXUSDT",
+    "IBMUSDT",
+    "WMTUSDT"
+  ],
+  "poll_interval_seconds": 60,
+  "request_timeout_seconds": 10,
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "bitget_quote_collector",
+    "password_env": "BITGET_DB_PASSWORD",
+    "database": "bitget_quotes",
+    "connect_timeout_seconds": 5
+  }
+}
