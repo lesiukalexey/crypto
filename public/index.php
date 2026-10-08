@@ -1161,7 +1161,7 @@ function rankingTable(container, columns, rows, sortOptions = null) {
                     link.target = '_blank';
                     link.rel = 'noopener';
                     link.textContent = value.text;
-                    link.title = 'Открыть детали этого тикера и комбинации в новой вкладке';
+                    link.title = 'Открыть результаты этой комбинации по всем тикерам в новой вкладке';
                     cell.appendChild(link);
                 } else {
                     cell.textContent = value === null || value === undefined ? '—' : String(value);
@@ -1180,6 +1180,20 @@ function pnlText(value) {
     if (value === null || value === undefined) return '—';
     const amount = Number(value);
     return (amount > 0 ? '+' : '') + new Intl.NumberFormat('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:4}).format(amount) + ' USDT';
+}
+function portfolioCombinationDetailLink(params, item) {
+    if (!item.entry_id || !item.exit_id) return null;
+    const detailParams = new URLSearchParams(params);
+    detailParams.delete('symbol');
+    detailParams.delete('symbol_sort');
+    detailParams.set('entry_config', item.entry_id);
+    detailParams.set('exit_config', item.exit_id);
+    detailParams.set('entry_label', item.entry_label || '');
+    detailParams.set('exit_label', item.exit_label || '');
+    return {
+        entry: {text: item.entry_label || '—', href: 'portfolio-combination.php?' + detailParams.toString()},
+        exit: {text: item.exit_label || '—', href: 'portfolio-combination.php?' + detailParams.toString()},
+    };
 }
 async function loadPortfolioRanking() {
     const requestVersion = ++portfolioRankingRequestVersion;
@@ -1221,30 +1235,22 @@ async function loadPortfolioRanking() {
             return;
         }
         if (ranking.status !== 'ready') throw new Error(ranking.message || 'Общий рейтинг пока недоступен');
-        const globalRows = (ranking.global_top || []).map((item, index) => [
-            String(index + 1), item.entry_label, item.exit_label, pnlText(item.average_pnl),
-            item.eligible_symbols + ' из ' + ranking.universe_size,
-            String(item.profitable_symbols),
-        ]);
+        const globalRows = (ranking.global_top || []).map((item, index) => {
+            const detailLink = portfolioCombinationDetailLink(params, item);
+            return [
+                String(index + 1), detailLink?.entry || item.entry_label, detailLink?.exit || item.exit_label, pnlText(item.average_pnl),
+                item.eligible_symbols + ' из ' + ranking.universe_size,
+                String(item.profitable_symbols),
+            ];
+        });
         rankingTable(document.querySelector('#portfolio-global-table'), [
             {label:'#'}, {label:'Порог входа'}, {label:'TakeProfit & StopLoss'},
             {label:'Средний итог на тикер',numeric:true}, {label:'Подходят по SAVE MODE',numeric:true}, {label:'В плюсе',numeric:true},
         ], globalRows);
         const tickerRows = (ranking.ticker_leaders || []).map(item => {
-            let entryCell = item.entry_label;
-            let exitCell = item.exit_label;
-            if (item.entry_id && item.exit_id) {
-                const detailParams = new URLSearchParams(params);
-                detailParams.delete('symbol');
-                detailParams.delete('symbol_sort');
-                detailParams.set('entry_config', item.entry_id);
-                detailParams.set('exit_config', item.exit_id);
-                detailParams.set('entry_label', item.entry_label || '');
-                detailParams.set('exit_label', item.exit_label || '');
-                const href = 'portfolio-combination.php?' + detailParams.toString();
-                entryCell = {text: item.entry_label || '—', href};
-                exitCell = {text: item.exit_label || '—', href};
-            }
+            const detailLink = portfolioCombinationDetailLink(params, item);
+            const entryCell = detailLink?.entry || item.entry_label;
+            const exitCell = detailLink?.exit || item.exit_label;
             return {
                 cells: [
                     item.global_rank === null ? '—' : String(item.global_rank), item.symbol, entryCell, exitCell,
