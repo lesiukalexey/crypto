@@ -80,6 +80,12 @@ try {
         respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга.'], 500);
     }
 
+    $generationLock = fopen($cacheDir . '/strategy-ranking-generation.lock', 'c');
+    if ($generationLock === false || !flock($generationLock, LOCK_EX)) {
+        if (is_resource($generationLock)) fclose($generationLock);
+        respond(['status' => 'error', 'message' => 'Не удалось заблокировать сброс кэша рейтинга.'], 503);
+    }
+
     $generationPath = $cacheDir . '/strategy-ranking-generation.txt';
     $temporaryPath = tempnam($cacheDir, '.strategy-ranking-generation-');
     if ($temporaryPath === false) {
@@ -114,6 +120,7 @@ try {
     $stoppedWorkerCount = count(array_diff($targetWorkerPids, $aliveWorkerPids));
     respond([
         'status' => 'ready',
+        'generation' => $generation,
         'stopped_processes' => $stoppedWorkerCount,
         'cancelled_jobs' => $cancelledJobs,
     ]);

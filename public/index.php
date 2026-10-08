@@ -4,6 +4,10 @@ declare(strict_types=1);
 date_default_timezone_set('Europe/Kyiv');
 require_once __DIR__ . '/ranking-parameters.php';
 $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
+$rankingCacheDir = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-backtest-cache';
+$rankingGenerationPath = $rankingCacheDir . '/strategy-ranking-generation.txt';
+$rankingGeneration = is_file($rankingGenerationPath) ? trim((string) file_get_contents($rankingGenerationPath)) : 'initial';
+if ($rankingGeneration === '') $rankingGeneration = 'initial';
 $entryProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
 $exitProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/exit_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
 $defaultRankingRanges = rankingParameters([], $entryProfileConfig, $exitProfileConfig)['ranges'];
@@ -470,6 +474,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <?php endif; ?>
 <?php if ($error !== null): ?><section class="panel error"><?= h($error) ?></section><?php endif; ?>
 <section class="panel"><form class="filters" method="get">
+<input type="hidden" name="ranking_generation" id="ranking-generation" value="<?= h($rankingGeneration) ?>">
 <?php if ($combinationDetail): ?>
 <?php foreach (['combination_detail' => '1', 'detail_entry_label' => $detailEntryLabel, 'detail_exit_label' => $detailExitLabel, 'detail_rank' => $detailRank !== false && $detailRank !== null ? (string) $detailRank : '', 'detail_ticker_pnl' => $detailTickerPnl !== null ? (string) $detailTickerPnl : '', 'detail_market_average' => $detailMarketAverage !== null ? (string) $detailMarketAverage : '', 'detail_support' => $detailSupport !== false && $detailSupport !== null ? (string) $detailSupport : '', 'detail_universe_size' => $detailUniverseSize !== false && $detailUniverseSize !== null ? (string) $detailUniverseSize : '', 'detail_trade_count' => $detailTradeCount !== false && $detailTradeCount !== null ? (string) $detailTradeCount : ''] as $detailName => $detailValue): ?><input type="hidden" name="<?= h($detailName) ?>" value="<?= h($detailValue) ?>"><?php endforeach; ?>
 <?php endif; ?>
@@ -478,7 +483,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="martingale_mode" value="<?= h($martingaleMode) ?>">
 <input type="hidden" name="martingale_timing" value="<?= h($martingaleTiming) ?>">
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
-<div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Остановить расчёты, сбросить кэш рейтингов и пересчитать выбранную пару" title="Остановить запущенные расчёты, сбросить кэш рейтингов и пересчитать выбранную пару">🧹</button></div>
+<div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Остановить все расчёты и очистить очередь рейтингов" title="Остановить все расчёты и очистить очередь рейтингов">🧹</button></div>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label>
 
@@ -555,6 +560,7 @@ svg.addEventListener('pointerleave',()=>{tip.style.display='none';crosshair.setA
 </script><?php endif; ?>
 <script>
 const filtersForm = document.querySelector('.filters');
+const rankingGenerationInput = document.querySelector('#ranking-generation');
 const saveModeToggle = document.querySelector('#save-mode-toggle');
 const saveModeValue = document.querySelector('#save-mode-value');
 const symbolSortMode = document.querySelector('#symbol-sort-mode');
@@ -882,6 +888,7 @@ async function handleMartingaleSettingsChange() {
         if (!response.ok || result.status !== 'ready') {
             throw new Error(result.message || 'Не удалось сбросить предыдущие рейтинги');
         }
+        rankingGenerationInput.value = result.generation;
         resetSucceeded = true;
     } catch (error) {
         writeAppliedMartingaleSettings(previousSettings);
@@ -1010,6 +1017,7 @@ resetSymbolCacheButton.addEventListener('click', async () => {
         });
         const result = await response.json();
         if (!response.ok || result.status !== 'ready') throw new Error(result.message || 'Не удалось сбросить кэш рейтингов');
+        rankingGenerationInput.value = result.generation;
         resetSucceeded = true;
         stoppedProcesses = Number(result.stopped_processes) || 0;
         symbolSortMode.value = '';
@@ -1020,14 +1028,11 @@ resetSymbolCacheButton.addEventListener('click', async () => {
     } finally {
         isResettingSymbolCache = false;
         resetSymbolCacheButton.disabled = false;
-        resetRefreshButton(resetSucceeded ? 'Кэш сброшен кнопкой 🧹' : 'Расчёты не удалось остановить');
+        resetRefreshButton(resetSucceeded ? 'Очередь расчётов очищена кнопкой 🧹' : 'Расчёты не удалось остановить');
         resetSymbolCacheButton.textContent = '🧹';
         resetSymbolCacheButton.title = resetSucceeded
-            ? `Остановлено расчётов: ${stoppedProcesses}. Кэш сброшен; пересчитываю выбранную пару.`
-            : resetError || 'Остановить запущенные расчёты, сбросить кэш рейтингов и пересчитать выбранную пару';
-        if (resetSucceeded) {
-            loadExitRanking();
-        }
+            ? `Очередь очищена. Остановлено процессов: ${stoppedProcesses}. Для нового расчёта нажмите кнопку рейтинга.`
+            : resetError || 'Остановить все расчёты и очистить очередь рейтингов';
     }
 });
 const wait = ms => new Promise(resolve => window.setTimeout(resolve, ms));

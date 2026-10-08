@@ -70,6 +70,11 @@ try {
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
         respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга.'], 500);
     }
+    $generationLock = fopen($cacheDir . '/strategy-ranking-generation.lock', 'c');
+    if ($generationLock === false || !flock($generationLock, LOCK_SH)) {
+        if (is_resource($generationLock)) fclose($generationLock);
+        respond(['status' => 'error', 'message' => 'Не удалось проверить поколение кэша рейтинга.'], 503);
+    }
     $generationPath = $cacheDir . '/strategy-ranking-generation.txt';
     $cacheGeneration = 'initial';
     if (is_file($generationPath)) {
@@ -78,6 +83,10 @@ try {
             respond(['status' => 'error', 'message' => 'Не удалось прочитать поколение кэша рейтинга.'], 503);
         }
         $cacheGeneration = trim($generationValue);
+    }
+    $requestedGeneration = (string) ($_GET['ranking_generation'] ?? '');
+    if ($requestedGeneration === '' || !hash_equals($cacheGeneration, $requestedGeneration)) {
+        respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
     }
     // Ignore legacy URL snapshot_ids: all ranking types share one frozen
     // snapshot per date range and generation, even across browser tabs.

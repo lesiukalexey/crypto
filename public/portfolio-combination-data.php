@@ -91,9 +91,18 @@ try {
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
         respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга.'], 500);
     }
+    $generationLock = fopen($cacheDir . '/strategy-ranking-generation.lock', 'c');
+    if ($generationLock === false || !flock($generationLock, LOCK_SH)) {
+        if (is_resource($generationLock)) fclose($generationLock);
+        respond(['status' => 'error', 'message' => 'Не удалось проверить поколение кэша рейтинга.'], 503);
+    }
     $generationPath = $cacheDir . '/strategy-ranking-generation.txt';
     $generation = is_file($generationPath) ? trim((string) file_get_contents($generationPath)) : 'initial';
     if ($generation === '') respond(['status' => 'error', 'message' => 'Не удалось прочитать поколение кэша рейтинга.'], 503);
+    $requestedGeneration = (string) ($_GET['ranking_generation'] ?? '');
+    if ($requestedGeneration === '' || !hash_equals($generation, $requestedGeneration)) {
+        respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
+    }
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $key = hash('sha256', json_encode([
