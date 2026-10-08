@@ -162,7 +162,9 @@ def main() -> int:
                     signals, shorts = [0], [immediate_short]
                 else:
                     signals, shorts = make_signals(rows, int(threshold) / 100, int(lookback), entry_family or "both")
-                if not signals:
+                if not signals or (
+                    args.martingale_mode == "none" and len(signals) < args.min_trades
+                ):
                     continue
                 contexts[symbol] = (
                     rows,
@@ -171,6 +173,17 @@ def main() -> int:
                     PriceTree([float(row["bid_price"]) for row in rows]),
                     PriceTree([float(row["ask_price"]) for row in rows]),
                 )
+
+            if not contexts:
+                # No ticker can meet the trade minimum for this entry. Count
+                # its candidates as completed without simulating each exit.
+                completed += candidate_count
+                write_json(status_path, {
+                    "status": "pending",
+                    "progress": min(99, int(completed * 100 / total)),
+                    "elapsed_seconds": int(time.monotonic() - started),
+                })
+                continue
 
             for base_exit_id, base_exit_label, take_profit, stop_loss in exit_specs(exit_profiles):
                 for target_policy, policy_label in martingale_target_policies(args.martingale_mode, stop_loss):

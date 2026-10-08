@@ -141,7 +141,9 @@ def main() -> int:
                     signals, shorts = [0], [immediate_short]
                 else:
                     signals, shorts = make_signals(rows, float(threshold), int(lookback), entry_direction)
-                if signals:
+                if signals and not (
+                    args.martingale_mode == "none" and len(signals) < args.min_trades
+                ):
                     bid_tree = PriceTree([float(row["bid_price"]) for row in rows])
                     ask_tree = PriceTree([float(row["ask_price"]) for row in rows])
                     fee_rate = args.fee_percent / 100

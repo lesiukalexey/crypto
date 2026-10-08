@@ -349,7 +349,17 @@ def main() -> int:
                     signals, shorts = [0], [immediate_short]
                 else:
                     signals, shorts = make_signals(rows, int(threshold_cents) / 100, int(lookback), entry_family or "both")
-                if not signals:
+                if not signals or (
+                    args.martingale_mode == "none" and len(signals) < args.min_trades
+                ):
+                    # Without martingale, each signal can open at most one
+                    # trade, so this entry cannot meet the ranking minimum.
+                    completed += total_per_entry
+                    write_json(status_path, {
+                        "status": "pending",
+                        "progress": min(99, int(completed * 100 / total)),
+                        "elapsed_seconds": int(time.monotonic() - started),
+                    })
                     continue
 
                 profile_best = [-math.inf]
