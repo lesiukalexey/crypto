@@ -77,23 +77,31 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
     $thresholdRanges = $thresholdMode === 'range'
         ? [rankingSingle($query, $thresholdSource, $thresholdDefault)]
         : $thresholdDefaults;
-    $families = [
-        'both' => ['window_prefix' => '', 'window_default' => ['from' => 5, 'to' => 40, 'step' => 5]],
-        'long' => ['window_prefix' => 'up_', 'window_default' => ['from' => 5, 'to' => 40, 'step' => 5]],
-        'short' => ['window_prefix' => 'down_', 'window_default' => ['from' => 5, 'to' => 40, 'step' => 5]],
-    ];
+    $windowDefault = ['from' => 5, 'to' => 40, 'step' => 5];
+    $windowMode = (string) ($query['window_mode'] ?? 'default');
+    $windowSource = 'window';
+    if ($windowMode !== 'range') {
+        $legacyLongMode = (string) ($query['up_window_mode'] ?? 'default');
+        $legacyShortMode = (string) ($query['down_window_mode'] ?? 'default');
+        if ($legacyLongMode === 'range' && $legacyShortMode !== 'range') {
+            $windowMode = 'range';
+            $windowSource = 'up_window';
+        } elseif ($legacyShortMode === 'range' && $legacyLongMode !== 'range') {
+            $windowMode = 'range';
+            $windowSource = 'down_window';
+        }
+    }
+    if (!in_array($windowMode, ['default', 'range'], true)) {
+        throw new InvalidArgumentException('Неизвестный режим диапазона.');
+    }
+    $windowRanges = $windowMode === 'range'
+        ? [rankingRange($query[$windowSource . '_from'] ?? $windowDefault['from'], $query[$windowSource . '_to'] ?? $windowDefault['to'], $query[$windowSource . '_step'] ?? $windowDefault['step'], false)]
+        : $windowDefaults;
+    $families = ['both', 'long', 'short'];
     $ranges = [];
     $modes = [];
     $entryProfiles = [];
-    foreach ($families as $family => $settings) {
-        $prefix = $settings['window_prefix'];
-        $windowMode = (string) ($query[$prefix . 'window_mode'] ?? 'default');
-        if (!in_array($windowMode, ['default', 'range'], true)) {
-            throw new InvalidArgumentException('Неизвестный режим диапазона.');
-        }
-        $windowRanges = $windowMode === 'range'
-            ? [rankingRange($query[$prefix . 'window_from'] ?? $settings['window_default']['from'], $query[$prefix . 'window_to'] ?? $settings['window_default']['to'], $query[$prefix . 'window_step'] ?? $settings['window_default']['step'], false)]
-            : $windowDefaults;
+    foreach ($families as $family) {
         $ranges[$family . '_threshold'] = $thresholdRanges;
         $ranges[$family . '_window'] = $windowRanges;
         $modes[$family . '_threshold'] = $thresholdMode;
