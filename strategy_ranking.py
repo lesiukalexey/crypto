@@ -22,6 +22,7 @@ import pymysql
 
 from app import load_config
 from database import connect_mysql
+from martingale import simulate_martingale
 
 TOP_PER_GROUP = 500
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -175,7 +176,15 @@ def simulate(
     fee_rate: float,
     take_profit: float | None,
     stop_loss: float | None,
+    martingale_mode: str = "none",
+    martingale_timing: str = "immediate",
+    martingale_attempts: int = 3,
 ) -> tuple[float, int]:
+    if martingale_mode != "none":
+        return simulate_martingale(
+            rows, signal_indexes, signal_shorts, bid_tree, ask_tree, start_balance,
+            fee_rate, take_profit, stop_loss, martingale_mode, martingale_timing, martingale_attempts,
+        )
     balance = start_balance
     signal_cursor = 0
     count = len(rows)
@@ -238,6 +247,9 @@ def main() -> int:
     parser.add_argument("--max-id", required=True, type=int)
     parser.add_argument("--cache-dir", required=True, type=Path)
     parser.add_argument("--ranking-params", required=True)
+    parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse"), default="none")
+    parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
+    parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
@@ -311,7 +323,7 @@ def main() -> int:
 
                     def consider(identifier: str, display: str, target: float | None, loss: float | None) -> None:
                         nonlocal completed
-                        pnl, trade_count = simulate(rows, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate, target, loss)
+                        pnl, trade_count = simulate(rows, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate, target, loss, args.martingale_mode, args.martingale_timing, args.martingale_attempts)
                         if trade_count < args.min_trades:
                             completed += 1
                             if completed % 1000 == 0:

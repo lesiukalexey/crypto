@@ -63,6 +63,9 @@ def main() -> int:
     parser.add_argument("--max-ids", required=True)
     parser.add_argument("--cache-dir", required=True, type=Path)
     parser.add_argument("--ranking-params", required=True)
+    parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse"), default="none")
+    parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
+    parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
@@ -176,6 +179,9 @@ def main() -> int:
                         fee_rate,
                         take_profit,
                         stop_loss,
+                        args.martingale_mode,
+                        args.martingale_timing,
+                        args.martingale_attempts,
                     )
                     if trade_count < args.min_trades:
                         continue

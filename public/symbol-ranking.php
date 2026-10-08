@@ -27,6 +27,14 @@ try {
     $minTrades = $saveMode ? 2 : 1;
     $balance = (string) ($_GET['balance'] ?? '10');
     $fee = (string) ($_GET['fee'] ?? '0.06');
+    $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
+    $martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');
+    $martingaleAttempts = (int) ($_GET['martingale_attempts'] ?? 3);
+    if (!in_array($martingaleMode, ['none', 'simple', 'reverse'], true)
+        || !in_array($martingaleTiming, ['immediate', 'rules'], true)
+        || $martingaleAttempts < 2 || $martingaleAttempts > 10) {
+        respond(['status' => 'error', 'message' => 'Некорректные параметры мартингейла.'], 400);
+    }
     if (rankingEntryConfig($entryConfig, $ranking, $entryProfileConfig['immediate_directions'] ?? []) === null) {
         respond(['status' => 'error', 'message' => 'Неизвестный порог входа.'], 400);
     }
@@ -67,7 +75,7 @@ try {
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
         respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга.'], 500);
     }
-    $key = hash('sha256', json_encode(['symbol-ranking-v4-directional-ranges', $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $maxIds, $minTrades, $ranking], JSON_THROW_ON_ERROR));
+    $key = hash('sha256', json_encode(['symbol-ranking-v5-martingale', $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $maxIds, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/symbols-' . $key . '.json';
     $statusPath = $cacheDir . '/symbols-' . $key . '.status.json';
     if (is_file($resultPath)) {
@@ -104,6 +112,9 @@ try {
                 . ' --max-ids ' . escapeshellarg(json_encode($maxIds, JSON_THROW_ON_ERROR))
                 . ' --cache-dir ' . escapeshellarg($cacheDir)
                 . ' --ranking-params ' . escapeshellarg(json_encode($ranking, JSON_THROW_ON_ERROR))
+                . ' --martingale-mode ' . escapeshellarg($martingaleMode)
+                . ' --martingale-timing ' . escapeshellarg($martingaleTiming)
+                . ' --martingale-attempts ' . escapeshellarg((string) $martingaleAttempts)
                 . ' >> ' . escapeshellarg($cacheDir . '/symbols-' . $key . '.log') . ' 2>&1 < /dev/null &';
             exec($command);
             flock($lock, LOCK_UN);
