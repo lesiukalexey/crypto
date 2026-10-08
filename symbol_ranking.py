@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pymysql
 
 from app import load_config
@@ -142,10 +143,10 @@ def main() -> int:
             symbol_completed = 0
             if len(quotes) >= 2:
                 if immediate_short is not None:
-                    signals, shorts = [0], [immediate_short]
+                    signals, shorts = np.array([0], dtype=np.int64), np.array([immediate_short], dtype=np.bool_)
                 else:
                     signals, shorts = make_signals(quotes, float(threshold), int(lookback), entry_direction)
-                if signals and not (
+                if len(signals) > 0 and not (
                     args.martingale_mode == "none" and len(signals) < args.min_trades
                 ):
                     bid_tree = PriceTree(quotes.bids)

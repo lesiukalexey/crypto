@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pymysql
 
 from app import load_config
 from database import connect_mysql
-from martingale import simulate_martingale
+from martingale import martingale_base_notional
 
 TOP_PER_GROUP = 500
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -47,14 +48,16 @@ class PriceTree:
             size *= 2
         self.size = size
         self.length = len(values)
-        self.maximum = [-math.inf] * (size * 2)
-        self.minimum = [math.inf] * (size * 2)
+        maximum = [-math.inf] * (size * 2)
+        minimum = [math.inf] * (size * 2)
         for index, value in enumerate(values):
-            self.maximum[size + index] = value
-            self.minimum[size + index] = value
+            maximum[size + index] = value
+            minimum[size + index] = value
         for node in range(size - 1, 0, -1):
-            self.maximum[node] = max(self.maximum[node * 2], self.maximum[node * 2 + 1])
-            self.minimum[node] = min(self.minimum[node * 2], self.minimum[node * 2 + 1])
+            maximum[node] = max(maximum[node * 2], maximum[node * 2 + 1])
+            minimum[node] = min(minimum[node * 2], minimum[node * 2 + 1])
+        self.maximum = np.asarray(maximum, dtype=np.float64)
+        self.minimum = np.asarray(minimum, dtype=np.float64)
 
     def first_ge(self, start: int, target: float) -> int | None:
         start = max(0, start)
@@ -101,18 +104,24 @@ class PriceTree:
 class QuoteArrays:
     """Numeric quote columns prepared once for a ranking simulation."""
 
-    bids: list[float]
-    asks: list[float]
-    lasts: list[float]
-    timestamps: list[float]
+    bids: np.ndarray
+    asks: np.ndarray
+    lasts: np.ndarray
+    timestamps: np.ndarray
+
+    def __post_init__(self) -> None:
+        self.bids = np.asarray(self.bids, dtype=np.float64)
+        self.asks = np.asarray(self.asks, dtype=np.float64)
+        self.lasts = np.asarray(self.lasts, dtype=np.float64)
+        self.timestamps = np.asarray(self.timestamps, dtype=np.float64)
 
     @classmethod
     def from_rows(cls, rows: list[dict[str, Any]]) -> "QuoteArrays":
         return cls(
-            [float(row["bid_price"]) for row in rows],
-            [float(row["ask_price"]) for row in rows],
-            [float(row["last_price"]) for row in rows],
-            [row["received_at_utc"].replace(tzinfo=timezone.utc).timestamp() for row in rows],
+            np.fromiter((float(row["bid_price"]) for row in rows), dtype=np.float64, count=len(rows)),
+            np.fromiter((float(row["ask_price"]) for row in rows), dtype=np.float64, count=len(rows)),
+            np.fromiter((float(row["last_price"]) for row in rows), dtype=np.float64, count=len(rows)),
+            np.fromiter((row["received_at_utc"].replace(tzinfo=timezone.utc).timestamp() for row in rows), dtype=np.float64, count=len(rows)),
         )
 
     def __len__(self) -> int:
@@ -165,7 +174,7 @@ def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction
         elif direction != "long" and movement <= -threshold and previous_movement > -threshold:
             indexes.append(index)
             directions.append(True)
-    return indexes, directions
+    return np.asarray(indexes, dtype=np.int64), np.asarray(directions, dtype=np.bool_)
 
 
 def make_signal_profiles(
@@ -220,7 +229,10 @@ def make_signal_profiles(
                         cents = values[candidate_index]
                         signals[(lookback, family, cents)][0].append(index)
                         signals[(lookback, family, cents)][1].append(True)
-    return signals
+    return {
+        key: (np.asarray(indexes, dtype=np.int64), np.asarray(directions, dtype=np.bool_))
+        for key, (indexes, directions) in signals.items()
+    }
 
 
 def build_entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | None, int | None, str | None, bool | None]]:
@@ -290,60 +302,49 @@ def simulate(
     martingale_attempts: int = 3,
     martingale_target_policy: str = "scaled",
 ) -> tuple[float, int]:
+    from numba_simulation import simulate_martingale_numba, simulate_numba
+
+    indexes = signal_indexes if isinstance(signal_indexes, np.ndarray) else np.asarray(signal_indexes, dtype=np.int64)
+    shorts = signal_shorts if isinstance(signal_shorts, np.ndarray) else np.asarray(signal_shorts, dtype=np.bool_)
+
     if martingale_mode != "none":
-        return simulate_martingale(
-            quotes, signal_indexes, signal_shorts, bid_tree, ask_tree, start_balance,
-            fee_rate, take_profit, stop_loss, martingale_mode, martingale_timing, martingale_attempts,
-            martingale_target_policy,
+        if martingale_mode not in ("simple", "reverse") or martingale_timing not in ("immediate", "rules") or not 2 <= martingale_attempts <= 10:
+            raise ValueError("Invalid martingale options")
+        if martingale_target_policy not in ("scaled", "fixed"):
+            raise ValueError("Invalid martingale exit target policy")
+        return simulate_martingale_numba(
+            quotes.bids, quotes.asks,
+            bid_tree.maximum, bid_tree.minimum, ask_tree.maximum, ask_tree.minimum,
+            bid_tree.size, bid_tree.length, indexes, shorts,
+            start_balance, fee_rate,
+            np.nan if take_profit is None else take_profit,
+            np.nan if stop_loss is None else stop_loss,
+            martingale_base_notional(
+                start_balance, fee_rate, stop_loss, martingale_mode, martingale_attempts, martingale_target_policy,
+            ),
+            0 if martingale_mode == "simple" else 1,
+            0 if martingale_timing == "immediate" else 1,
+            martingale_attempts,
+            0 if martingale_target_policy == "scaled" else 1,
         )
-    balance = start_balance
-    signal_cursor = 0
-    count = len(quotes)
-    trades_closed = 0
-    fee_factor = (1 + fee_rate) / (1 - fee_rate)
-    inverse_fee_factor = (1 - fee_rate) / (1 + fee_rate)
 
-    while balance > 0:
-        if signal_cursor >= len(signal_indexes):
-            break
-        entry_index = signal_indexes[signal_cursor]
-        is_short = signal_shorts[signal_cursor]
-        signal_cursor += 1
-        entry_price = quotes.bids[entry_index] if is_short else quotes.asks[entry_index]
-        if entry_price <= 0:
-            continue
+    return simulate_numba(
+        quotes.bids,
+        quotes.asks,
+        bid_tree.maximum,
+        bid_tree.minimum,
+        ask_tree.maximum,
+        ask_tree.minimum,
+        bid_tree.size,
+        bid_tree.length,
+        indexes,
+        shorts,
+        start_balance,
+        fee_rate,
+        np.nan if take_profit is None else take_profit,
+        np.nan if stop_loss is None else stop_loss,
+    )
 
-        first_take: int | None = None
-        first_stop: int | None = None
-        if is_short:
-            if take_profit is not None and take_profit < balance:
-                take_price = entry_price * inverse_fee_factor * (1 - take_profit / balance)
-                first_take = ask_tree.first_le(entry_index + 1, take_price)
-            if stop_loss is not None:
-                stop_price = entry_price * inverse_fee_factor * (1 + stop_loss / balance)
-                first_stop = ask_tree.first_ge(entry_index + 1, stop_price)
-        else:
-            if take_profit is not None:
-                take_price = entry_price * fee_factor * (1 + take_profit / balance)
-                first_take = bid_tree.first_ge(entry_index + 1, take_price)
-            if stop_loss is not None and stop_loss < balance:
-                stop_price = entry_price * fee_factor * (1 - stop_loss / balance)
-                first_stop = bid_tree.first_le(entry_index + 1, stop_price)
-
-        crossings = [index for index in (first_take, first_stop) if index is not None]
-        exit_index = min(crossings) if crossings else count - 1
-        exit_price = quotes.asks[exit_index] if is_short else quotes.bids[exit_index]
-        if is_short:
-            net_ratio = (entry_price * (1 - fee_rate) - exit_price * (1 + fee_rate)) / (entry_price * (1 + fee_rate))
-        else:
-            net_ratio = (exit_price * (1 - fee_rate) - entry_price * (1 + fee_rate)) / (entry_price * (1 + fee_rate))
-        balance *= 1 + net_ratio
-        trades_closed += 1
-
-        if not crossings:
-            break
-        signal_cursor = bisect.bisect_left(signal_indexes, exit_index + 1, lo=signal_cursor)
-    return balance - start_balance, trades_closed
 
 
 def martingale_target_policies(mode: str, stop_loss: float | None) -> list[tuple[str, str]]:
@@ -457,12 +458,12 @@ def main() -> int:
 
         for entry_id, entry_label, lookback, threshold_cents, entry_family, immediate_short in entry_specs_for_worker:
                 if len(quotes) < 2:
-                    signals, shorts = [], []
+                    signals, shorts = np.empty(0, dtype=np.int64), np.empty(0, dtype=np.bool_)
                 elif immediate_short is not None:
-                    signals, shorts = [0], [immediate_short]
+                    signals, shorts = np.array([0], dtype=np.int64), np.array([immediate_short], dtype=np.bool_)
                 else:
                     signals, shorts = make_signals(quotes, int(threshold_cents) / 100, int(lookback), entry_family or "both")
-                if not signals or (
+                if len(signals) == 0 or (
                     args.martingale_mode == "none" and len(signals) < args.min_trades
                 ):
                     # Without martingale, each signal can open at most one

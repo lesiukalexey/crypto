@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pymysql
 
 from app import load_config
@@ -163,13 +164,13 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
         return symbol, None, 0, 0, False
 
     if immediate_short is not None:
-        signals, shorts = [0], [immediate_short]
+        signals, shorts = np.array([0], dtype=np.int64), np.array([immediate_short], dtype=np.bool_)
     else:
         signals, shorts = state["signals_by_symbol"][symbol][
             (int(lookback), entry_family or "both", int(threshold))
         ]
     args = state["args"]
-    if not signals or (args.min_trades > len(signals) and args.martingale_mode == "none"):
+    if len(signals) == 0 or (args.min_trades > len(signals) and args.martingale_mode == "none"):
         return symbol, None, 0, 0, False
 
     price_trees = _PORTFOLIO_WORKER_PRICE_TREES.get(symbol)
