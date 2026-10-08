@@ -18,8 +18,6 @@ try {
     $exitProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/exit_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
     $rankingParameters = rankingParameters($_GET, $entryProfileConfig, $exitProfileConfig);
     $ranking = $rankingParameters['worker'];
-    $entryThresholdsCents = $ranking['entry_thresholds_cents'];
-    $entryWindows = $ranking['entry_windows'];
     $timezone = new DateTimeZone('Europe/Kyiv');
     $today = new DateTimeImmutable('today', $timezone);
     $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
@@ -30,11 +28,8 @@ try {
     $minTrades = $saveMode ? 2 : 1;
     $balance = (string) ($_GET['balance'] ?? '10');
     $fee = (string) ($_GET['fee'] ?? '0.06');
-    $isImmediateEntry = preg_match('/^immediate:(short|long)$/', $entryConfig, $immediateMatches) === 1
-        && in_array($immediateMatches[1], $entryProfileConfig['immediate_directions'] ?? [], true);
-    if (!$isImmediateEntry && (!preg_match('/^entry:(\d+):(\d+)$/', $entryConfig, $entryMatches)
-        || !in_array((int) $entryMatches[1], $entryWindows, true)
-        || !in_array((int) $entryMatches[2], $entryThresholdsCents, true))) {
+    $entrySelection = rankingEntryConfig($entryConfig, $ranking, $entryProfileConfig['immediate_directions'] ?? []);
+    if ($entrySelection === null) {
         respond(['status' => 'error', 'message' => 'Неизвестный порог входа.'], 400);
     }
     if (!preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $balance) || (float) $balance <= 0 || (float) $balance > 1000000000) {
@@ -92,61 +87,10 @@ try {
         }
         $cacheGeneration = trim($generationValue);
     }
-    $key = hash('sha256', json_encode(['ranking-v15-custom-ranges', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking], JSON_THROW_ON_ERROR));
+    $key = hash('sha256', json_encode(['ranking-v16-directional-ranges', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/' . $key . '.json';
     $statusPath = $cacheDir . '/' . $key . '.status.json';
     $profilePath = $cacheDir . '/' . $key . '.' . $entryConfig . '.json';
-    $legacyScanPath = $cacheDir . '/' . $key . '.legacy-scan.json';
-    if ($ranking === rankingParameters([], $entryProfileConfig, $exitProfileConfig)['worker'] && !is_file($resultPath)) {
-        $oldKey = hash('sha256', json_encode([
-            'ranking-v14-cache-generation', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue,
-            $balance, $fee, $minTrades, $entryWindows, $entryThresholdsCents,
-            $entryProfileConfig['immediate_directions'] ?? [], $exitProfileConfig,
-        ], JSON_THROW_ON_ERROR));
-        $oldResultPath = $cacheDir . '/' . $oldKey . '.json';
-        $oldResult = is_file($oldResultPath) ? json_decode((string) file_get_contents($oldResultPath), true) : null;
-        if (is_array($oldResult) && ($oldResult['status'] ?? '') === 'ready') {
-            $profilesCopied = true;
-            foreach ($oldResult['entries'] ?? [] as $entry) {
-                $entryId = (string) ($entry['id'] ?? '');
-                $oldProfile = $cacheDir . '/' . $oldKey . '.' . $entryId . '.json';
-                $newProfile = $cacheDir . '/' . $key . '.' . $entryId . '.json';
-                if (!is_file($oldProfile) || !copy($oldProfile, $newProfile)) $profilesCopied = false;
-            }
-            if ($profilesCopied && copy($oldResultPath, $resultPath)) {
-                file_put_contents($statusPath, json_encode(['status' => 'ready', 'progress' => 100]));
-            }
-        }
-    }
-    if ($cacheGeneration === 'initial' && $ranking === rankingParameters([], $entryProfileConfig, $exitProfileConfig)['worker']
-        && !is_file($resultPath) && !is_file($legacyScanPath)) {
-        $legacyCacheArgs = ['ranking-v12-save-mode', $config['category'], $symbol, $startValue, $endValue, $balance, $fee, 0, $minTrades, $entryWindows, $entryThresholdsCents, $entryProfileConfig['immediate_directions'] ?? [], $exitProfileConfig];
-        $candidateIds = [$maxId];
-        if ($maxId > 0) {
-            $candidateStmt = $pdo->prepare('SELECT id FROM quote_snapshots WHERE category = ? AND symbol = ? AND id <= ? AND received_at_utc >= ? AND received_at_utc < ? ORDER BY id DESC');
-            $candidateStmt->execute([$config['category'], $symbol, $maxId, $startUtc, $endUtc]);
-            $candidateIds = array_map('intval', $candidateStmt->fetchAll(PDO::FETCH_COLUMN));
-        }
-        $candidateIds = array_values(array_unique($candidateIds));
-        foreach ($candidateIds as $candidateId) {
-            $legacyCacheArgs[7] = $candidateId;
-            $legacyKey = hash('sha256', json_encode($legacyCacheArgs, JSON_THROW_ON_ERROR));
-            $legacyResultPath = $cacheDir . '/' . $legacyKey . '.json';
-            if (!is_file($legacyResultPath)) continue;
-            $legacyResult = json_decode((string) file_get_contents($legacyResultPath), true);
-            if (!is_array($legacyResult) || ($legacyResult['status'] ?? '') !== 'ready') continue;
-            $legacyEntries = $legacyResult['entries'] ?? [];
-            $legacyProfilePath = $cacheDir . '/' . $legacyKey . '.' . $entryConfig . '.json';
-            if ($legacyEntries !== []) {
-                if (!is_file($legacyProfilePath)) continue;
-                $legacyProfile = json_decode((string) file_get_contents($legacyProfilePath), true);
-                if (!is_array($legacyProfile) || ($legacyProfile['status'] ?? '') !== 'ready') continue;
-                if (!copy($legacyProfilePath, $profilePath)) continue;
-            }
-            if (copy($legacyResultPath, $resultPath)) break;
-        }
-        file_put_contents($legacyScanPath, json_encode(['checked' => true]));
-    }
     $entries = [];
     if (is_file($resultPath)) {
         $result = json_decode((string) file_get_contents($resultPath), true);

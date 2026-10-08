@@ -10,6 +10,7 @@ import heapq
 import json
 import math
 import os
+import re
 import sys
 import time
 from datetime import date, datetime, time as day_time, timedelta, timezone
@@ -24,10 +25,6 @@ from database import connect_mysql
 
 TOP_PER_GROUP = 500
 KYIV = ZoneInfo("Europe/Kyiv")
-ENTRY_PROFILE_CONFIG = json.loads(Path(__file__).with_name("entry_profiles.json").read_text(encoding="utf-8"))
-ENTRY_WINDOWS = tuple(int(value) for value in ENTRY_PROFILE_CONFIG["snapshot_windows"])
-ENTRY_THRESHOLDS_CENTS = tuple(int(value) for value in ENTRY_PROFILE_CONFIG["thresholds_cents"])
-IMMEDIATE_DIRECTIONS = tuple(str(value) for value in ENTRY_PROFILE_CONFIG.get("immediate_directions", ["short", "long"]))
 EXIT_PROFILE_CONFIG = json.loads(Path(__file__).with_name("exit_profiles.json").read_text(encoding="utf-8"))
 
 
@@ -88,7 +85,9 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def make_signals(rows: list[dict[str, Any]], threshold: float, lookback: int) -> tuple[list[int], list[bool]]:
+def make_signals(rows: list[dict[str, Any]], threshold: float, lookback: int, direction: str = "both") -> tuple[list[int], list[bool]]:
+    if direction not in ("both", "long", "short"):
+        raise ValueError("Invalid entry direction")
     count = len(rows)
     timestamps = [row["received_at_utc"].replace(tzinfo=timezone.utc).timestamp() for row in rows]
     gaps = [0.0] + [timestamps[index] - timestamps[index - 1] for index in range(1, count)]
@@ -105,13 +104,65 @@ def make_signals(rows: list[dict[str, Any]], threshold: float, lookback: int) ->
         previous_base = float(rows[index - lookback - 1]["last_price"])
         movement = float(rows[index]["last_price"]) - current_base
         previous_movement = float(rows[index - 1]["last_price"]) - previous_base
-        if movement >= threshold and previous_movement < threshold:
+        if direction != "short" and movement >= threshold and previous_movement < threshold:
             indexes.append(index)
             directions.append(False)
-        elif movement <= -threshold and previous_movement > -threshold:
+        elif direction != "long" and movement <= -threshold and previous_movement > -threshold:
             indexes.append(index)
             directions.append(True)
     return indexes, directions
+
+
+def build_entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | None, int | None, str | None, bool | None]]:
+    specs: list[tuple[str, str, int | None, int | None, str | None, bool | None]] = []
+    labels = {
+        "both": lambda amount: f"±{amount:.2f} USDT",
+        "long": lambda amount: f"+{amount:.2f} USDT при росте",
+        "short": lambda amount: f"−{amount:.2f} USDT при падении",
+    }
+    for family in ("both", "long", "short"):
+        profile = ranking["entry_profiles"][family]
+        prefix = "entry" if family == "both" else f"entry:{family}"
+        for window in profile["windows"]:
+            for threshold in profile["thresholds_cents"]:
+                suffix = f"{window}:{threshold}"
+                specs.append((
+                    f"{prefix}:{suffix}",
+                    f"{labels[family](threshold / 100)} за {window} снимков",
+                    int(window),
+                    int(threshold),
+                    family,
+                    None,
+                ))
+    for direction in ranking["immediate_directions"]:
+        is_short = direction == "short"
+        specs.append((
+            f"immediate:{direction}",
+            f"Сразу · 1 заявка на {'продажу' if is_short else 'покупку'}",
+            None,
+            None,
+            None,
+            is_short,
+        ))
+    return specs
+
+
+def resolve_entry_config(entry_config: str, ranking: dict[str, Any]) -> dict[str, Any] | None:
+    if entry_config.startswith("immediate:"):
+        direction = entry_config.removeprefix("immediate:")
+        if direction in ranking["immediate_directions"] and direction in ("long", "short"):
+            return {"type": "immediate", "direction": direction}
+        return None
+    match = re.fullmatch(r"entry(?::(long|short))?:(\d+):(\d+)", entry_config)
+    if match is None:
+        return None
+    family = match.group(1) or "both"
+    window = int(match.group(2))
+    threshold = int(match.group(3))
+    profile = ranking["entry_profiles"].get(family)
+    if not isinstance(profile, dict) or window not in profile["windows"] or threshold not in profile["thresholds_cents"]:
+        return None
+    return {"type": "momentum", "family": family, "window": window, "threshold_cents": threshold}
 
 
 def simulate(
@@ -189,9 +240,6 @@ def main() -> int:
     parser.add_argument("--ranking-params", required=True)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
-    entry_windows = ranking["entry_windows"]
-    entry_thresholds = ranking["entry_thresholds_cents"]
-    immediate_directions = ranking["immediate_directions"]
     exit_profiles = ranking["exit_profiles"]
 
     status_path = args.cache_dir / f"{args.cache_key}.status.json"
@@ -231,14 +279,8 @@ def main() -> int:
             ("profit", "Автоматические · фиксированный Take Profit", len(exit_values("profit", exit_profiles))),
         ]
         total_per_entry = sum(spec[2] for spec in groups_specs)
-        entry_specs: list[tuple[str, str, int | None, int | None, bool | None]] = []
-        for lookback in entry_windows:
-            for threshold_cents in entry_thresholds:
-                entry_specs.append((f"entry:{lookback}:{threshold_cents}", f"±{threshold_cents / 100:.2f} USDT за {lookback} снимков", lookback, threshold_cents, None))
-        for direction in immediate_directions:
-            is_short = direction == "short"
-            entry_specs.append((f"immediate:{direction}", f"Сразу · 1 заявка на {'продажу' if is_short else 'покупку'}", None, None, is_short))
-        total = total_per_entry * len(entry_specs)
+        entry_specs_for_worker = build_entry_specs(ranking)
+        total = total_per_entry * len(entry_specs_for_worker)
         completed = 0
         started = time.monotonic()
         entries: list[dict[str, Any]] = []
@@ -251,13 +293,13 @@ def main() -> int:
             ask_tree = PriceTree([])
         fee_rate = args.fee_percent / 100
 
-        for entry_id, entry_label, lookback, threshold_cents, immediate_short in entry_specs:
+        for entry_id, entry_label, lookback, threshold_cents, entry_family, immediate_short in entry_specs_for_worker:
                 if len(rows) < 2:
                     signals, shorts = [], []
                 elif immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(rows, int(threshold_cents) / 100, int(lookback))
+                    signals, shorts = make_signals(rows, int(threshold_cents) / 100, int(lookback), entry_family or "both")
                 if not signals:
                     continue
 

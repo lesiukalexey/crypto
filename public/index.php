@@ -16,14 +16,21 @@ try {
 }
 $rankingRanges = $rankingParameters['ranges'];
 $rankingModes = $rankingParameters['modes'];
-$thresholdCustomRange = $rankingModes['threshold'] === 'range' ? $rankingRanges['threshold'][0] : ['from' => 1, 'to' => 10, 'step' => 1];
-$windowCustomRange = $rankingModes['window'] === 'range' ? $rankingRanges['window'][0] : ['from' => 5, 'to' => 40, 'step' => 5];
-$entryThresholdsCents = $rankingParameters['worker']['entry_thresholds_cents'];
-$entryWindows = $rankingParameters['worker']['entry_windows'];
-$entryThresholdText = implode(', ', array_map(static fn (int $cents): string => '±' . number_format($cents / 100, 2, ',', ' '), $entryThresholdsCents));
-$entryWindowText = implode(', ', array_map(static fn (int $window): string => (string) $window, $entryWindows));
-$defaultThresholdText = implode(', ', array_map(static fn (int $cents): string => '±' . number_format($cents / 100, 2, ',', ' '), $entryProfileConfig['thresholds_cents']));
-$defaultWindowText = implode(', ', array_map('strval', $entryProfileConfig['snapshot_windows']));
+$entryFamilies = [
+    'both' => ['prefix' => '', 'mode_prefix' => '', 'label' => '±', 'description' => 'рост и падение'],
+    'long' => ['prefix' => 'up_', 'mode_prefix' => 'up_', 'label' => '+', 'description' => 'только рост · только покупки'],
+    'short' => ['prefix' => 'down_', 'mode_prefix' => 'down_', 'label' => '−', 'description' => 'только падение · только продажи'],
+];
+$entryProfiles = $rankingParameters['worker']['entry_profiles'];
+$entryThresholdsCents = $entryProfiles['both']['thresholds_cents'];
+$entryWindows = $entryProfiles['both']['windows'];
+$entryThresholdSummaries = [];
+foreach ($entryFamilies as $family => $familySettings) {
+    $entryThresholdSummaries[$family] = implode(', ', array_map(
+        static fn (int $cents): string => $familySettings['label'] . number_format($cents / 100, 2, ',', ' '),
+        $entryProfiles[$family]['thresholds_cents']
+    ));
+}
 $immediateEntryText = implode(' и ', array_map(static fn (string $direction): string => 'сразу — 1 заявка на ' . ($direction === 'short' ? 'продажу' : 'покупку'), $entryProfileConfig['immediate_directions'] ?? []));
 $exitRangeText = static function (array $range): string {
     $min = number_format($range['from'] / 100, 2, ',', ' ');
@@ -59,16 +66,16 @@ if (!preg_match($decimalPattern, $feePercent) || (float) $feePercent < 0 || (flo
     $error = 'Комиссия должна быть от 0 до 5 процентов за сторону.';
     $feePercent = '0.06';
 }
-$isImmediateEntry = preg_match('/^immediate:(short|long)$/', $entryConfig, $immediateMatches) === 1
-    && in_array($immediateMatches[1], $entryProfileConfig['immediate_directions'] ?? [], true);
-if (!$isImmediateEntry && (!preg_match('/^entry:(\d+):(\d+)$/', $entryConfig, $entryMatches)
-    || !in_array((int) $entryMatches[1], $entryWindows, true)
-    || !in_array((int) $entryMatches[2], $entryThresholdsCents, true))) {
+$entrySelection = rankingEntryConfig($entryConfig, $rankingParameters['worker'], $entryProfileConfig['immediate_directions'] ?? []);
+if ($entrySelection === null) {
     $entryConfig = $defaultEntryConfig;
-    $entryMatches = [null, (string) $entryWindows[0], (string) $entryThresholdsCents[0]];
+    $entrySelection = rankingEntryConfig($entryConfig, $rankingParameters['worker'], $entryProfileConfig['immediate_directions'] ?? []);
 }
-$momentumLookback = $isImmediateEntry ? 0 : (int) $entryMatches[1];
-$momentumThresholdCents = $isImmediateEntry ? 0 : (int) $entryMatches[2];
+$isImmediateEntry = $entrySelection['type'] === 'immediate';
+$immediateDirection = $isImmediateEntry ? $entrySelection['direction'] : null;
+$entryDirection = $isImmediateEntry ? 'both' : $entrySelection['family'];
+$momentumLookback = $isImmediateEntry ? 0 : $entrySelection['window'];
+$momentumThresholdCents = $isImmediateEntry ? 0 : $entrySelection['threshold_cents'];
 $momentumThreshold = $momentumThresholdCents / 100;
 $profitTarget = '0.10';
 $lossThreshold = '-0.10';
@@ -172,7 +179,7 @@ $hasContinuousWindow = static function (int $index) use ($rows, $momentumLookbac
     }
     return true;
 };
-$findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $momentumLookback, $momentumThreshold, $hasContinuousWindow): ?array {
+$findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $momentumLookback, $momentumThreshold, $entryDirection, $hasContinuousWindow): ?array {
     for ($i = max($fromIndex, $momentumLookback + 1); $i < $rowCount - 1; $i++) {
         if (!$hasContinuousWindow($i) || !$hasContinuousWindow($i - 1)) continue;
         $priceNow = (float) $rows[$i]['last_price'];
@@ -182,14 +189,14 @@ $findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $mo
         if ($priceBefore <= 0 || $pricePreviousBefore <= 0) continue;
         $move = $priceNow - $priceBefore;
         $previousMove = $pricePrevious - $pricePreviousBefore;
-        if ($move >= $momentumThreshold && $previousMove < $momentumThreshold) return [$i, false];
-        if ($move <= -$momentumThreshold && $previousMove > -$momentumThreshold) return [$i, true];
+        if ($entryDirection !== 'short' && $move >= $momentumThreshold && $previousMove < $momentumThreshold) return [$i, false];
+        if ($entryDirection !== 'long' && $move <= -$momentumThreshold && $previousMove > -$momentumThreshold) return [$i, true];
     }
     return null;
 };
 while (bccomp($balance, '0', 24) > 0) {
     if ($isImmediateEntry) {
-        $signal = $tradeEntryIndex === 0 && $rowCount > 1 ? [0, $immediateMatches[1] === 'short'] : null;
+        $signal = $tradeEntryIndex === 0 && $rowCount > 1 ? [0, $immediateDirection === 'short'] : null;
     } else {
         $signal = $findMomentumEntry($tradeEntryIndex);
     }
@@ -275,12 +282,26 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
-<div class="ranking-range-heading"><h3>Порог входа · движение Last (USDT)</h3><label class="ranking-mode-label"><select aria-label="Режим значений порога входа" class="ranking-mode-input" name="threshold_mode" data-default-value="default" data-range="threshold"><option value="default" <?= $rankingModes['threshold'] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes['threshold'] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
-<p class="small-note">Текущие значения: <?= h($defaultThresholdText) ?> USDT.</p>
-<div class="ranking-custom" id="threshold-custom" <?= $rankingModes['threshold'] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'threshold', $thresholdCustomRange, true, ['from' => 1, 'to' => 10, 'step' => 1]) ?></div>
-<div class="ranking-range-heading"><h3>Порог входа · окно (число снимков)</h3><label class="ranking-mode-label"><select aria-label="Режим окна входа" class="ranking-mode-input" name="window_mode" data-default-value="default" data-range="window"><option value="default" <?= $rankingModes['window'] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes['window'] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
-<p class="small-note">Текущие значения: <?= h($defaultWindowText) ?> снимков.</p>
-<div class="ranking-custom" id="window-custom" <?= $rankingModes['window'] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'window', $windowCustomRange, false, ['from' => 5, 'to' => 40, 'step' => 5]) ?></div>
+<?php foreach ($entryFamilies as $family => $familySettings):
+    $modeKey = $family . '_threshold';
+    $windowModeKey = $family . '_window';
+    $thresholdCustomRange = $rankingModes[$modeKey] === 'range' ? $rankingRanges[$modeKey][0] : ['from' => 1, 'to' => 10, 'step' => 1];
+    $windowCustomRange = $rankingModes[$windowModeKey] === 'range' ? $rankingRanges[$windowModeKey][0] : ['from' => 5, 'to' => 40, 'step' => 5];
+    $thresholdLabel = $familySettings['label'];
+    $thresholdValuesText = implode(', ', array_map(static fn (int $cents): string => $thresholdLabel . number_format($cents / 100, 2, ',', ' '), $entryProfiles[$family]['thresholds_cents']));
+    $windowValuesText = implode(', ', array_map('strval', $entryProfiles[$family]['windows']));
+    $modePrefix = $familySettings['mode_prefix'];
+    $inputPrefix = $familySettings['prefix'];
+    $thresholdControlId = $family === 'both' ? 'threshold' : $family . '-threshold';
+    $windowControlId = $family === 'both' ? 'window' : $family . '-window';
+?>
+<div class="ranking-range-heading"><h3>Порог входа · движение Last (USDT) · <?= h($thresholdLabel) ?> <small><?= h($familySettings['description']) ?></small></h3><label class="ranking-mode-label"><select aria-label="Режим порога входа <?= h($thresholdLabel) ?>" class="ranking-mode-input" name="<?= h($modePrefix) ?>threshold_mode" data-default-value="default" data-range="<?= h($thresholdControlId) ?>"><option value="default" <?= $rankingModes[$modeKey] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes[$modeKey] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
+<p class="small-note">Значения по умолчанию: <?= h($thresholdValuesText) ?> USDT.</p>
+<div class="ranking-custom" id="<?= h($thresholdControlId) ?>-custom" <?= $rankingModes[$modeKey] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', $inputPrefix . 'threshold', $thresholdCustomRange, true, ['from' => 1, 'to' => 10, 'step' => 1]) ?></div>
+<div class="ranking-range-heading"><h3>Порог входа · окно (число снимков) · <?= h($thresholdLabel) ?></h3><label class="ranking-mode-label"><select aria-label="Режим окна входа <?= h($thresholdLabel) ?>" class="ranking-mode-input" name="<?= h($modePrefix) ?>window_mode" data-default-value="default" data-range="<?= h($windowControlId) ?>"><option value="default" <?= $rankingModes[$windowModeKey] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes[$windowModeKey] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
+<p class="small-note">Значения по умолчанию: <?= h($windowValuesText) ?> снимков.</p>
+<div class="ranking-custom" id="<?= h($windowControlId) ?>-custom" <?= $rankingModes[$windowModeKey] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', $inputPrefix . 'window', $windowCustomRange, false, ['from' => 5, 'to' => 40, 'step' => 5]) ?></div>
+<?php endforeach; ?>
 </div>
 <h3>TakeProfit &amp; StopLoss (USDT)</h3>
 <p class="small-note">Совместный расчёт: каждый Take Profit проверяется с каждым Stop Loss.</p>
@@ -290,7 +311,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], true, $defaultRankingRanges['loss']) ?>
 <p class="small-note">Граница «до» включается, если на неё попадает шаг.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 </details>
-</form><p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Диапазоны входа:</strong> <?= h($entryThresholdText) ?> USDT. <strong>Окна:</strong> <?= h($entryWindowText) ?> снимков. Каждый порог проверяется на каждом окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Каждый порог задает движение Last в обе стороны за выбранное число снимков. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></section>
+</form><p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> <?= h($entryThresholdSummaries['both']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['both']['windows']))) ?> снимков. Рост +: <?= h($entryThresholdSummaries['long']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['long']['windows']))) ?>. Падение −: <?= h($entryThresholdSummaries['short']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['short']['windows']))) ?>. У каждого направления свои диапазоны и окна; каждый порог проверяется на каждом окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">Для каждой пары показано её место среди всех комбинаций по среднему итогу на рынке.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= count($rows) ?> снимков</span></div>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
@@ -300,7 +321,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <section class="panel" id="results"><div class="chart-head"><h2>Сделки стратегии</h2><span class="count"><?= count($trades) ?> закрытых сделок</span></div>
 <div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div></div>
 <?php if (count($rows) < 2): ?><div class="empty">Нужно минимум два снимка в выбранном периоде, чтобы выполнить симуляцию.</div>
-<?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ±' . number_format($momentumThreshold, 2, ',', ' ') . ' USDT за ' . $momentumLookback . ' интервалов между снимками.' ?></div>
+<?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 2, ',', ' ') . ' USDT за ' . $momentumLookback . ' интервалов между снимками.' ?></div>
 <?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>
 <?php foreach ($trades as $index => $trade): $resultCompare = bccomp($trade['net'], '0', 24); $rowClass = $resultCompare > 0 ? 'trade-positive' : ($resultCompare < 0 ? 'trade-negative' : 'trade-flat'); $totalFees = bcadd($trade['entry_fee'], $trade['exit_fee'], 24); $tradeEntryLabel = $trade['is_short'] ? 'Продажа Bid' : 'Покупка Ask'; $tradeExitLabel = $trade['is_short'] ? 'Покупка Ask' : 'Продажа Bid'; ?>
 <tr class="<?= $rowClass ?> trade-row" tabindex="0" data-entry-time="<?= epochMilliseconds($trade['entry']['received_at_utc']) ?>" data-exit-time="<?= epochMilliseconds($trade['exit']['received_at_utc']) ?>"><td><?= $index + 1 ?></td><td><?= h(formatKyivTime($trade['entry']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeEntryLabel . ' · ' . $trade['entry_price']) ?></td><td><?= h(formatKyivTime($trade['exit']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeExitLabel . ' · ' . $trade['exit_price']) ?></td><td><?= money($trade['quantity']) ?></td><td><?= money($trade['gross']) ?></td><td><?= money($totalFees) ?></td><td><?= $resultCompare > 0 ? '+' : '' ?><?= money($trade['net']) ?></td><td><?= money($trade['balance']) ?></td><td class="reason"><?= h($trade['reason']) ?></td></tr>

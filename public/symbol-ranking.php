@@ -27,13 +27,9 @@ try {
     $minTrades = $saveMode ? 2 : 1;
     $balance = (string) ($_GET['balance'] ?? '10');
     $fee = (string) ($_GET['fee'] ?? '0.06');
-    $immediateDirections = $entryProfileConfig['immediate_directions'] ?? [];
-    $validImmediate = preg_match('/^immediate:(short|long)$/', $entryConfig, $immediateMatches) === 1
-        && in_array($immediateMatches[1], $immediateDirections, true);
-    $validMomentum = preg_match('/^entry:(\d+):(\d+)$/', $entryConfig, $entryMatches) === 1
-        && in_array((int) $entryMatches[1], $ranking['entry_windows'], true)
-        && in_array((int) $entryMatches[2], $ranking['entry_thresholds_cents'], true);
-    if (!$validImmediate && !$validMomentum) respond(['status' => 'error', 'message' => 'Неизвестный порог входа.'], 400);
+    if (rankingEntryConfig($entryConfig, $ranking, $entryProfileConfig['immediate_directions'] ?? []) === null) {
+        respond(['status' => 'error', 'message' => 'Неизвестный порог входа.'], 400);
+    }
     if (!preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $balance) || (float) $balance <= 0 || (float) $balance > 1000000000) {
         respond(['status' => 'error', 'message' => 'Некорректный стартовый баланс.'], 400);
     }
@@ -71,7 +67,7 @@ try {
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
         respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга.'], 500);
     }
-    $key = hash('sha256', json_encode(['symbol-ranking-v3-custom-ranges', $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $maxIds, $minTrades, $ranking], JSON_THROW_ON_ERROR));
+    $key = hash('sha256', json_encode(['symbol-ranking-v4-directional-ranges', $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $maxIds, $minTrades, $ranking], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/symbols-' . $key . '.json';
     $statusPath = $cacheDir . '/symbols-' . $key . '.status.json';
     if (is_file($resultPath)) {

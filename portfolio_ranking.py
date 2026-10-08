@@ -22,6 +22,7 @@ from app import load_config
 from database import connect_mysql
 from strategy_ranking import (
     PriceTree,
+    build_entry_specs,
     exit_values,
     make_signals,
     simulate,
@@ -29,30 +30,6 @@ from strategy_ranking import (
 )
 
 KYIV = ZoneInfo("Europe/Kyiv")
-
-
-def entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | None, int | None, bool | None]]:
-    specs = [
-        (
-            f"entry:{window}:{threshold}",
-            f"±{threshold / 100:.2f} USDT за {window} снимков",
-            window,
-            threshold,
-            None,
-        )
-        for window in ranking["entry_windows"]
-        for threshold in ranking["entry_thresholds_cents"]
-    ]
-    for direction in ranking["immediate_directions"]:
-        is_short = direction == "short"
-        specs.append((
-            f"immediate:{direction}",
-            f"Сразу · 1 заявка на {'продажу' if is_short else 'покупку'}",
-            None,
-            None,
-            is_short,
-        ))
-    return specs
 
 
 def exit_specs(profiles: dict[str, Any]) -> Iterator[tuple[str, str, float | None, float | None]]:
@@ -153,7 +130,7 @@ def main() -> int:
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
 
-        specs = entry_specs(ranking)
+        specs = build_entry_specs(ranking)
         candidate_count = exit_count(exit_profiles)
         total = len(specs) * candidate_count
         completed = 0
@@ -164,7 +141,7 @@ def main() -> int:
         best_by_symbol: dict[str, dict[str, Any]] = {}
         selected_entry_best: dict[str, dict[str, Any]] = {}
 
-        for entry_id, entry_label, lookback, threshold, immediate_short in specs:
+        for entry_id, entry_label, lookback, threshold, entry_family, immediate_short in specs:
             contexts: dict[str, tuple[list[dict[str, Any]], list[int], list[bool], PriceTree, PriceTree]] = {}
             for symbol, rows in rows_by_symbol.items():
                 if len(rows) < 2:
@@ -172,7 +149,7 @@ def main() -> int:
                 if immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(rows, int(threshold) / 100, int(lookback))
+                    signals, shorts = make_signals(rows, int(threshold) / 100, int(lookback), entry_family or "both")
                 if not signals:
                     continue
                 contexts[symbol] = (

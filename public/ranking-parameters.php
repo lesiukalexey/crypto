@@ -57,38 +57,68 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         || rankingValues($windowDefaults) !== array_map('intval', $entryDefaults['snapshot_windows'])) {
         throw new LogicException('Наборы значений входа не совпадают с настройками диапазонов.');
     }
-    $thresholdMode = (string) ($query['threshold_mode'] ?? 'default');
-    $windowMode = (string) ($query['window_mode'] ?? 'default');
-    if (!in_array($thresholdMode, ['default', 'range'], true) || !in_array($windowMode, ['default', 'range'], true)) {
-        throw new InvalidArgumentException('Неизвестный режим диапазона.');
-    }
-    $ranges = [
-        'threshold' => $thresholdMode === 'range'
-            ? [rankingSingle($query, 'threshold', ['from' => 1, 'to' => 10, 'step' => 1])]
-            : $thresholdDefaults,
-        'window' => $windowMode === 'range'
-            ? [rankingRange($query['window_from'] ?? 5, $query['window_to'] ?? 40, $query['window_step'] ?? 5, false)]
-            : $windowDefaults,
+    $families = [
+        'both' => ['prefix' => '', 'threshold_default' => ['from' => 1, 'to' => 10, 'step' => 1], 'window_default' => ['from' => 5, 'to' => 40, 'step' => 5]],
+        'long' => ['prefix' => 'up_', 'threshold_default' => ['from' => 1, 'to' => 10, 'step' => 1], 'window_default' => ['from' => 5, 'to' => 40, 'step' => 5]],
+        'short' => ['prefix' => 'down_', 'threshold_default' => ['from' => 1, 'to' => 10, 'step' => 1], 'window_default' => ['from' => 5, 'to' => 40, 'step' => 5]],
     ];
+    $ranges = [];
+    $modes = [];
+    $entryProfiles = [];
+    foreach ($families as $family => $settings) {
+        $prefix = $settings['prefix'];
+        $thresholdMode = (string) ($query[$prefix . 'threshold_mode'] ?? 'default');
+        $windowMode = (string) ($query[$prefix . 'window_mode'] ?? 'default');
+        if (!in_array($thresholdMode, ['default', 'range'], true) || !in_array($windowMode, ['default', 'range'], true)) {
+            throw new InvalidArgumentException('Неизвестный режим диапазона.');
+        }
+        $thresholdRanges = $thresholdMode === 'range'
+            ? [rankingSingle($query, $prefix . 'threshold', $settings['threshold_default'])]
+            : $thresholdDefaults;
+        $windowRanges = $windowMode === 'range'
+            ? [rankingRange($query[$prefix . 'window_from'] ?? $settings['window_default']['from'], $query[$prefix . 'window_to'] ?? $settings['window_default']['to'], $query[$prefix . 'window_step'] ?? $settings['window_default']['step'], false)]
+            : $windowDefaults;
+        $ranges[$family . '_threshold'] = $thresholdRanges;
+        $ranges[$family . '_window'] = $windowRanges;
+        $modes[$family . '_threshold'] = $thresholdMode;
+        $modes[$family . '_window'] = $windowMode;
+        $entryProfiles[$family] = [
+            'thresholds_cents' => rankingValues($thresholdRanges),
+            'windows' => rankingValues($windowRanges),
+        ];
+    }
+    // Preserve the original symmetric-family aliases for existing clients.
+    $ranges['threshold'] = $ranges['both_threshold'];
+    $ranges['window'] = $ranges['both_window'];
+    $modes['threshold'] = $modes['both_threshold'];
+    $modes['window'] = $modes['both_window'];
     foreach (['fixed_tp' => 'fixed', 'fixed_sl' => 'fixed', 'profit' => 'profit', 'loss' => 'loss'] as $name => $family) {
         $profile = $exitDefaults[$family];
         $default = ['from' => (int) $profile['min_cents'], 'to' => (int) $profile['max_cents'], 'step' => (int) $profile['step_cents']];
         $ranges[$name] = rankingSingle($query, $name, $default);
     }
-    $thresholds = rankingValues($ranges['threshold']);
-    $windows = rankingValues($ranges['window']);
-    $count = (count($thresholds) * count($windows) + count($entryDefaults['immediate_directions'] ?? []))
+    $entryVariantCount = array_sum(array_map(
+        static fn (array $profile): int => count($profile['thresholds_cents']) * count($profile['windows']),
+        $entryProfiles
+    )) + count($entryDefaults['immediate_directions'] ?? []);
+    $count = $entryVariantCount
         * (count(rankingValues([$ranges['fixed_tp']])) * count(rankingValues([$ranges['fixed_sl']]))
             + count(rankingValues([$ranges['profit']])) + count(rankingValues([$ranges['loss']])));
-    if (count($thresholds) > 100 || count($windows) > 50 || $count > 30000000) {
+    foreach ($entryProfiles as $profile) {
+        if (count($profile['thresholds_cents']) > 100 || count($profile['windows']) > 50) {
+            throw new InvalidArgumentException('Слишком много сочетаний. Увеличьте шаг или сузьте диапазон.');
+        }
+    }
+    if ($count > 30000000) {
         throw new InvalidArgumentException('Слишком много сочетаний. Увеличьте шаг или сузьте диапазон.');
     }
     return [
         'ranges' => $ranges,
-        'modes' => ['threshold' => $thresholdMode, 'window' => $windowMode],
+        'modes' => $modes,
         'worker' => [
-            'entry_thresholds_cents' => $thresholds,
-            'entry_windows' => $windows,
+            'entry_thresholds_cents' => $entryProfiles['both']['thresholds_cents'],
+            'entry_windows' => $entryProfiles['both']['windows'],
+            'entry_profiles' => $entryProfiles,
             'immediate_directions' => $entryDefaults['immediate_directions'] ?? [],
             'exit_profiles' => [
                 'fixed_tp' => $ranges['fixed_tp'],
@@ -98,6 +128,27 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
             ],
         ],
     ];
+}
+
+function rankingEntryConfig(string $entryConfig, array $ranking, array $immediateDirections): ?array
+{
+    if (preg_match('/^immediate:(short|long)$/', $entryConfig, $matches) === 1
+        && in_array($matches[1], $immediateDirections, true)) {
+        return ['type' => 'immediate', 'direction' => $matches[1]];
+    }
+    if (preg_match('/^entry(?::(long|short))?:(\d+):(\d+)$/', $entryConfig, $matches) !== 1) {
+        return null;
+    }
+    $family = ($matches[1] ?? '') !== '' ? $matches[1] : 'both';
+    $window = (int) $matches[2];
+    $threshold = (int) $matches[3];
+    $profile = $ranking['entry_profiles'][$family] ?? null;
+    if (!is_array($profile)
+        || !in_array($window, $profile['windows'], true)
+        || !in_array($threshold, $profile['thresholds_cents'], true)) {
+        return null;
+    }
+    return ['type' => 'momentum', 'family' => $family, 'window' => $window, 'threshold_cents' => $threshold];
 }
 
 function rankingHasValue(int $value, array $range): bool

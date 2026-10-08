@@ -27,12 +27,9 @@ try {
     $minTrades = $saveMode ? 2 : 1;
     $balance = (string) ($_GET['balance'] ?? '10');
     $fee = (string) ($_GET['fee'] ?? '0.06');
-    $isImmediate = preg_match('/^immediate:(short|long)$/', $entryConfig, $matches) === 1
-        && in_array($matches[1], $entryConfigData['immediate_directions'] ?? [], true);
-    $isMomentum = preg_match('/^entry:(\d+):(\d+)$/', $entryConfig, $matches) === 1
-        && in_array((int) $matches[1], $ranking['entry_windows'], true)
-        && in_array((int) $matches[2], $ranking['entry_thresholds_cents'], true);
-    if (!$isImmediate && !$isMomentum) respond(['status' => 'error', 'message' => 'Неизвестный порог входа.'], 400);
+    if (rankingEntryConfig($entryConfig, $ranking, $entryConfigData['immediate_directions'] ?? []) === null) {
+        respond(['status' => 'error', 'message' => 'Неизвестный порог входа.'], 400);
+    }
     if (!preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $balance) || (float) $balance <= 0 || (float) $balance > 1000000000) {
         respond(['status' => 'error', 'message' => 'Некорректный стартовый баланс.'], 400);
     }
@@ -89,7 +86,7 @@ try {
     }
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $key = hash('sha256', json_encode([
-        'portfolio-ranking-v3-custom-ranges', $config['category'], $startValue, $endValue, $balance, $fee,
+        'portfolio-ranking-v4-directional-ranges', $config['category'], $startValue, $endValue, $balance, $fee,
         $minTrades, $entryConfig, $maxIds, $ranking,
     ], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';

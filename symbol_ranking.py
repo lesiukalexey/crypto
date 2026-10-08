@@ -18,7 +18,7 @@ import pymysql
 
 from app import load_config
 from database import connect_mysql
-from strategy_ranking import PriceTree, make_signals, simulate, exit_values
+from strategy_ranking import PriceTree, make_signals, resolve_entry_config, simulate, exit_values
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -84,22 +84,14 @@ def main() -> int:
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
 
-        if args.entry_config.startswith("immediate:"):
-            direction = args.entry_config.removeprefix("immediate:")
-            if direction not in ("short", "long"):
-                raise ValueError("Invalid immediate entry configuration")
-            lookback = None
-            threshold = None
-            immediate_short = direction == "short"
-        else:
-            parts = args.entry_config.split(":")
-            if len(parts) != 3 or parts[0] != "entry":
-                raise ValueError("Invalid entry configuration")
-            lookback, threshold_cents = int(parts[1]), int(parts[2])
-            if lookback not in ranking["entry_windows"] or threshold_cents not in ranking["entry_thresholds_cents"]:
-                raise ValueError("Unknown entry profile")
-            threshold = threshold_cents / 100
-            immediate_short = None
+        entry_selection = resolve_entry_config(args.entry_config, ranking)
+        if entry_selection is None:
+            raise ValueError("Unknown entry profile")
+        is_immediate = entry_selection["type"] == "immediate"
+        lookback = None if is_immediate else entry_selection["window"]
+        threshold = None if is_immediate else entry_selection["threshold_cents"] / 100
+        entry_direction = "both" if is_immediate else entry_selection["family"]
+        immediate_short = entry_selection["direction"] == "short" if is_immediate else None
 
         exit_counts = {
             "fixed": len(exit_values("fixed_tp", exit_profiles)) * len(exit_values("fixed_sl", exit_profiles)),
@@ -119,7 +111,7 @@ def main() -> int:
                 if immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(rows, float(threshold), int(lookback))
+                    signals, shorts = make_signals(rows, float(threshold), int(lookback), entry_direction)
                 if signals:
                     bid_tree = PriceTree([float(row["bid_price"]) for row in rows])
                     ask_tree = PriceTree([float(row["ask_price"]) for row in rows])
