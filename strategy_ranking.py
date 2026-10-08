@@ -136,6 +136,61 @@ def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction
     return indexes, directions
 
 
+def make_signal_profiles(
+    quotes: QuoteArrays,
+    ranking: dict[str, Any],
+) -> dict[tuple[int, str, int], tuple[list[int], list[bool]]]:
+    """Build every configured momentum signal from one quote scan per window."""
+    count = len(quotes)
+    profiles = ranking["entry_profiles"]
+    thresholds = {
+        family: sorted({int(value) for value in profile["thresholds_cents"]})
+        for family, profile in profiles.items()
+    }
+    threshold_values = {
+        family: [value / 100 for value in values]
+        for family, values in thresholds.items()
+    }
+    signals = {
+        (lookback, family, cents): ([], [])
+        for family, values in thresholds.items()
+        for lookback in {int(window) for window in profiles[family]["windows"]}
+        for cents in values
+    }
+    windows = sorted({int(window) for profile in profiles.values() for window in profile["windows"]})
+    if count < 2:
+        return signals
+
+    gaps = [0.0] + [quotes.timestamps[index] - quotes.timestamps[index - 1] for index in range(1, count)]
+    for lookback in windows:
+        continuous = [False] * count
+        for index in range(lookback, count):
+            continuous[index] = all(gaps[j] <= 120 for j in range(index - lookback + 1, index + 1))
+
+        for index in range(lookback + 1, count - 1):
+            if not continuous[index] or not continuous[index - 1]:
+                continue
+            movement = quotes.lasts[index] - quotes.lasts[index - lookback]
+            previous_movement = quotes.lasts[index - 1] - quotes.lasts[index - lookback - 1]
+            for family, values in thresholds.items():
+                candidates = threshold_values[family]
+                if family != "short":
+                    first = bisect.bisect_right(candidates, previous_movement)
+                    after_last = bisect.bisect_right(candidates, movement)
+                    for candidate_index in range(first, after_last):
+                        cents = values[candidate_index]
+                        signals[(lookback, family, cents)][0].append(index)
+                        signals[(lookback, family, cents)][1].append(False)
+                if family != "long":
+                    first = bisect.bisect_right(candidates, -previous_movement)
+                    after_last = bisect.bisect_right(candidates, -movement)
+                    for candidate_index in range(first, after_last):
+                        cents = values[candidate_index]
+                        signals[(lookback, family, cents)][0].append(index)
+                        signals[(lookback, family, cents)][1].append(True)
+    return signals
+
+
 def build_entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | None, int | None, str | None, bool | None]]:
     specs: list[tuple[str, str, int | None, int | None, str | None, bool | None]] = []
     labels = {

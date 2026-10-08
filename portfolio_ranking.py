@@ -25,7 +25,7 @@ from strategy_ranking import (
     QuoteArrays,
     build_entry_specs,
     exit_values,
-    make_signals,
+    make_signal_profiles,
     martingale_target_policies,
     simulate,
     write_json,
@@ -140,6 +140,10 @@ def main() -> int:
 
         quotes_by_symbol = {symbol: QuoteArrays.from_rows(rows) for symbol, rows in rows_by_symbol.items() if rows}
         del raw_rows, rows_by_symbol
+        signals_by_symbol = {
+            symbol: make_signal_profiles(quotes, ranking)
+            for symbol, quotes in quotes_by_symbol.items()
+        }
         price_trees_by_symbol: dict[str, tuple[PriceTree, PriceTree]] = {}
         specs = build_entry_specs(ranking)
         base_candidate_count = exit_count(exit_profiles)
@@ -165,7 +169,7 @@ def main() -> int:
                 if immediate_short is not None:
                     signals, shorts = [0], [immediate_short]
                 else:
-                    signals, shorts = make_signals(quotes, int(threshold) / 100, int(lookback), entry_family or "both")
+                    signals, shorts = signals_by_symbol[symbol][(int(lookback), entry_family or "both", int(threshold))]
                 if not signals or (
                     args.martingale_mode == "none" and len(signals) < args.min_trades
                 ):
