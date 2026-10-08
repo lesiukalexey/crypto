@@ -457,7 +457,6 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <?php if ($error !== null): ?><section class="panel error"><?= h($error) ?></section><?php endif; ?>
 <section class="panel"><form class="filters" method="get">
 <input type="hidden" name="symbol_sort" id="symbol-sort-mode" value="<?= h($symbolSort) ?>">
-<input type="hidden" name="snapshot_ids" id="portfolio-snapshot-ids" value="<?= h((string) ($_GET['snapshot_ids'] ?? '')) ?>">
 <input type="hidden" name="save_mode" id="save-mode-value" value="<?= $saveMode ? '1' : '0' ?>">
 <input type="hidden" name="martingale_mode" value="<?= h($martingaleMode) ?>">
 <input type="hidden" name="martingale_timing" value="<?= h($martingaleTiming) ?>">
@@ -546,7 +545,6 @@ const filtersForm = document.querySelector('.filters');
 const saveModeToggle = document.querySelector('#save-mode-toggle');
 const saveModeValue = document.querySelector('#save-mode-value');
 const symbolSortMode = document.querySelector('#symbol-sort-mode');
-const portfolioSnapshotIds = document.querySelector('#portfolio-snapshot-ids');
 const symbolSelect = document.querySelector('#symbol-select');
 const refreshSymbolsButton = document.querySelector('#refresh-symbols');
 const resetSymbolCacheButton = document.querySelector('#reset-symbol-cache');
@@ -711,7 +709,6 @@ function resetPortfolioRankingForRelevantFilterChange() {
     portfolioRankingRequestVersion++;
     portfolioRankingTimer.finish();
     symbolSortMode.value = '';
-    portfolioSnapshotIds.value = '';
     resetRefreshButton('Пересчитать рейтинг для измененных фильтров');
 }
 document.querySelector('#apply-ranking-ranges').addEventListener('click', resetPortfolioRankingForRelevantFilterChange);
@@ -1003,7 +1000,6 @@ resetSymbolCacheButton.addEventListener('click', async () => {
         resetSucceeded = true;
         stoppedProcesses = Number(result.stopped_processes) || 0;
         symbolSortMode.value = '';
-        portfolioSnapshotIds.value = '';
         const params = new URLSearchParams(new FormData(filtersForm));
         history.replaceState(null, '', location.pathname + '?' + params.toString());
     } catch (error) {
@@ -1183,12 +1179,6 @@ async function loadPortfolioRanking() {
             const response = await fetch('portfolio-ranking.php?' + requestParams.toString(), {headers:{Accept:'application/json'}});
             ranking = await response.json();
             if (requestVersion !== portfolioRankingRequestVersion) return;
-            if (ranking.snapshot_ids && !params.get('snapshot_ids')) {
-                const frozenIds = JSON.stringify(ranking.snapshot_ids);
-                params.set('snapshot_ids', frozenIds);
-                portfolioSnapshotIds.value = frozenIds;
-                history.replaceState(null, '', location.pathname + '?' + params.toString());
-            }
             if (!response.ok || ranking.status === 'error') throw new Error(ranking.message || 'Не удалось рассчитать общий рейтинг');
             if (ranking.status === 'pending') {
                 const progressText = ranking.queued
@@ -1274,7 +1264,6 @@ async function loadPortfolioRanking() {
 refreshSymbolsButton.addEventListener('click', () => {
     if (isResettingSymbolCache) return;
     symbolSortMode.value = 'profit';
-    portfolioSnapshotIds.value = '';
     loadPortfolioRanking();
 });
 const collectorStatus = document.querySelector('#collector-status');

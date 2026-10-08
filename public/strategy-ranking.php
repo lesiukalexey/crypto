@@ -5,6 +5,7 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-worker-state.php';
+require_once __DIR__ . '/ranking-snapshot.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -70,18 +71,6 @@ try {
         $password,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
     );
-    $stmt = $pdo->prepare('SELECT MAX(id) FROM quote_snapshots WHERE category = ? AND symbol = ? AND received_at_utc >= ? AND received_at_utc < ?');
-    $stmt->execute([$config['category'], $symbol, $startUtc, $endUtc]);
-    $maxId = (int) ($stmt->fetchColumn() ?: 0);
-    if (isset($_GET['snapshot_ids'])) {
-        $snapshotIds = json_decode((string) $_GET['snapshot_ids'], true);
-        $requestedMaxId = is_array($snapshotIds) ? ($snapshotIds[$symbol] ?? null) : null;
-        if ((is_int($requestedMaxId) || (is_string($requestedMaxId) && preg_match('/^\d+$/', $requestedMaxId)))
-            && (int) $requestedMaxId <= $maxId) {
-            $maxId = (int) $requestedMaxId;
-        }
-    }
-
     $home = getenv('HOME') ?: '/home/alex';
     $cacheDir = $home . '/.ai/home/.local/bitget-backtest-cache';
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
@@ -96,7 +85,9 @@ try {
         }
         $cacheGeneration = trim($generationValue);
     }
-    $key = hash('sha256', json_encode(['ranking-v20-martingale-exit-policies-snapshot-id', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $maxId, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
+    $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
+    $maxId = (int) ($snapshotIds[$symbol] ?? 0);
+    $key = hash('sha256', json_encode(['ranking-v21-martingale-exit-policies-first-snapshot-per-generation', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/' . $key . '.json';
     $statusPath = $cacheDir . '/' . $key . '.status.json';
     $profilePath = $cacheDir . '/' . $key . '.' . $entryConfig . '.json';

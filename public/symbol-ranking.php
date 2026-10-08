@@ -4,6 +4,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
+require_once __DIR__ . '/ranking-snapshot.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -64,12 +65,6 @@ try {
         $db['user'], $password,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
     );
-    $stmt = $pdo->prepare('SELECT symbol, MAX(id) AS max_id FROM quote_snapshots WHERE category = ? AND received_at_utc >= ? AND received_at_utc < ? GROUP BY symbol ORDER BY symbol');
-    $stmt->execute([$config['category'], $startUtc, $endUtc]);
-    $maxIds = [];
-    foreach ($stmt->fetchAll() as $row) $maxIds[(string) $row['symbol']] = (int) $row['max_id'];
-    if ($maxIds === []) respond(['status' => 'ready', 'progress' => 100, 'symbols' => []]);
-
     $home = getenv('HOME') ?: '/home/alex';
     $cacheDir = $home . '/.ai/home/.local/bitget-backtest-cache';
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
@@ -84,7 +79,8 @@ try {
         }
         $cacheGeneration = trim($generationValue);
     }
-    $key = hash('sha256', json_encode(['symbol-ranking-v8-martingale-reset-generation', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $maxIds, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
+    $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
+    $key = hash('sha256', json_encode(['symbol-ranking-v9-martingale-first-snapshot-per-generation', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/symbols-' . $key . '.json';
     $statusPath = $cacheDir . '/symbols-' . $key . '.status.json';
     if (is_file($resultPath)) {

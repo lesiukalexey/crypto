@@ -104,7 +104,10 @@ def main() -> int:
     try:
         max_ids = {str(symbol): int(max_id) for symbol, max_id in json.loads(args.max_ids).items()}
         if not max_ids:
-            write_json(result_path, {"status": "ready", "global_top": [], "ticker_leaders": [], "symbols": []})
+            write_json(result_path, {
+                "status": "ready", "global_top": [], "ticker_leaders": [], "symbols": [],
+                "universe_size": 0, "min_trades": args.min_trades,
+            })
             write_json(status_path, {"status": "ready", "progress": 100, "elapsed_seconds": 0})
             return 0
 

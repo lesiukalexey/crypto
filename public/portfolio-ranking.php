@@ -4,6 +4,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
+require_once __DIR__ . '/ranking-snapshot.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -64,29 +65,6 @@ try {
         $db['user'], $password,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
     );
-    $stmt = $pdo->prepare('SELECT symbol, MAX(id) AS max_id FROM quote_snapshots WHERE category = ? AND received_at_utc >= ? AND received_at_utc < ? GROUP BY symbol ORDER BY symbol');
-    $stmt->execute([$config['category'], $startUtc, $endUtc]);
-    $currentMaxIds = [];
-    foreach ($stmt->fetchAll() as $row) $currentMaxIds[(string) $row['symbol']] = (int) $row['max_id'];
-    if ($currentMaxIds === []) respond(['status' => 'ready', 'progress' => 100, 'global_top' => [], 'ticker_leaders' => [], 'symbols' => [], 'universe_size' => 0, 'min_trades' => $minTrades, 'snapshot_ids' => []]);
-
-    $maxIds = $currentMaxIds;
-    if (isset($_GET['snapshot_ids'])) {
-        $requestedIds = json_decode((string) $_GET['snapshot_ids'], true);
-        if (is_array($requestedIds) && $requestedIds !== []) {
-            $frozenIds = [];
-            $valid = true;
-            foreach ($requestedIds as $symbol => $id) {
-                if (!isset($currentMaxIds[$symbol]) || !preg_match('/^\d+$/', (string) $id) || (int) $id > $currentMaxIds[$symbol]) {
-                    $valid = false;
-                    break;
-                }
-                $frozenIds[(string) $symbol] = (int) $id;
-            }
-            if ($valid) $maxIds = $frozenIds;
-        }
-    }
-
     $home = getenv('HOME') ?: '/home/alex';
     $cacheDir = $home . '/.ai/home/.local/bitget-backtest-cache';
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
@@ -101,18 +79,20 @@ try {
         }
         $cacheGeneration = trim($generationValue);
     }
+    // Ignore legacy URL snapshot_ids: all ranking types share one frozen
+    // snapshot per date range and generation, even across browser tabs.
+    $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $key = hash('sha256', json_encode([
-        'portfolio-ranking-v8-martingale-reset-generation', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
-        $minTrades, $entryConfig, $maxIds, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts,
+        'portfolio-ranking-v9-martingale-first-snapshot-per-generation', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
+        $minTrades, $entryConfig, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';
     $statusPath = $cacheDir . '/portfolio-' . $key . '.status.json';
-    $snapshotPayload = ['snapshot_ids' => $maxIds];
     if (is_file($resultPath)) {
         $result = json_decode((string) file_get_contents($resultPath), true);
         if (is_array($result) && ($result['status'] ?? '') === 'ready') {
-            respond($result + ['progress' => 100] + $snapshotPayload);
+            respond($result + ['progress' => 100]);
         }
     }
 
@@ -127,7 +107,7 @@ try {
     }
     $pending = is_array($status) && ($status['status'] ?? '') === 'pending';
     if (is_array($status) && ($status['status'] ?? '') === 'error' && $statusAge < 300) {
-        respond($status + $snapshotPayload, 503);
+        respond($status, 503);
     }
     $retryCancelled = (string) ($_GET['retry_cancelled'] ?? '') === '1';
     $stale = !is_array($status) || ($retryCancelled && ($status['status'] ?? '') === 'cancelled') || ($pending ? !$workerBusy : $statusAge > 1800 || (($status['status'] ?? '') === 'error' && $statusAge > 300));
@@ -158,7 +138,7 @@ try {
         } elseif ($lock !== false) fclose($lock);
         $status = ['status' => 'pending', 'progress' => 0];
     }
-    respond((is_array($status) ? $status : ['status' => 'pending', 'progress' => 0]) + $snapshotPayload);
+    respond(is_array($status) ? $status : ['status' => 'pending', 'progress' => 0]);
 } catch (InvalidArgumentException $error) {
     respond(['status' => 'error', 'message' => $error->getMessage()], 400);
 } catch (Throwable $error) {
