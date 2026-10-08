@@ -56,6 +56,15 @@ if (preg_match('/:(scaled|fixed)$/', $exitConfig, $policyMatch)) {
     $exitConfig = substr($exitConfig, 0, -strlen($policyMatch[0]));
 }
 $symbolSort = (string) ($_GET['symbol_sort'] ?? '') === 'profit' ? 'profit' : '';
+$combinationDetail = (string) ($_GET['combination_detail'] ?? '') === '1';
+$detailEntryLabel = trim((string) ($_GET['detail_entry_label'] ?? ''));
+$detailExitLabel = trim((string) ($_GET['detail_exit_label'] ?? ''));
+$detailRank = filter_var($_GET['detail_rank'] ?? null, FILTER_VALIDATE_INT);
+$detailTickerPnl = is_numeric($_GET['detail_ticker_pnl'] ?? null) ? (float) $_GET['detail_ticker_pnl'] : null;
+$detailMarketAverage = is_numeric($_GET['detail_market_average'] ?? null) ? (float) $_GET['detail_market_average'] : null;
+$detailSupport = filter_var($_GET['detail_support'] ?? null, FILTER_VALIDATE_INT);
+$detailUniverseSize = filter_var($_GET['detail_universe_size'] ?? null, FILTER_VALIDATE_INT);
+$detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALIDATE_INT);
 $isCurrentDay = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
 if (!preg_match($decimalPattern, $startingBalance) || (float) $startingBalance <= 0 || (float) $startingBalance > 1000000000) {
@@ -429,6 +438,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .page-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.page-heading .eyebrow{white-space:nowrap}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}.collector-status{margin:0;white-space:nowrap}.save-mode-toggle{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.save-mode-toggle input{position:absolute;opacity:0;width:1px;height:1px;min-width:0}.save-mode-switch{position:relative;width:38px;height:22px;border:1px solid #52617d;border-radius:999px;background:#263149;transition:.2s}.save-mode-switch:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#b7c1d5;transition:.2s}.save-mode-toggle input:checked+.save-mode-switch{background:#176647;border-color:#42d6a4}.save-mode-toggle input:checked+.save-mode-switch:after{transform:translateX(16px);background:#42d6a4}.save-mode-toggle input:focus-visible+.save-mode-switch{outline:2px solid #8ea5ff;outline-offset:2px}.save-mode-detail{color:var(--muted);font-weight:400}@media(max-width:700px){.page-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.header-actions{justify-content:flex-start}}
 .wrap{max-width:none;padding-left:20px;padding-right:20px}.chart-wrap{container-type:inline-size}#chart{height:27.1cqw}@media(max-width:600px){#chart{height:69cqw}}
 .ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}
+.combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
 .calculation-queue{width:100%}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}}
 .ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}
@@ -443,8 +453,26 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 2 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
+<?php if ($combinationDetail): ?>
+<section class="panel combination-detail" aria-labelledby="combination-detail-heading">
+<h1 id="combination-detail-heading">Детальный результат · <?= h($symbol !== '' ? $symbol : 'тикер') ?></h1>
+<p><strong>Порог входа:</strong> <?= h($detailEntryLabel !== '' ? $detailEntryLabel : $entryConfig) ?></p>
+<p><strong>TakeProfit &amp; StopLoss:</strong> <?= h($detailExitLabel !== '' ? $detailExitLabel : $selectedExitConfig) ?></p>
+<dl>
+<div><dt>Место в общем рейтинге</dt><dd><?= $detailRank !== false && $detailRank !== null ? (string) $detailRank : '—' ?></dd></div>
+<div><dt>Итог тикера</dt><dd><?= $detailTickerPnl !== null ? h(($detailTickerPnl > 0 ? '+' : '') . number_format($detailTickerPnl, 4, ',', ' ') . ' USDT') : '—' ?></dd></div>
+<div><dt>Средний итог этой пары на рынке</dt><dd><?= $detailMarketAverage !== null ? h(($detailMarketAverage > 0 ? '+' : '') . number_format($detailMarketAverage, 4, ',', ' ') . ' USDT') : '—' ?></dd></div>
+<div><dt>Поддержка</dt><dd><?= $detailSupport !== false && $detailSupport !== null && $detailUniverseSize !== false && $detailUniverseSize !== null ? $detailSupport . ' из ' . $detailUniverseSize : '—' ?></dd></div>
+<div><dt>Сделок</dt><dd><?= $detailTradeCount !== false && $detailTradeCount !== null ? (string) $detailTradeCount : '—' ?></dd></div>
+</dl>
+<p class="small-note">График и журнал ниже построены по выбранным котировкам и этой комбинации.</p>
+</section>
+<?php endif; ?>
 <?php if ($error !== null): ?><section class="panel error"><?= h($error) ?></section><?php endif; ?>
 <section class="panel"><form class="filters" method="get">
+<?php if ($combinationDetail): ?>
+<?php foreach (['combination_detail' => '1', 'detail_entry_label' => $detailEntryLabel, 'detail_exit_label' => $detailExitLabel, 'detail_rank' => $detailRank !== false && $detailRank !== null ? (string) $detailRank : '', 'detail_ticker_pnl' => $detailTickerPnl !== null ? (string) $detailTickerPnl : '', 'detail_market_average' => $detailMarketAverage !== null ? (string) $detailMarketAverage : '', 'detail_support' => $detailSupport !== false && $detailSupport !== null ? (string) $detailSupport : '', 'detail_universe_size' => $detailUniverseSize !== false && $detailUniverseSize !== null ? (string) $detailUniverseSize : '', 'detail_trade_count' => $detailTradeCount !== false && $detailTradeCount !== null ? (string) $detailTradeCount : ''] as $detailName => $detailValue): ?><input type="hidden" name="<?= h($detailName) ?>" value="<?= h($detailValue) ?>"><?php endforeach; ?>
+<?php endif; ?>
 <input type="hidden" name="symbol_sort" id="symbol-sort-mode" value="<?= h($symbolSort) ?>">
 <input type="hidden" name="save_mode" id="save-mode-value" value="<?= $saveMode ? '1' : '0' ?>">
 <input type="hidden" name="martingale_mode" value="<?= h($martingaleMode) ?>">
@@ -1126,7 +1154,18 @@ function rankingTable(container, columns, rows, sortOptions = null) {
             const values = Array.isArray(row) ? row : row.cells;
             values.forEach((value, index) => {
                 const cell = document.createElement('td');
-                cell.textContent = value === null || value === undefined ? '—' : String(value);
+                if (value && typeof value === 'object' && typeof value.href === 'string') {
+                    const link = document.createElement('a');
+                    link.className = 'ranking-detail-link';
+                    link.href = value.href;
+                    link.target = '_blank';
+                    link.rel = 'noopener';
+                    link.textContent = value.text;
+                    link.title = 'Открыть детали этого тикера и комбинации в новой вкладке';
+                    cell.appendChild(link);
+                } else {
+                    cell.textContent = value === null || value === undefined ? '—' : String(value);
+                }
                 if (columns[index].numeric) cell.className = 'numeric';
                 tr.appendChild(cell);
             });
@@ -1191,20 +1230,42 @@ async function loadPortfolioRanking() {
             {label:'#'}, {label:'Порог входа'}, {label:'TakeProfit & StopLoss'},
             {label:'Средний итог на тикер',numeric:true}, {label:'Подходят по SAVE MODE',numeric:true}, {label:'В плюсе',numeric:true},
         ], globalRows);
-        const tickerRows = (ranking.ticker_leaders || []).map(item => ({
-            cells: [
-                item.global_rank === null ? '—' : String(item.global_rank), item.symbol, item.entry_label, item.exit_label,
-                pnlText(item.pnl), pnlText(item.market_average_pnl),
-                item.market_eligible_symbols === undefined ? '—' : item.market_eligible_symbols + ' из ' + ranking.universe_size,
-                item.trade_count ? String(item.trade_count) : 'нет надежных данных',
-            ],
-            sortValues: {
-                globalRank: item.global_rank === null || item.global_rank === undefined ? null : Number(item.global_rank),
-                tickerPnl: item.pnl === null || item.pnl === undefined ? null : Number(item.pnl),
-                marketAverage: item.market_average_pnl === null || item.market_average_pnl === undefined ? null : Number(item.market_average_pnl),
-            },
-            sortTieBreak: item.symbol,
-        }));
+        const tickerRows = (ranking.ticker_leaders || []).map(item => {
+            let entryCell = item.entry_label;
+            let exitCell = item.exit_label;
+            if (item.entry_id && item.exit_id) {
+                const detailParams = new URLSearchParams(params);
+                detailParams.set('combination_detail', '1');
+                detailParams.set('symbol', item.symbol);
+                detailParams.set('entry_config', item.entry_id);
+                detailParams.set('exit_config', item.exit_id);
+                detailParams.set('detail_entry_label', item.entry_label || '');
+                detailParams.set('detail_exit_label', item.exit_label || '');
+                detailParams.set('detail_rank', item.global_rank ?? '');
+                detailParams.set('detail_ticker_pnl', item.pnl ?? '');
+                detailParams.set('detail_market_average', item.market_average_pnl ?? '');
+                detailParams.set('detail_support', item.market_eligible_symbols ?? '');
+                detailParams.set('detail_universe_size', ranking.universe_size ?? '');
+                detailParams.set('detail_trade_count', item.trade_count ?? '');
+                const href = location.pathname + '?' + detailParams.toString();
+                entryCell = {text: item.entry_label || '—', href};
+                exitCell = {text: item.exit_label || '—', href};
+            }
+            return {
+                cells: [
+                    item.global_rank === null ? '—' : String(item.global_rank), item.symbol, entryCell, exitCell,
+                    pnlText(item.pnl), pnlText(item.market_average_pnl),
+                    item.market_eligible_symbols === undefined ? '—' : item.market_eligible_symbols + ' из ' + ranking.universe_size,
+                    item.trade_count ? String(item.trade_count) : 'нет надежных данных',
+                ],
+                sortValues: {
+                    globalRank: item.global_rank === null || item.global_rank === undefined ? null : Number(item.global_rank),
+                    tickerPnl: item.pnl === null || item.pnl === undefined ? null : Number(item.pnl),
+                    marketAverage: item.market_average_pnl === null || item.market_average_pnl === undefined ? null : Number(item.market_average_pnl),
+                },
+                sortTieBreak: item.symbol,
+            };
+        });
         rankingTable(document.querySelector('#portfolio-ticker-table'), [
             {label:'Место комбинации в общем рейтинге',sortKey:'globalRank',defaultDirection:'asc'}, {label:'Тикер'}, {label:'Лучший порог входа'}, {label:'Лучший TakeProfit & StopLoss'},
             {label:'Итог тикера',numeric:true,sortKey:'tickerPnl',defaultDirection:'desc'}, {label:'Средний итог этой пары на рынке',numeric:true,sortKey:'marketAverage',defaultDirection:'desc'},
