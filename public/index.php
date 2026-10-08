@@ -223,7 +223,22 @@ if ($martingaleMode !== 'none') {
             $trades[] = ['entry' => $leg['entry'], 'exit' => $exit, 'quantity' => $leg['quantity'], 'entry_price' => $leg['entry_price'], 'exit_price' => $exitPrice, 'entry_fee' => $leg['entry_fee'], 'exit_fee' => $exitFee, 'gross' => $gross, 'net' => $net, 'balance' => $currentBalance, 'reason' => $reason, 'is_short' => $short];
         }
     };
-    $baseStake = bcdiv($startingBalance, (string) (2 ** ($martingaleAttempts - 1)), 24);
+    $finalScale = (string) (2 ** ($martingaleAttempts - 1));
+    if ($lossThreshold === null) {
+        $baseStake = bcdiv($startingBalance, $finalScale, 24);
+    } else {
+        $risk = bcmul(bccomp($lossThreshold, '0', 24) < 0 ? bcsub('0', $lossThreshold, 24) : $lossThreshold, '1', 24);
+        if ($martingaleMode === 'simple') {
+            $previousScale = (string) (2 ** ($martingaleAttempts - 2));
+            $reservedLoss = bcmul($risk, $previousScale, 24);
+            $requiredPerBase = bcadd($finalScale, bcmul($feeRate, $previousScale, 24), 24);
+        } else {
+            $reservedLoss = bcmul($risk, bcsub($finalScale, '1', 24), 24);
+            $requiredPerBase = bcmul($finalScale, bcadd('1', $feeRate, 24), 24);
+        }
+        $availableForStakes = bcsub($startingBalance, $reservedLoss, 24);
+        $baseStake = bccomp($availableForStakes, '0', 24) > 0 ? bcdiv($availableForStakes, $requiredPerBase, 24) : '0';
+    }
     $chainAttempt = 0;
     while (bccomp($balance, '0', 24) > 0 && $chainAttempt < 100000) {
         $signal = $isImmediateEntry
@@ -436,7 +451,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($exitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<fieldset class="martingale-block"><legend>Мартингейл</legend><label class="field">Режим<select name="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select name="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select name="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><p class="small-note">Начальная сумма рассчитывается как баланс / 2^(попытки − 1). Следующий шаг ограничивается свободным балансом с учетом убытка и комиссии. В простом режиме позиция усредняется и закрывается целиком; в обратном — текущая позиция закрывается на стопе и открывается обратная.</p></fieldset>
+<fieldset class="martingale-block"><legend>Мартингейл</legend><label class="field">Режим<select name="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select name="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select name="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><p class="small-note">Стартовая сумма автоматически подбирается под всю серию попыток с учетом Stop Loss и комиссии. Если ожидание сигнала или ценовой разрыв увеличит убыток, следующий шаг может быть ограничен остатком баланса. В простом режиме позиция усредняется и закрывается целиком; в обратном — текущая позиция закрывается на стопе и открывается обратная.</p></fieldset>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php foreach ($entryFamilies as $family => $familySettings):

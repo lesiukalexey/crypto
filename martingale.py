@@ -6,6 +6,31 @@ import bisect
 from typing import Any
 
 
+def martingale_base_notional(
+    start_balance: float,
+    fee_rate: float,
+    stop_loss: float | None,
+    mode: str,
+    attempts: int,
+) -> float:
+    """Size the first order so the full geometric progression fits at 1x."""
+    if mode not in ("simple", "reverse") or not 2 <= attempts <= 10:
+        raise ValueError("Invalid martingale options")
+    final_scale = 2 ** (attempts - 1)
+    if stop_loss is None:
+        return start_balance / final_scale
+
+    risk = abs(stop_loss)
+    if mode == "simple":
+        previous_scale = 2 ** (attempts - 2)
+        reserved_loss = risk * previous_scale
+        required_balance_per_base = final_scale + fee_rate * previous_scale
+    else:
+        reserved_loss = risk * (final_scale - 1)
+        required_balance_per_base = final_scale * (1 + fee_rate)
+    return max(0.0, (start_balance - reserved_loss) / required_balance_per_base)
+
+
 def simulate_martingale(
     rows: list[dict[str, Any]],
     signal_indexes: list[int],
@@ -27,7 +52,9 @@ def simulate_martingale(
     signal_cursor = 0
     closed_orders = 0
     count = len(rows)
-    base_notional = start_balance / (2 ** (attempts - 1))
+    base_notional = martingale_base_notional(start_balance, fee_rate, stop_loss, mode, attempts)
+    if base_notional <= 0:
+        return 0.0, 0
 
     while balance > 0 and signal_cursor < len(signal_indexes):
         entry_index = signal_indexes[signal_cursor]
