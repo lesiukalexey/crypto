@@ -439,6 +439,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
 .ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head h2{flex:1}.portfolio-ranking-head .refresh-symbols{margin-left:auto}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
+.ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
 .symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.reset-symbol-cache{flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:18px;line-height:1}.reset-symbol-cache:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}.symbol-select-row .reset-symbol-cache{width:42px}}
 .ranking-parameters{position:relative;--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{padding-right:44px;cursor:pointer;color:var(--text);font-weight:700}.reset-ranking-parameters{position:absolute;top:7px;right:12px;flex:0 0 36px;width:36px;height:36px;min-width:36px;padding:0;background:transparent;color:var(--muted);font-size:21px;line-height:1}.reset-ranking-parameters:hover{background:#273653;color:var(--text)}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}}
 .martingale-block{flex-basis:100%;min-width:0;margin:4px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px}.martingale-block>summary{color:var(--text);font-weight:700;cursor:pointer}.martingale-controls{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin-top:12px}.martingale-block .field select{min-width:190px}@media(max-width:600px){.martingale-block,.martingale-block .field{width:100%}.martingale-controls,.martingale-block .field{width:100%}.martingale-block .field select{width:100%}}
@@ -459,6 +460,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 
 <label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
+<p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
 <details class="martingale-block"><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select name="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select name="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select name="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><p class="small-note">Рейтинг мартингейла отдельно сравнивает два расчёта: TP/SL растут с суммой позиции или остаются фиксированными в USDT. Стартовая сумма подбирается под выбранный Stop Loss, комиссию и число попыток; при ценовом разрыве или задержке сигнала следующий шаг ограничивается балансом.</p><p class="small-note">Сумма первого ордера по выбранным TP/SL: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
@@ -493,7 +495,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], true, $defaultRankingRanges['loss']) ?>
 <p class="small-note">Граница «до» включается, если на неё попадает шаг.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 <p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> <?= h($entryThresholdSummaries['both']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['both']['windows']))) ?> снимков. Рост +: <?= h($entryThresholdSummaries['long']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['long']['windows']))) ?>. Падение −: <?= h($entryThresholdSummaries['short']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['short']['windows']))) ?>. У каждого направления свои диапазоны и окна; каждый порог проверяется на каждом окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
-<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
+<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= count($rows) ?> снимков</span></div>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
 <div class="legend"><?php foreach ($series as $meta): ?><span><i class="dot" style="background:<?= h($meta['color']) ?>"></i><?= h($meta['name']) ?></span><?php endforeach; ?></div>
@@ -542,6 +544,50 @@ const resetSymbolCacheButton = document.querySelector('#reset-symbol-cache');
 const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel');
 const portfolioRankingContent = document.querySelector('#portfolio-ranking-content');
 const portfolioRankingStatus = document.querySelector('#portfolio-ranking-status');
+function createElapsedTimer(element, label) {
+    let startedAt = null;
+    let elapsedMs = 0;
+    let intervalId = null;
+    const render = () => {
+        const totalSeconds = Math.floor((startedAt === null ? elapsedMs : performance.now() - startedAt) / 1000);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        const time = hours > 0
+            ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+            : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        element.textContent = `${label}: ${time}`;
+    };
+    return {
+        start() {
+            if (startedAt !== null) return;
+            elapsedMs = 0;
+            startedAt = performance.now();
+            element.hidden = false;
+            render();
+            intervalId = window.setInterval(render, 1000);
+        },
+        finish() {
+            if (startedAt === null) return;
+            elapsedMs = performance.now() - startedAt;
+            startedAt = null;
+            window.clearInterval(intervalId);
+            intervalId = null;
+            render();
+        },
+        reset() {
+            window.clearInterval(intervalId);
+            intervalId = null;
+            startedAt = null;
+            elapsedMs = 0;
+            element.textContent = '';
+            element.hidden = true;
+        },
+    };
+}
+const strategyRankingTimer = createElapsedTimer(document.querySelector('#strategy-ranking-timer'), 'Время расчёта выбранной комбинации');
+const portfolioRankingTimer = createElapsedTimer(document.querySelector('#portfolio-ranking-timer'), 'Время общего рейтинга');
+let portfolioRankingRequestVersion = 0;
 const martingaleCacheStatus = document.querySelector('#martingale-cache-status');
 const martingaleInitialNotional = document.querySelector('#martingale-initial-notional');
 const martingaleControls = ['martingale_mode', 'martingale_timing', 'martingale_attempts']
@@ -625,6 +671,8 @@ function resetRefreshButton(title = 'Рассчитать общие лучши�
     refreshSymbolsButton.replaceChildren(document.createTextNode('↻'));
 }
 function resetPortfolioRankingForRelevantFilterChange() {
+    portfolioRankingRequestVersion++;
+    portfolioRankingTimer.finish();
     symbolSortMode.value = '';
     portfolioSnapshotIds.value = '';
     resetRefreshButton('Пересчитать рейтинг для измененных фильтров');
@@ -801,14 +849,20 @@ async function handleMartingaleSettingsChange() {
     }
     if (resetSucceeded) filtersForm.requestSubmit();
 }
-async function loadExitRanking(preferredExit = null) {
+async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (isResettingSymbolCache) return;
+    if (!isPoll) {
+        strategyRankingTimer.reset();
+        strategyRankingTimer.start();
+    }
     const requestVersion = exitRankingRequestVersion;
     const params = new URLSearchParams(new FormData(filtersForm));
     try {
         const response = await fetch(`strategy-ranking.php?${params.toString()}`, {headers:{Accept:'application/json'}});
         const ranking = await response.json();
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
+        if (ranking.status === 'pending') strategyRankingTimer.start();
+        else strategyRankingTimer.finish();
         if (ranking.status === 'insufficient_data') {
             entryConfigSelect.replaceChildren();
             const entryMessage = document.createElement('option');
@@ -834,7 +888,7 @@ async function loadExitRanking(preferredExit = null) {
             if (!ranking.entries?.length) entryConfigSelect.options[0].textContent = `Рейтинг порогов и выходов… ${progressLabel}`;
             exitConfigSelect.options[0].textContent = `Рейтинг TakeProfit & StopLoss… ${progressLabel}`;
             window.setTimeout(() => {
-                if (requestVersion === exitRankingRequestVersion && !isResettingSymbolCache) loadExitRanking();
+                if (requestVersion === exitRankingRequestVersion && !isResettingSymbolCache) loadExitRanking(null, true);
             }, 1500);
             return;
         }
@@ -867,6 +921,7 @@ async function loadExitRanking(preferredExit = null) {
         promoteRankedSymbol(params.get('symbol'));
     } catch (_) {
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
+        strategyRankingTimer.finish();
         exitConfigSelect.options[0].textContent = 'Не удалось загрузить рейтинг';
     }
 }
@@ -1049,6 +1104,9 @@ function pnlText(value) {
     return (amount > 0 ? '+' : '') + new Intl.NumberFormat('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:4}).format(amount) + ' USDT';
 }
 async function loadPortfolioRanking() {
+    const requestVersion = ++portfolioRankingRequestVersion;
+    portfolioRankingTimer.reset();
+    portfolioRankingTimer.start();
     portfolioRankingPanel.hidden = false;
     portfolioRankingContent.hidden = false;
     portfolioRankingStatus.textContent = 'Подготавливаю общий рейтинг…';
@@ -1060,11 +1118,13 @@ async function loadPortfolioRanking() {
         history.replaceState(null, '', location.pathname + '?' + params.toString());
         let ranking;
         do {
+            if (requestVersion !== portfolioRankingRequestVersion) return;
             const requestParams = new URLSearchParams(params);
             if (retryCancelled) requestParams.set('retry_cancelled', '1');
             retryCancelled = false;
             const response = await fetch('portfolio-ranking.php?' + requestParams.toString(), {headers:{Accept:'application/json'}});
             ranking = await response.json();
+            if (requestVersion !== portfolioRankingRequestVersion) return;
             if (ranking.snapshot_ids && !params.get('snapshot_ids')) {
                 const frozenIds = JSON.stringify(ranking.snapshot_ids);
                 params.set('snapshot_ids', frozenIds);
@@ -1142,10 +1202,15 @@ async function loadPortfolioRanking() {
         symbolSelect.value = currentSymbol;
         buttonTitle = 'Пары отсортированы по выбранному порогу входа: надежных рейтингов ' + rankedCount + ' из ' + sortedOptions.length + '.';
     } catch (error) {
-        portfolioRankingStatus.textContent = error.message || 'Не удалось рассчитать общий рейтинг';
-        buttonTitle = error.message || 'Не удалось рассчитать общий рейтинг';
+        if (requestVersion === portfolioRankingRequestVersion) {
+            portfolioRankingStatus.textContent = error.message || 'Не удалось рассчитать общий рейтинг';
+            buttonTitle = error.message || 'Не удалось рассчитать общий рейтинг';
+        }
     } finally {
-        resetRefreshButton(buttonTitle);
+        if (requestVersion === portfolioRankingRequestVersion) {
+            portfolioRankingTimer.finish();
+            resetRefreshButton(buttonTitle);
+        }
     }
 }
 refreshSymbolsButton.addEventListener('click', () => {
