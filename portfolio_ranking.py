@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 from array import array
+from concurrent.futures import ProcessPoolExecutor
 import fcntl
 import hashlib
 import heapq
 import json
 import math
+import multiprocessing
 import os
 import shutil
 import struct
@@ -145,7 +147,77 @@ def write_pair_result_cache(path: Path, results: dict[str, tuple[float, int]]) -
     temporary_path.replace(path)
 
 
+_PORTFOLIO_WORKER_STATE: dict[str, Any] | None = None
+_PORTFOLIO_WORKER_PRICE_TREES: dict[str, tuple[PriceTree, PriceTree]] = {}
+
+
+def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | None, str | None, bool | None], bool]) -> tuple[str, list[tuple[float, int]] | None, int, int, bool]:
+    symbol, entry_spec, include_results = task
+    state = _PORTFOLIO_WORKER_STATE
+    if state is None:
+        raise RuntimeError("Portfolio ranking worker state is not initialized")
+    entry_id, _, lookback, threshold, entry_family, immediate_short = entry_spec
+    quotes_by_symbol = state["quotes_by_symbol"]
+    quotes = quotes_by_symbol.get(symbol)
+    if quotes is None or len(quotes) < 2:
+        return symbol, None, 0, 0, False
+
+    if immediate_short is not None:
+        signals, shorts = [0], [immediate_short]
+    else:
+        signals, shorts = state["signals_by_symbol"][symbol][
+            (int(lookback), entry_family or "both", int(threshold))
+        ]
+    args = state["args"]
+    if not signals or (args.min_trades > len(signals) and args.martingale_mode == "none"):
+        return symbol, None, 0, 0, False
+
+    price_trees = _PORTFOLIO_WORKER_PRICE_TREES.get(symbol)
+    if price_trees is None:
+        price_trees = (PriceTree(quotes.bids), PriceTree(quotes.asks))
+        _PORTFOLIO_WORKER_PRICE_TREES[symbol] = price_trees
+
+    cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
+    cache_path = state["pair_cache_scopes"][symbol] / cache_filename
+    cached_results = load_pair_result_cache(cache_path)
+    cache_updated = False
+    hits = 0
+    misses = 0
+    results: list[tuple[float, int]] | None = [] if include_results else None
+    for exit_id, _, take_profit, stop_loss, target_policy in state["exit_options"]:
+        cached_result = cached_results.get(exit_id)
+        if cached_result is None:
+            pnl, trade_count = simulate(
+                quotes,
+                signals,
+                shorts,
+                price_trees[0],
+                price_trees[1],
+                args.balance,
+                state["fee_rate"],
+                take_profit,
+                stop_loss,
+                args.martingale_mode,
+                args.martingale_timing,
+                args.martingale_attempts,
+                target_policy,
+            )
+            cached_results[exit_id] = (pnl, trade_count)
+            cache_updated = True
+            misses += 1
+        else:
+            pnl, trade_count = cached_result
+            hits += 1
+        if results is not None:
+            results.append((pnl, trade_count))
+
+    if cache_updated:
+        write_pair_result_cache(cache_path, cached_results)
+    return symbol, results, hits, misses, True
+
+
 def main() -> int:
+    global _PORTFOLIO_WORKER_STATE
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache-key", required=True)
     parser.add_argument("--cache-generation", default="benchmark")
@@ -161,6 +233,7 @@ def main() -> int:
     parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse"), default="none")
     parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
+    parser.add_argument("--workers", type=int, choices=range(1, 5), default=4)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
@@ -196,6 +269,7 @@ def main() -> int:
     started = time.monotonic()
     progress_reporter = ProgressReporter()
     batch_temp = None
+    process_pool: ProcessPoolExecutor | None = None
     write_json(status_path, {"status": "pending", "progress": 0, "queued": False})
     try:
         max_ids = {str(symbol): int(max_id) for symbol, max_id in json.loads(args.max_ids).items()}
@@ -253,7 +327,6 @@ def main() -> int:
             symbol: make_signal_profiles(quotes, ranking)
             for symbol, quotes in quotes_by_symbol.items()
         }
-        price_trees_by_symbol: dict[str, tuple[PriceTree, PriceTree]] = {}
         specs = build_entry_specs(ranking)
         base_candidate_count = exit_count(exit_profiles)
         duplicate_exit_policies = 2 if args.martingale_mode != "none" else 1
@@ -279,6 +352,20 @@ def main() -> int:
             for base_exit_id, base_exit_label, take_profit, stop_loss in exit_specs(exit_profiles)
             for target_policy, policy_label in martingale_target_policies(args.martingale_mode, stop_loss)
         ]
+        _PORTFOLIO_WORKER_STATE = {
+            "quotes_by_symbol": quotes_by_symbol,
+            "signals_by_symbol": signals_by_symbol,
+            "pair_cache_scopes": pair_cache_scopes,
+            "exit_options": exit_options,
+            "args": args,
+            "fee_rate": fee_rate,
+        }
+        worker_count = min(args.workers, len(quotes_by_symbol), os.cpu_count() or 1)
+        if worker_count > 1:
+            process_pool = ProcessPoolExecutor(
+                max_workers=worker_count,
+                mp_context=multiprocessing.get_context("fork"),
+            )
         batch_temp = tempfile.TemporaryDirectory(prefix=f"portfolio-ranking-{args.cache_key[:12]}-", dir=args.cache_dir)
         batch_directory = Path(batch_temp.name)
         candidate_batches: list[tuple[str, Path]] = []
@@ -292,77 +379,29 @@ def main() -> int:
             batch_aggregate_pnls = array("d", [0.0]) * len(exit_options)
             batch_eligible_symbols = array("I", [0]) * len(exit_options)
             batch_profitable_symbols = array("I", [0]) * len(exit_options)
-            contexts: dict[str, tuple[QuoteArrays, list[int], list[bool], PriceTree, PriceTree]] = {}
-            for symbol, quotes in quotes_by_symbol.items():
-                if len(quotes) < 2:
+            ticker_tasks = [
+                (symbol, (entry_id, entry_label, lookback, threshold, entry_family, immediate_short), process_pool is None)
+                for symbol, quotes in quotes_by_symbol.items()
+                if len(quotes) >= 2
+            ]
+            simulation_results = (
+                process_pool.map(simulate_symbol_entry, ticker_tasks)
+                if process_pool is not None
+                else (simulate_symbol_entry(task) for task in ticker_tasks)
+            )
+            active_symbols = 0
+            for symbol, pair_results, hits, misses, active in simulation_results:
+                pair_cache_hits += hits
+                pair_cache_misses += misses
+                if not active:
                     continue
-                if immediate_short is not None:
-                    signals, shorts = [0], [immediate_short]
-                else:
-                    signals, shorts = signals_by_symbol[symbol][(int(lookback), entry_family or "both", int(threshold))]
-                if not signals or (
-                    args.martingale_mode == "none" and len(signals) < args.min_trades
-                ):
-                    continue
-                price_trees = price_trees_by_symbol.get(symbol)
-                if price_trees is None:
-                    price_trees = (
-                        PriceTree(quotes.bids),
-                        PriceTree(quotes.asks),
-                    )
-                    price_trees_by_symbol[symbol] = price_trees
-                contexts[symbol] = (
-                    quotes_by_symbol[symbol],
-                    signals,
-                    shorts,
-                    price_trees[0],
-                    price_trees[1],
-                )
-
-            if not contexts:
-                # No ticker can meet the trade minimum for this entry. Count
-                # its candidates as completed without simulating each exit.
-                completed += candidate_count
-                progress_reporter.update(status_path, {
-                    "status": "pending",
-                    "progress": min(99, int(completed * 100 / total)),
-                    "elapsed_seconds": int(time.monotonic() - started),
-                    "entry_profile": entry_label,
-                    "completed_entry_profiles": entry_batch_index + 1,
-                    "total_entry_profiles": len(specs),
-                })
-                continue
-
-            entry_cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
-            for symbol, (quotes, signals, shorts, bid_tree, ask_tree) in contexts.items():
-                cache_path = pair_cache_scopes[symbol] / entry_cache_filename
-                cached_results = load_pair_result_cache(cache_path)
-                cache_updated = False
-                for exit_index, (exit_id, exit_label, take_profit, stop_loss, target_policy) in enumerate(exit_options):
-                    cached_result = cached_results.get(exit_id)
-                    if cached_result is None:
-                        pnl, trade_count = simulate(
-                            quotes,
-                            signals,
-                            shorts,
-                            bid_tree,
-                            ask_tree,
-                            args.balance,
-                            fee_rate,
-                            take_profit,
-                            stop_loss,
-                            args.martingale_mode,
-                            args.martingale_timing,
-                            args.martingale_attempts,
-                            target_policy,
-                        )
-                        cached_results[exit_id] = (pnl, trade_count)
-                        cache_updated = True
-                        pair_cache_misses += 1
-                    else:
-                        pnl, trade_count = cached_result
-                        pair_cache_hits += 1
-
+                active_symbols += 1
+                cached_results = None
+                if pair_results is None:
+                    cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
+                    cached_results = load_pair_result_cache(pair_cache_scopes[symbol] / cache_filename)
+                for exit_index, (exit_id, exit_label, _, _, _) in enumerate(exit_options):
+                    pnl, trade_count = pair_results[exit_index] if pair_results is not None else cached_results[exit_id]
                     if trade_count < args.min_trades:
                         continue
                     batch_aggregate_pnls[exit_index] += pnl
@@ -394,8 +433,20 @@ def main() -> int:
                                 "best_exit": exit_label,
                                 "best_exit_id": exit_id,
                             }
-                if cache_updated:
-                    write_pair_result_cache(cache_path, cached_results)
+
+            if not active_symbols:
+                # No ticker can meet the trade minimum for this entry. Count
+                # its candidates as completed without simulating each exit.
+                completed += candidate_count
+                progress_reporter.update(status_path, {
+                    "status": "pending",
+                    "progress": min(99, int(completed * 100 / total)),
+                    "elapsed_seconds": int(time.monotonic() - started),
+                    "entry_profile": entry_label,
+                    "completed_entry_profiles": entry_batch_index + 1,
+                    "total_entry_profiles": len(specs),
+                })
+                continue
 
             entry_winners_by_exit: dict[str, list[dict[str, Any]]] = {}
             for winner in best_by_symbol.values():
@@ -466,6 +517,9 @@ def main() -> int:
                 "total_entry_profiles": len(specs),
             })
 
+        if process_pool is not None:
+            process_pool.shutdown(wait=True)
+            process_pool = None
         ranked_ticker_leaders = sorted(best_by_symbol.values(), key=lambda item: (-item["pnl"], item["symbol"]))
         for rank, leader in enumerate(ranked_ticker_leaders, start=1):
             leader["rank"] = rank
@@ -547,9 +601,12 @@ def main() -> int:
             "elapsed_seconds": int(time.monotonic() - started),
             "pair_cache_hits": pair_cache_hits,
             "pair_cache_misses": pair_cache_misses,
+            "workers": worker_count,
         })
         return 0
     except Exception as exc:
+        if process_pool is not None:
+            process_pool.shutdown(wait=True, cancel_futures=True)
         if batch_temp is not None:
             batch_temp.cleanup()
         write_json(status_path, {"status": "error", "progress": 0, "message": "Не удалось рассчитать общий рейтинг комбинаций."})
