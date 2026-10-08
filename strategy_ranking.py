@@ -466,11 +466,18 @@ def main() -> int:
                         args.martingale_mode,
                         1.0 if family in ("fixed", "loss") else None,
                     )
-                    best_by_policy: dict[str, list[tuple[float, str, str]]] = {
+                    best_by_policy: dict[str, list[tuple[float, str, str, int]]] = {
                         policy: [] for policy, _ in family_policies
                     }
 
-                    def consider(identifier: str, display: str, target: float | None, loss: float | None) -> None:
+                    def consider(
+                        identifier: str,
+                        display_kind: str,
+                        target_cents: int | None,
+                        loss_cents: int | None,
+                        target: float | None,
+                        loss: float | None,
+                    ) -> None:
                         nonlocal completed
                         for target_policy, policy_label in martingale_target_policies(args.martingale_mode, loss):
                             pnl, trade_count = simulate(
@@ -481,13 +488,20 @@ def main() -> int:
                             if trade_count >= args.min_trades:
                                 profile_best[0] = max(profile_best[0], pnl)
                                 ranked_id = f"{identifier}:{target_policy}" if policy_label else identifier
-                                ranked_label = display + (f" · {policy_label}" if policy_label else "")
-                                item = (pnl, ranked_id, f"{ranked_label} · {trade_count} сделок · итог {pnl:+.4f} USDT")
                                 best = best_by_policy[target_policy]
-                                if len(best) < TOP_PER_GROUP:
-                                    heapq.heappush(best, item)
-                                elif (pnl, ranked_id) > (best[0][0], best[0][1]):
-                                    heapq.heapreplace(best, item)
+                                enters_top = len(best) < TOP_PER_GROUP or (pnl, ranked_id) > (best[0][0], best[0][1])
+                                if enters_top:
+                                    if display_kind == "fixed":
+                                        display = f"TP {target_cents / 100:.2f} / SL {loss_cents / 100:.2f} USDT"
+                                    elif display_kind == "loss":
+                                        display = f"Stop Loss {loss_cents / 100:.2f} USDT · без фиксации прибыли"
+                                    else:
+                                        display = f"Take Profit {target_cents / 100:.2f} USDT · без фиксации убытка"
+                                    item = (pnl, ranked_id, display, trade_count)
+                                    if len(best) < TOP_PER_GROUP:
+                                        heapq.heappush(best, item)
+                                    else:
+                                        heapq.heapreplace(best, item)
                             completed += 1
                             if completed % 1000 == 0:
                                 write_json(status_path, {"status": "pending", "progress": int(completed * 100 / total), "elapsed_seconds": int(time.monotonic() - started)})
@@ -495,21 +509,28 @@ def main() -> int:
                     if family == "fixed":
                         for target_cents in exit_values("fixed_tp", exit_profiles):
                             for loss_cents in exit_values("fixed_sl", exit_profiles):
-                                consider(f"fixed:{target_cents}:{loss_cents}", f"TP {target_cents / 100:.2f} / SL {loss_cents / 100:.2f} USDT", target_cents / 100, loss_cents / 100)
+                                consider(f"fixed:{target_cents}:{loss_cents}", "fixed", target_cents, loss_cents, target_cents / 100, loss_cents / 100)
                     elif family == "loss":
                         for loss_cents in exit_values("loss", exit_profiles):
-                            consider(f"loss:{loss_cents}", f"Stop Loss {loss_cents / 100:.2f} USDT · без фиксации прибыли", None, loss_cents / 100)
+                            consider(f"loss:{loss_cents}", "loss", None, loss_cents, None, loss_cents / 100)
                     else:
                         for target_cents in exit_values("profit", exit_profiles):
-                            consider(f"profit:{target_cents}", f"Take Profit {target_cents / 100:.2f} USDT · без фиксации убытка", target_cents / 100, None)
+                            consider(f"profit:{target_cents}", "profit", target_cents, None, target_cents / 100, None)
 
                     for target_policy, policy_label in family_policies:
                         best = best_by_policy[target_policy]
                         best.sort(key=lambda current: (-current[0], current[1]))
                         group_label = label + (f" · {policy_label}" if policy_label else "")
+                        items = []
+                        for pnl, ranked_id, display, trade_count in best:
+                            ranked_label = display + (f" · {policy_label}" if policy_label else "")
+                            items.append({
+                                "id": ranked_id,
+                                "label": f"{ranked_label} · {trade_count} сделок · итог {pnl:+.4f} USDT",
+                            })
                         groups.append({
                             "label": group_label + f" · топ {min(TOP_PER_GROUP, len(best))} из {candidate_count}",
-                            "items": [{"id": item[1], "label": item[2]} for item in best],
+                            "items": items,
                         })
 
                 write_json(args.cache_dir / f"{args.cache_key}.{entry_id}.json", {"status": "ready", "groups": groups})
