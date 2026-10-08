@@ -18,7 +18,7 @@ import pymysql
 
 from app import load_config
 from database import connect_mysql
-from strategy_ranking import PriceTree, QuoteArrays, make_signals, martingale_target_policies, resolve_entry_config, simulate, exit_values
+from strategy_ranking import PriceTree, ProgressReporter, QuoteArrays, make_signals, martingale_target_policies, resolve_entry_config, simulate, exit_values
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -130,6 +130,7 @@ def main() -> int:
             for count in (exit_counts["fixed"], exit_counts["loss"])
         )
         started = time.monotonic()
+        progress_reporter = ProgressReporter()
         results: list[dict[str, Any]] = []
 
         for symbol_index, symbol in enumerate(sorted(max_ids)):
@@ -165,7 +166,7 @@ def main() -> int:
                             symbol_completed += 1
                             if symbol_completed % 1000 == 0:
                                 progress = int((symbol_index + symbol_completed / variants_per_symbol) * 100 / max(1, len(max_ids)))
-                                write_json(status_path, {"status": "pending", "progress": min(99, progress), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
+                                progress_reporter.update(status_path, {"status": "pending", "progress": min(99, progress), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
 
                     for take_cents in exit_values("fixed_tp", exit_profiles):
                         for loss_cents in exit_values("fixed_sl", exit_profiles):
@@ -179,7 +180,7 @@ def main() -> int:
                 "best_pnl": best_pnl if math.isfinite(best_pnl) else None,
                 "best_exit": best_label if math.isfinite(best_pnl) else None,
             })
-            write_json(status_path, {"status": "pending", "progress": min(99, int((symbol_index + 1) * 100 / max(1, len(max_ids)))), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
+            progress_reporter.update(status_path, {"status": "pending", "progress": min(99, int((symbol_index + 1) * 100 / max(1, len(max_ids)))), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
 
         results.sort(key=lambda item: (item["best_pnl"] is None, -(item["best_pnl"] or 0), item["symbol"]))
         write_json(result_path, {"status": "ready", "symbols": results})

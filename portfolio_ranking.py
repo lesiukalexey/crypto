@@ -22,6 +22,7 @@ from app import load_config
 from database import connect_mysql
 from strategy_ranking import (
     PriceTree,
+    ProgressReporter,
     QuoteArrays,
     build_entry_specs,
     exit_values,
@@ -101,6 +102,7 @@ def main() -> int:
             time.sleep(10)
 
     started = time.monotonic()
+    progress_reporter = ProgressReporter()
     write_json(status_path, {"status": "pending", "progress": 0, "queued": False})
     try:
         max_ids = {str(symbol): int(max_id) for symbol, max_id in json.loads(args.max_ids).items()}
@@ -193,7 +195,7 @@ def main() -> int:
                 # No ticker can meet the trade minimum for this entry. Count
                 # its candidates as completed without simulating each exit.
                 completed += candidate_count
-                write_json(status_path, {
+                progress_reporter.update(status_path, {
                     "status": "pending",
                     "progress": min(99, int(completed * 100 / total)),
                     "elapsed_seconds": int(time.monotonic() - started),
@@ -284,7 +286,7 @@ def main() -> int:
 
                     completed += 1
                     if completed % 5000 == 0:
-                        write_json(status_path, {
+                        progress_reporter.update(status_path, {
                             "status": "pending",
                             "progress": min(99, int(completed * 100 / total)),
                             "elapsed_seconds": int(time.monotonic() - started),

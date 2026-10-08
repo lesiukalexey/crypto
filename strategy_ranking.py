@@ -125,6 +125,22 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+class ProgressReporter:
+    """Throttle intermediate atomic progress writes while leaving final status immediate."""
+
+    def __init__(self, interval_seconds: float = 1.0) -> None:
+        self.interval_seconds = interval_seconds
+        self.last_write = time.monotonic()
+
+    def update(self, path: Path, payload: dict[str, Any]) -> bool:
+        now = time.monotonic()
+        if now - self.last_write < self.interval_seconds:
+            return False
+        write_json(path, payload)
+        self.last_write = now
+        return True
+
+
 def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction: str = "both") -> tuple[list[int], list[bool]]:
     if direction not in ("both", "long", "short"):
         raise ValueError("Invalid entry direction")
@@ -427,6 +443,7 @@ def main() -> int:
         total = total_per_entry * len(entry_specs_for_worker)
         completed = 0
         started = time.monotonic()
+        progress_reporter = ProgressReporter()
         entries: list[dict[str, Any]] = []
 
         if len(quotes) >= 2:
@@ -451,7 +468,7 @@ def main() -> int:
                     # Without martingale, each signal can open at most one
                     # trade, so this entry cannot meet the ranking minimum.
                     completed += total_per_entry
-                    write_json(status_path, {
+                    progress_reporter.update(status_path, {
                         "status": "pending",
                         "progress": min(99, int(completed * 100 / total)),
                         "elapsed_seconds": int(time.monotonic() - started),
@@ -504,7 +521,7 @@ def main() -> int:
                                         heapq.heapreplace(best, item)
                             completed += 1
                             if completed % 1000 == 0:
-                                write_json(status_path, {"status": "pending", "progress": int(completed * 100 / total), "elapsed_seconds": int(time.monotonic() - started)})
+                                progress_reporter.update(status_path, {"status": "pending", "progress": int(completed * 100 / total), "elapsed_seconds": int(time.monotonic() - started)})
 
                     if family == "fixed":
                         for target_cents in exit_values("fixed_tp", exit_profiles):
