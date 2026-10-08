@@ -446,7 +446,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
 .symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.reset-symbol-cache{flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:18px;line-height:1}.reset-symbol-cache:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}.symbol-select-row .reset-symbol-cache{width:42px}}
 .ranking-parameters{position:relative;--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{padding-right:44px;cursor:pointer;color:var(--text);font-weight:700}.reset-ranking-parameters{position:absolute;top:7px;right:12px;flex:0 0 36px;width:36px;height:36px;min-width:36px;padding:0;background:transparent;color:var(--muted);font-size:21px;line-height:1}.reset-ranking-parameters:hover{background:#273653;color:var(--text)}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}}
-.martingale-block{flex-basis:100%;min-width:0;margin:4px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px}.martingale-block>summary{color:var(--text);font-weight:700;cursor:pointer}.martingale-controls{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin-top:12px}.martingale-block .field select{min-width:190px}@media(max-width:600px){.martingale-block,.martingale-block .field{width:100%}.martingale-controls,.martingale-block .field{width:100%}.martingale-block .field select{width:100%}}
+.martingale-block{flex-basis:100%;min-width:0;margin:4px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px}.martingale-block>summary{color:var(--text);font-weight:700;cursor:pointer}.martingale-controls{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin-top:12px}.martingale-block .field select{min-width:190px}.martingale-block #apply-martingale-settings{align-self:end;margin-bottom:1px}@media(max-width:600px){.martingale-block,.martingale-block .field{width:100%}.martingale-controls,.martingale-block .field{width:100%}.martingale-block .field select{width:100%}}
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
@@ -458,6 +458,9 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="symbol_sort" id="symbol-sort-mode" value="<?= h($symbolSort) ?>">
 <input type="hidden" name="snapshot_ids" id="portfolio-snapshot-ids" value="<?= h((string) ($_GET['snapshot_ids'] ?? '')) ?>">
 <input type="hidden" name="save_mode" id="save-mode-value" value="<?= $saveMode ? '1' : '0' ?>">
+<input type="hidden" name="martingale_mode" value="<?= h($martingaleMode) ?>">
+<input type="hidden" name="martingale_timing" value="<?= h($martingaleTiming) ?>">
+<input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
 <div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Остановить расчёты, сбросить кэш рейтингов и пересчитать выбранную пару" title="Остановить запущенные расчёты, сбросить кэш рейтингов и пересчитать выбранную пару">🧹</button></div>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label>
@@ -467,7 +470,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<details class="martingale-block"><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select name="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select name="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select name="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><p class="small-note">Рейтинг мартингейла отдельно сравнивает два расчёта: TP/SL растут с суммой позиции или остаются фиксированными в USDT. Стартовая сумма подбирается под выбранный Stop Loss, комиссию и число попыток; при ценовом разрыве или задержке сигнала следующий шаг ограничивается балансом.</p><p class="small-note">Сумма первого ордера по выбранным TP/SL: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
+<details class="martingale-block"><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Рейтинг мартингейла отдельно сравнивает два расчёта: TP/SL растут с суммой позиции или остаются фиксированными в USDT. Стартовая сумма подбирается под выбранный Stop Loss, комиссию и число попыток; при ценовом разрыве или задержке сигнала следующий шаг ограничивается балансом.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php foreach ($entryFamilies as $family => $familySettings):
@@ -593,13 +596,28 @@ const strategyRankingTimer = createElapsedTimer(document.querySelector('#strateg
 const portfolioRankingTimer = createElapsedTimer(document.querySelector('#portfolio-ranking-timer'), 'Время общего рейтинга');
 let portfolioRankingRequestVersion = 0;
 const martingaleCacheStatus = document.querySelector('#martingale-cache-status');
+const martingaleDraftStatus = document.querySelector('#martingale-draft-status');
 const martingaleInitialNotional = document.querySelector('#martingale-initial-notional');
-const martingaleControls = ['martingale_mode', 'martingale_timing', 'martingale_attempts']
+const martingaleApplyButton = document.querySelector('#apply-martingale-settings');
+const martingaleControls = [...filtersForm.querySelectorAll('[data-martingale-setting]')];
+const martingaleAppliedControls = ['martingale_mode', 'martingale_timing', 'martingale_attempts']
     .map(name => filtersForm.elements.namedItem(name));
 function readMartingaleSettings() {
-    return Object.fromEntries(martingaleControls.map(control => [control.name, control.value]));
+    return Object.fromEntries(martingaleControls.map(control => [control.dataset.martingaleSetting, control.value]));
 }
-let lastMartingaleSettings = readMartingaleSettings();
+function readAppliedMartingaleSettings() {
+    return Object.fromEntries(martingaleAppliedControls.map(control => [control.name, control.value]));
+}
+function writeAppliedMartingaleSettings(settings) {
+    martingaleAppliedControls.forEach(control => { control.value = settings[control.name]; });
+}
+function updateMartingaleDraftState() {
+    const hasDraftChanges = JSON.stringify(readMartingaleSettings()) !== JSON.stringify(lastMartingaleSettings);
+    martingaleApplyButton.disabled = !hasDraftChanges || martingaleSettingsResetPending;
+    martingaleDraftStatus.hidden = !hasDraftChanges;
+    martingaleDraftStatus.textContent = hasDraftChanges ? 'Есть неприменённые настройки мартингейла. Расчёты используют последние применённые параметры.' : '';
+}
+let lastMartingaleSettings = readAppliedMartingaleSettings();
 let martingaleSettingsResetPending = false;
 function updateMartingaleInitialNotional() {
     if (!martingaleInitialNotional) return;
@@ -738,7 +756,8 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
     control.addEventListener('change', () => {
         if (control.classList.contains('ranking-range-input') || control.classList.contains('ranking-mode-input')) return;
         if (martingaleControls.includes(control)) {
-            handleMartingaleSettingsChange();
+            updateMartingaleInitialNotional();
+            updateMartingaleDraftState();
             return;
         }
         if (control.id === 'entry-config') {
@@ -803,7 +822,7 @@ function promoteRankedSymbol(symbol) {
 let exitRankingRequestVersion = 0;
 let isResettingSymbolCache = false;
 async function handleMartingaleSettingsChange() {
-    const nextSettings = readMartingaleSettings();
+    const nextSettings = readAppliedMartingaleSettings();
     if (JSON.stringify(nextSettings) === JSON.stringify(lastMartingaleSettings) || martingaleSettingsResetPending) return;
     const previousSettings = lastMartingaleSettings;
     lastMartingaleSettings = nextSettings;
@@ -823,6 +842,7 @@ async function handleMartingaleSettingsChange() {
     entryConfigSelect.disabled = true;
     exitConfigSelect.disabled = true;
     martingaleControls.forEach(control => { control.disabled = true; });
+    martingaleApplyButton.disabled = true;
     resetSymbolCacheButton.disabled = true;
     martingaleCacheStatus.hidden = false;
     martingaleCacheStatus.textContent = 'Останавливаю старые расчёты и обновляю рейтинг мартингейла…';
@@ -839,7 +859,8 @@ async function handleMartingaleSettingsChange() {
         }
         resetSucceeded = true;
     } catch (error) {
-        martingaleControls.forEach(control => { control.value = previousSettings[control.name]; });
+        writeAppliedMartingaleSettings(previousSettings);
+        martingaleControls.forEach(control => { control.value = previousSettings[control.dataset.martingaleSetting]; });
         lastMartingaleSettings = previousSettings;
         updateMartingaleInitialNotional();
         martingaleCacheStatus.textContent = (error.message || 'Не удалось сбросить предыдущие рейтинги') + '. Настройки восстановлены.';
@@ -850,9 +871,14 @@ async function handleMartingaleSettingsChange() {
         exitConfigSelect.disabled = false;
         martingaleControls.forEach(control => { control.disabled = false; });
         resetSymbolCacheButton.disabled = false;
+        updateMartingaleDraftState();
     }
     if (resetSucceeded) filtersForm.requestSubmit();
 }
+martingaleApplyButton.addEventListener('click', () => {
+    writeAppliedMartingaleSettings(readMartingaleSettings());
+    handleMartingaleSettingsChange();
+});
 async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (isResettingSymbolCache) return;
     if (!isPoll) {
