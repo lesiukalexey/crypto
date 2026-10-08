@@ -12,10 +12,13 @@ def martingale_base_notional(
     stop_loss: float | None,
     mode: str,
     attempts: int,
+    target_policy: str = "scaled",
 ) -> float:
     """Size the first order so the full geometric progression fits at 1x."""
     if mode not in ("simple", "reverse") or not 2 <= attempts <= 10:
         raise ValueError("Invalid martingale options")
+    if target_policy not in ("scaled", "fixed"):
+        raise ValueError("Invalid martingale exit target policy")
     final_scale = 2 ** (attempts - 1)
     if stop_loss is None:
         return start_balance / final_scale
@@ -23,10 +26,10 @@ def martingale_base_notional(
     risk = abs(stop_loss)
     if mode == "simple":
         previous_scale = 2 ** (attempts - 2)
-        reserved_loss = risk * previous_scale
+        reserved_loss = risk * (previous_scale if target_policy == "scaled" else 1)
         required_balance_per_base = final_scale + fee_rate * previous_scale
     else:
-        reserved_loss = risk * (final_scale - 1)
+        reserved_loss = risk * ((final_scale - 1) if target_policy == "scaled" else attempts - 1)
         required_balance_per_base = final_scale * (1 + fee_rate)
     return max(0.0, (start_balance - reserved_loss) / required_balance_per_base)
 
@@ -44,6 +47,7 @@ def simulate_martingale(
     mode: str,
     timing: str,
     attempts: int,
+    target_policy: str = "scaled",
 ) -> tuple[float, int]:
     """Replay capped, 1x martingale exposure. Each opened order counts as a trade."""
     if mode not in ("simple", "reverse") or timing not in ("immediate", "rules") or not 2 <= attempts <= 10:
@@ -52,7 +56,9 @@ def simulate_martingale(
     signal_cursor = 0
     closed_orders = 0
     count = len(rows)
-    base_notional = martingale_base_notional(start_balance, fee_rate, stop_loss, mode, attempts)
+    if target_policy not in ("scaled", "fixed"):
+        raise ValueError("Invalid martingale exit target policy")
+    base_notional = martingale_base_notional(start_balance, fee_rate, stop_loss, mode, attempts, target_policy)
     if base_notional <= 0:
         return 0.0, 0
 
@@ -79,8 +85,9 @@ def simulate_martingale(
             entry_cost = sum(leg[0] * leg[1] for leg in legs)
             entry_fees = sum(leg[2] for leg in legs)
             multiplier = position_notional / chain_base_notional if chain_base_notional > 0 else 1.0
-            target_amount = take_profit * multiplier if take_profit is not None else None
-            stop_amount = stop_loss * multiplier if stop_loss is not None else None
+            target_multiplier = multiplier if target_policy == "scaled" else 1.0
+            target_amount = take_profit * target_multiplier if take_profit is not None else None
+            stop_amount = stop_loss * target_multiplier if stop_loss is not None else None
             if is_short:
                 price_tree = ask_tree
                 take_price = (entry_cost - entry_fees - target_amount) / (total_quantity * (1 + fee_rate)) if target_amount is not None else None

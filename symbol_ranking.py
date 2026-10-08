@@ -18,7 +18,7 @@ import pymysql
 
 from app import load_config
 from database import connect_mysql
-from strategy_ranking import PriceTree, make_signals, resolve_entry_config, simulate, exit_values
+from strategy_ranking import PriceTree, make_signals, martingale_target_policies, resolve_entry_config, simulate, exit_values
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -101,7 +101,10 @@ def main() -> int:
             "loss": len(exit_values("loss", exit_profiles)),
             "profit": len(exit_values("profit", exit_profiles)),
         }
-        variants_per_symbol = sum(exit_counts.values())
+        variants_per_symbol = exit_counts["profit"] + sum(
+            count * (2 if args.martingale_mode != "none" else 1)
+            for count in (exit_counts["fixed"], exit_counts["loss"])
+        )
         started = time.monotonic()
         results: list[dict[str, Any]] = []
 
@@ -122,17 +125,23 @@ def main() -> int:
 
                     def consider(target: float | None, loss: float | None, label: str) -> None:
                         nonlocal best_pnl, best_label, symbol_completed
-                        pnl, trade_count = simulate(rows, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate, target, loss, args.martingale_mode, args.martingale_timing, args.martingale_attempts)
-                        if trade_count >= args.min_trades and pnl > best_pnl:
-                            best_pnl, best_label = pnl, label
-                        symbol_completed += 1
+                        for target_policy, policy_label in martingale_target_policies(args.martingale_mode, loss):
+                            pnl, trade_count = simulate(
+                                rows, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
+                                target, loss, args.martingale_mode, args.martingale_timing,
+                                args.martingale_attempts, target_policy,
+                            )
+                            if trade_count >= args.min_trades and pnl > best_pnl:
+                                best_pnl = pnl
+                                best_label = label + (f" · {policy_label}" if policy_label else "")
+                            symbol_completed += 1
+                            if symbol_completed % 1000 == 0:
+                                progress = int((symbol_index + symbol_completed / variants_per_symbol) * 100 / max(1, len(max_ids)))
+                                write_json(status_path, {"status": "pending", "progress": min(99, progress), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
 
                     for take_cents in exit_values("fixed_tp", exit_profiles):
                         for loss_cents in exit_values("fixed_sl", exit_profiles):
                             consider(take_cents / 100, loss_cents / 100, f"TP {take_cents / 100:.2f} / SL {loss_cents / 100:.2f}")
-                            if symbol_completed % 1000 == 0:
-                                progress = int((symbol_index + symbol_completed / variants_per_symbol) * 100 / max(1, len(max_ids)))
-                                write_json(status_path, {"status": "pending", "progress": min(99, progress), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
                     for loss_cents in exit_values("loss", exit_profiles):
                         consider(None, loss_cents / 100, f"SL {loss_cents / 100:.2f}")
                     for take_cents in exit_values("profit", exit_profiles):

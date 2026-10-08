@@ -25,6 +25,7 @@ from strategy_ranking import (
     build_entry_specs,
     exit_values,
     make_signals,
+    martingale_target_policies,
     simulate,
     write_json,
 )
@@ -134,7 +135,12 @@ def main() -> int:
                 rows_by_symbol[symbol].append(row)
 
         specs = build_entry_specs(ranking)
-        candidate_count = exit_count(exit_profiles)
+        base_candidate_count = exit_count(exit_profiles)
+        duplicate_exit_policies = 2 if args.martingale_mode != "none" else 1
+        candidate_count = base_candidate_count + (duplicate_exit_policies - 1) * (
+            len(exit_values("fixed_tp", exit_profiles)) * len(exit_values("fixed_sl", exit_profiles))
+            + len(exit_values("loss", exit_profiles))
+        )
         total = len(specs) * candidate_count
         completed = 0
         universe_size = len(max_ids)
@@ -163,91 +169,95 @@ def main() -> int:
                     PriceTree([float(row["ask_price"]) for row in rows]),
                 )
 
-            for exit_id, exit_label, take_profit, stop_loss in exit_specs(exit_profiles):
-                aggregate_pnl = 0.0
-                eligible_symbols = 0
-                profitable_symbols = 0
-                local_winners_for_candidate: list[tuple[str, dict[str, Any]]] = []
-                for symbol, (rows, signals, shorts, bid_tree, ask_tree) in contexts.items():
-                    pnl, trade_count = simulate(
-                        rows,
-                        signals,
-                        shorts,
-                        bid_tree,
-                        ask_tree,
-                        args.balance,
-                        fee_rate,
-                        take_profit,
-                        stop_loss,
-                        args.martingale_mode,
-                        args.martingale_timing,
-                        args.martingale_attempts,
-                    )
-                    if trade_count < args.min_trades:
-                        continue
-                    eligible_symbols += 1
-                    aggregate_pnl += pnl
-                    if pnl > 0:
-                        profitable_symbols += 1
-                    ticker_candidate = {
-                        "symbol": symbol,
-                        "entry_id": entry_id,
-                        "entry_label": entry_label,
-                        "exit_id": exit_id,
-                        "exit_label": exit_label,
-                        "pnl": pnl,
-                        "trade_count": trade_count,
-                    }
-                    previous = best_by_symbol.get(symbol)
-                    if previous is None or (pnl, entry_id, exit_id) > (
-                        previous["pnl"], previous["entry_id"], previous["exit_id"]
-                    ):
-                        best_by_symbol[symbol] = ticker_candidate
-                        local_winners_for_candidate.append((symbol, ticker_candidate))
-                    if entry_id == args.entry_config:
-                        previous_selected = selected_entry_best.get(symbol)
-                        if previous_selected is None or (pnl, exit_id) > (
-                            previous_selected["best_pnl"], previous_selected["best_exit_id"]
+            for base_exit_id, base_exit_label, take_profit, stop_loss in exit_specs(exit_profiles):
+                for target_policy, policy_label in martingale_target_policies(args.martingale_mode, stop_loss):
+                    exit_id = f"{base_exit_id}:{target_policy}" if policy_label else base_exit_id
+                    exit_label = base_exit_label + (f" · {policy_label}" if policy_label else "")
+                    aggregate_pnl = 0.0
+                    eligible_symbols = 0
+                    profitable_symbols = 0
+                    local_winners_for_candidate: list[tuple[str, dict[str, Any]]] = []
+                    for symbol, (rows, signals, shorts, bid_tree, ask_tree) in contexts.items():
+                        pnl, trade_count = simulate(
+                            rows,
+                            signals,
+                            shorts,
+                            bid_tree,
+                            ask_tree,
+                            args.balance,
+                            fee_rate,
+                            take_profit,
+                            stop_loss,
+                            args.martingale_mode,
+                            args.martingale_timing,
+                            args.martingale_attempts,
+                            target_policy,
+                        )
+                        if trade_count < args.min_trades:
+                            continue
+                        eligible_symbols += 1
+                        aggregate_pnl += pnl
+                        if pnl > 0:
+                            profitable_symbols += 1
+                        ticker_candidate = {
+                            "symbol": symbol,
+                            "entry_id": entry_id,
+                            "entry_label": entry_label,
+                            "exit_id": exit_id,
+                            "exit_label": exit_label,
+                            "pnl": pnl,
+                            "trade_count": trade_count,
+                        }
+                        previous = best_by_symbol.get(symbol)
+                        if previous is None or (pnl, entry_id, exit_id) > (
+                            previous["pnl"], previous["entry_id"], previous["exit_id"]
                         ):
-                            selected_entry_best[symbol] = {
-                                "symbol": symbol,
-                                "best_pnl": pnl,
-                                "best_exit": exit_label,
-                                "best_exit_id": exit_id,
-                            }
+                            best_by_symbol[symbol] = ticker_candidate
+                            local_winners_for_candidate.append((symbol, ticker_candidate))
+                        if entry_id == args.entry_config:
+                            previous_selected = selected_entry_best.get(symbol)
+                            if previous_selected is None or (pnl, exit_id) > (
+                                previous_selected["best_pnl"], previous_selected["best_exit_id"]
+                            ):
+                                selected_entry_best[symbol] = {
+                                    "symbol": symbol,
+                                    "best_pnl": pnl,
+                                    "best_exit": exit_label,
+                                    "best_exit_id": exit_id,
+                                }
 
-                if eligible_symbols:
-                    average_all_symbols = aggregate_pnl / universe_size
-                    for symbol, winner in local_winners_for_candidate:
-                        if best_by_symbol.get(symbol) is winner:
-                            winner["market_average_pnl"] = average_all_symbols
-                            winner["market_eligible_symbols"] = eligible_symbols
-                            winner["market_profitable_symbols"] = profitable_symbols
-                    candidate = {
-                        "entry_id": entry_id,
-                        "entry_label": entry_label,
-                        "exit_id": exit_id,
-                        "exit_label": exit_label,
-                        "average_pnl": average_all_symbols,
-                        "total_pnl": aggregate_pnl,
-                        "eligible_symbols": eligible_symbols,
-                        "profitable_symbols": profitable_symbols,
-                    }
-                    combination_key = f"{entry_id}|{exit_id}"
-                    global_candidates.append((average_all_symbols, eligible_symbols, combination_key))
-                    heap_item = (average_all_symbols, eligible_symbols, combination_key, candidate)
-                    if len(global_top) < 5:
-                        heapq.heappush(global_top, heap_item)
-                    elif heap_item[:3] > global_top[0][:3]:
-                        heapq.heapreplace(global_top, heap_item)
+                    if eligible_symbols:
+                        average_all_symbols = aggregate_pnl / universe_size
+                        for symbol, winner in local_winners_for_candidate:
+                            if best_by_symbol.get(symbol) is winner:
+                                winner["market_average_pnl"] = average_all_symbols
+                                winner["market_eligible_symbols"] = eligible_symbols
+                                winner["market_profitable_symbols"] = profitable_symbols
+                        candidate = {
+                            "entry_id": entry_id,
+                            "entry_label": entry_label,
+                            "exit_id": exit_id,
+                            "exit_label": exit_label,
+                            "average_pnl": average_all_symbols,
+                            "total_pnl": aggregate_pnl,
+                            "eligible_symbols": eligible_symbols,
+                            "profitable_symbols": profitable_symbols,
+                        }
+                        combination_key = f"{entry_id}|{exit_id}"
+                        global_candidates.append((average_all_symbols, eligible_symbols, combination_key))
+                        heap_item = (average_all_symbols, eligible_symbols, combination_key, candidate)
+                        if len(global_top) < 5:
+                            heapq.heappush(global_top, heap_item)
+                        elif heap_item[:3] > global_top[0][:3]:
+                            heapq.heapreplace(global_top, heap_item)
 
-                completed += 1
-                if completed % 5000 == 0:
-                    write_json(status_path, {
-                        "status": "pending",
-                        "progress": min(99, int(completed * 100 / total)),
-                        "elapsed_seconds": int(time.monotonic() - started),
-                    })
+                    completed += 1
+                    if completed % 5000 == 0:
+                        write_json(status_path, {
+                            "status": "pending",
+                            "progress": min(99, int(completed * 100 / total)),
+                            "elapsed_seconds": int(time.monotonic() - started),
+                        })
 
         ranked_ticker_leaders = sorted(best_by_symbol.values(), key=lambda item: (-item["pnl"], item["symbol"]))
         for rank, leader in enumerate(ranked_ticker_leaders, start=1):

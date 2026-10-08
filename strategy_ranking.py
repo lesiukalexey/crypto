@@ -179,11 +179,13 @@ def simulate(
     martingale_mode: str = "none",
     martingale_timing: str = "immediate",
     martingale_attempts: int = 3,
+    martingale_target_policy: str = "scaled",
 ) -> tuple[float, int]:
     if martingale_mode != "none":
         return simulate_martingale(
             rows, signal_indexes, signal_shorts, bid_tree, ask_tree, start_balance,
             fee_rate, take_profit, stop_loss, martingale_mode, martingale_timing, martingale_attempts,
+            martingale_target_policy,
         )
     balance = start_balance
     signal_cursor = 0
@@ -233,6 +235,15 @@ def simulate(
             break
         signal_cursor = bisect.bisect_left(signal_indexes, exit_index + 1, lo=signal_cursor)
     return balance - start_balance, trades_closed
+
+
+def martingale_target_policies(mode: str, stop_loss: float | None) -> list[tuple[str, str]]:
+    if mode == "none" or stop_loss is None:
+        return [("scaled", "")]
+    return [
+        ("scaled", "TP/SL растут вместе с позицией"),
+        ("fixed", "TP/SL фиксированы в USDT"),
+    ]
 
 
 def main() -> int:
@@ -290,7 +301,10 @@ def main() -> int:
             ("loss", "Автоматические · фиксированный Stop Loss", len(exit_values("loss", exit_profiles))),
             ("profit", "Автоматические · фиксированный Take Profit", len(exit_values("profit", exit_profiles))),
         ]
-        total_per_entry = sum(spec[2] for spec in groups_specs)
+        total_per_entry = sum(
+            spec[2] * (2 if args.martingale_mode != "none" and spec[0] in ("fixed", "loss") else 1)
+            for spec in groups_specs
+        )
         entry_specs_for_worker = build_entry_specs(ranking)
         total = total_per_entry * len(entry_specs_for_worker)
         completed = 0
@@ -319,25 +333,35 @@ def main() -> int:
                 groups: list[dict[str, Any]] = []
 
                 for family, label, candidate_count in groups_specs:
-                    best: list[tuple[float, str, str]] = []
+                    family_policies = martingale_target_policies(
+                        args.martingale_mode,
+                        1.0 if family in ("fixed", "loss") else None,
+                    )
+                    best_by_policy: dict[str, list[tuple[float, str, str]]] = {
+                        policy: [] for policy, _ in family_policies
+                    }
 
                     def consider(identifier: str, display: str, target: float | None, loss: float | None) -> None:
                         nonlocal completed
-                        pnl, trade_count = simulate(rows, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate, target, loss, args.martingale_mode, args.martingale_timing, args.martingale_attempts)
-                        if trade_count < args.min_trades:
+                        for target_policy, policy_label in martingale_target_policies(args.martingale_mode, loss):
+                            pnl, trade_count = simulate(
+                                rows, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
+                                target, loss, args.martingale_mode, args.martingale_timing,
+                                args.martingale_attempts, target_policy,
+                            )
+                            if trade_count >= args.min_trades:
+                                profile_best[0] = max(profile_best[0], pnl)
+                                ranked_id = f"{identifier}:{target_policy}" if policy_label else identifier
+                                ranked_label = display + (f" · {policy_label}" if policy_label else "")
+                                item = (pnl, ranked_id, f"{ranked_label} · {trade_count} сделок · итог {pnl:+.4f} USDT")
+                                best = best_by_policy[target_policy]
+                                if len(best) < TOP_PER_GROUP:
+                                    heapq.heappush(best, item)
+                                elif (pnl, ranked_id) > (best[0][0], best[0][1]):
+                                    heapq.heapreplace(best, item)
                             completed += 1
                             if completed % 1000 == 0:
                                 write_json(status_path, {"status": "pending", "progress": int(completed * 100 / total), "elapsed_seconds": int(time.monotonic() - started)})
-                            return
-                        profile_best[0] = max(profile_best[0], pnl)
-                        item = (pnl, identifier, f"{display} · {trade_count} сделок · итог {pnl:+.4f} USDT")
-                        if len(best) < TOP_PER_GROUP:
-                            heapq.heappush(best, item)
-                        elif (pnl, identifier) > (best[0][0], best[0][1]):
-                            heapq.heapreplace(best, item)
-                        completed += 1
-                        if completed % 1000 == 0:
-                            write_json(status_path, {"status": "pending", "progress": int(completed * 100 / total), "elapsed_seconds": int(time.monotonic() - started)})
 
                     if family == "fixed":
                         for target_cents in exit_values("fixed_tp", exit_profiles):
@@ -350,11 +374,14 @@ def main() -> int:
                         for target_cents in exit_values("profit", exit_profiles):
                             consider(f"profit:{target_cents}", f"Take Profit {target_cents / 100:.2f} USDT · без фиксации убытка", target_cents / 100, None)
 
-                    best.sort(key=lambda current: (-current[0], current[1]))
-                    groups.append({
-                        "label": label + f" · топ {min(TOP_PER_GROUP, len(best))} из {candidate_count}",
-                        "items": [{"id": item[1], "label": item[2]} for item in best],
-                    })
+                    for target_policy, policy_label in family_policies:
+                        best = best_by_policy[target_policy]
+                        best.sort(key=lambda current: (-current[0], current[1]))
+                        group_label = label + (f" · {policy_label}" if policy_label else "")
+                        groups.append({
+                            "label": group_label + f" · топ {min(TOP_PER_GROUP, len(best))} из {candidate_count}",
+                            "items": [{"id": item[1], "label": item[2]} for item in best],
+                        })
 
                 write_json(args.cache_dir / f"{args.cache_key}.{entry_id}.json", {"status": "ready", "groups": groups})
                 if math.isfinite(profile_best[0]):

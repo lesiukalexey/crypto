@@ -61,6 +61,11 @@ if (!in_array($martingaleTiming, ['immediate', 'rules'], true)) $martingaleTimin
 if ($martingaleAttempts === false || $martingaleAttempts < 2 || $martingaleAttempts > 10) $martingaleAttempts = 3;
 $defaultExitConfig = 'fixed:' . $rankingRanges['fixed_tp']['from'] . ':' . $rankingRanges['fixed_sl']['from'];
 $exitConfig = (string) ($_GET['exit_config'] ?? $defaultExitConfig);
+$martingaleTargetPolicy = 'scaled';
+if (preg_match('/:(scaled|fixed)$/', $exitConfig, $policyMatch)) {
+    $martingaleTargetPolicy = $policyMatch[1];
+    $exitConfig = substr($exitConfig, 0, -strlen($policyMatch[0]));
+}
 $symbolSort = (string) ($_GET['symbol_sort'] ?? '') === 'profit' ? 'profit' : '';
 $isCurrentDay = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
@@ -101,6 +106,7 @@ if (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
 } else {
     $exitConfig = $defaultExitConfig;
 }
+$selectedExitConfig = $exitConfig . ($martingaleMode !== 'none' ? ':' . $martingaleTargetPolicy : '');
 
 try {
     $password = getenv($db['password_env']) ?: '';
@@ -230,10 +236,13 @@ if ($martingaleMode !== 'none') {
         $risk = bcmul(bccomp($lossThreshold, '0', 24) < 0 ? bcsub('0', $lossThreshold, 24) : $lossThreshold, '1', 24);
         if ($martingaleMode === 'simple') {
             $previousScale = (string) (2 ** ($martingaleAttempts - 2));
-            $reservedLoss = bcmul($risk, $previousScale, 24);
+            $reservedLoss = bcmul($risk, $martingaleTargetPolicy === 'scaled' ? $previousScale : '1', 24);
             $requiredPerBase = bcadd($finalScale, bcmul($feeRate, $previousScale, 24), 24);
         } else {
-            $reservedLoss = bcmul($risk, bcsub($finalScale, '1', 24), 24);
+            $lossSteps = $martingaleTargetPolicy === 'scaled'
+                ? bcsub($finalScale, '1', 24)
+                : (string) ($martingaleAttempts - 1);
+            $reservedLoss = bcmul($risk, $lossSteps, 24);
             $requiredPerBase = bcmul($finalScale, bcadd('1', $feeRate, 24), 24);
         }
         $availableForStakes = bcsub($startingBalance, $reservedLoss, 24);
@@ -270,8 +279,9 @@ if ($martingaleMode !== 'none') {
             $exitIndex = $rowCount - 1;
             $exitReason = $isCurrentDay ? 'Последний доступный снимок' : 'Конец выбранного периода';
             $stageScale = bcdiv($positionNotional, $chainBaseStake, 24);
-            $stageTarget = $profitTarget === null ? null : bcmul($profitTarget, $stageScale, 24);
-            $stageLoss = $lossThreshold === null ? null : bcmul($lossThreshold, $stageScale, 24);
+            $targetScale = $martingaleTargetPolicy === 'scaled' ? $stageScale : '1';
+            $stageTarget = $profitTarget === null ? null : bcmul($profitTarget, $targetScale, 24);
+            $stageLoss = $lossThreshold === null ? null : bcmul($lossThreshold, $targetScale, 24);
             $foundStop = false;
             for ($i = $tradeEntryIndex + 1; $i < $rowCount; $i++) {
                 $exitQuote = $tradeIsShort ? $rows[$i]['ask_price'] : $rows[$i]['bid_price'];
@@ -448,10 +458,10 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label>
 
 <label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
-<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($exitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
+<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<fieldset class="martingale-block"><legend>Мартингейл</legend><label class="field">Режим<select name="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select name="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select name="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><p class="small-note">Стартовая сумма автоматически подбирается под всю серию попыток с учетом Stop Loss и комиссии. Если ожидание сигнала или ценовой разрыв увеличит убыток, следующий шаг может быть ограничен остатком баланса. В простом режиме позиция усредняется и закрывается целиком; в обратном — текущая позиция закрывается на стопе и открывается обратная.</p></fieldset>
+<fieldset class="martingale-block"><legend>Мартингейл</legend><label class="field">Режим<select name="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select name="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select name="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><p class="small-note">Рейтинг мартингейла отдельно сравнивает два расчёта: TP/SL растут с суммой позиции или остаются фиксированными в USDT. Стартовая сумма подбирается под выбранный Stop Loss, комиссию и число попыток; при ценовом разрыве или задержке сигнала следующий шаг ограничивается балансом.</p></fieldset>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php foreach ($entryFamilies as $family => $familySettings):
@@ -484,7 +494,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <p class="small-note">Граница «до» включается, если на неё попадает шаг.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 </details>
 </form><p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> <?= h($entryThresholdSummaries['both']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['both']['windows']))) ?> снимков. Рост +: <?= h($entryThresholdSummaries['long']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['long']['windows']))) ?>. Падение −: <?= h($entryThresholdSummaries['short']) ?> USDT; окна <?= h(implode(', ', array_map('strval', $entryProfiles['short']['windows']))) ?>. У каждого направления свои диапазоны и окна; каждый порог проверяется на каждом окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></section>
-<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">Для каждой пары показано её место среди всех комбинаций по среднему итогу на рынке.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
+<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= count($rows) ?> снимков</span></div>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
 <div class="legend"><?php foreach ($series as $meta): ?><span><i class="dot" style="background:<?= h($meta['color']) ?>"></i><?= h($meta['name']) ?></span><?php endforeach; ?></div>
