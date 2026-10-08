@@ -6,6 +6,7 @@ require_once __DIR__ . '/ranking-parameters.php';
 $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
 $entryProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
 $exitProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/exit_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
+$defaultRankingRanges = rankingParameters([], $entryProfileConfig, $exitProfileConfig)['ranges'];
 $rankingError = null;
 try {
     $rankingParameters = rankingParameters($_GET, $entryProfileConfig, $exitProfileConfig);
@@ -133,14 +134,15 @@ try {
 }
 
 function h(string $value): string { return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
-function rankingRangeRow(string $label, string $name, array $range, bool $money): string
+function rankingRangeRow(string $label, string $name, array $range, bool $money, array $defaultRange = []): string
 {
     $format = static fn (int $value): string => $money ? number_format($value / 100, 2, '.', '') : (string) $value;
     $step = $money ? '0.01' : '1';
     $cells = '';
     foreach (['from' => 'От', 'to' => 'До', 'step' => 'Шаг'] as $key => $caption) {
         $cells .= '<label>' . $caption . '<input class="ranking-range-input" type="number" name="' . $name . '_' . $key
-            . '" min="' . $step . '" step="' . $step . '" value="' . h($format($range[$key])) . '" required></label>';
+            . '" min="' . $step . '" step="' . $step . '" value="' . h($format($range[$key]))
+            . '" data-default-value="' . h($format($defaultRange[$key] ?? $range[$key])) . '" required></label>';
     }
     return '<div class="ranking-range-row"><span>' . h($label) . '</span>' . $cells . '</div>';
 }
@@ -251,7 +253,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head h2{flex:1}.portfolio-ranking-head .refresh-symbols{margin-left:auto}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.reset-symbol-cache{flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:18px;line-height:1}.reset-symbol-cache:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}.symbol-select-row .reset-symbol-cache{width:42px}}
-.ranking-parameters{--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{cursor:pointer;color:var(--text);font-weight:700}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}}
+.ranking-parameters{position:relative;--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{padding-right:44px;cursor:pointer;color:var(--text);font-weight:700}.reset-ranking-parameters{position:absolute;top:7px;right:12px;flex:0 0 36px;width:36px;height:36px;min-width:36px;padding:0;background:transparent;color:var(--muted);font-size:21px;line-height:1}.reset-ranking-parameters:hover{background:#273653;color:var(--text)}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}}
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
@@ -271,21 +273,21 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($exitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary>
+<details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
-<div class="ranking-range-heading"><h3>Порог входа · движение Last (USDT)</h3><label class="ranking-mode-label"><select aria-label="Режим значений порога входа" class="ranking-mode-input" name="threshold_mode" data-range="threshold"><option value="default" <?= $rankingModes['threshold'] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes['threshold'] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
+<div class="ranking-range-heading"><h3>Порог входа · движение Last (USDT)</h3><label class="ranking-mode-label"><select aria-label="Режим значений порога входа" class="ranking-mode-input" name="threshold_mode" data-default-value="default" data-range="threshold"><option value="default" <?= $rankingModes['threshold'] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes['threshold'] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
 <p class="small-note">Текущие значения: <?= h($defaultThresholdText) ?> USDT.</p>
-<div class="ranking-custom" id="threshold-custom" <?= $rankingModes['threshold'] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'threshold', $thresholdCustomRange, true) ?></div>
-<div class="ranking-range-heading"><h3>Порог входа · окно (число снимков)</h3><label class="ranking-mode-label"><select aria-label="Режим окна входа" class="ranking-mode-input" name="window_mode" data-range="window"><option value="default" <?= $rankingModes['window'] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes['window'] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
+<div class="ranking-custom" id="threshold-custom" <?= $rankingModes['threshold'] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'threshold', $thresholdCustomRange, true, ['from' => 1, 'to' => 10, 'step' => 1]) ?></div>
+<div class="ranking-range-heading"><h3>Порог входа · окно (число снимков)</h3><label class="ranking-mode-label"><select aria-label="Режим окна входа" class="ranking-mode-input" name="window_mode" data-default-value="default" data-range="window"><option value="default" <?= $rankingModes['window'] === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $rankingModes['window'] === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
 <p class="small-note">Текущие значения: <?= h($defaultWindowText) ?> снимков.</p>
-<div class="ranking-custom" id="window-custom" <?= $rankingModes['window'] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'window', $windowCustomRange, false) ?></div>
+<div class="ranking-custom" id="window-custom" <?= $rankingModes['window'] === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'window', $windowCustomRange, false, ['from' => 5, 'to' => 40, 'step' => 5]) ?></div>
 </div>
 <h3>TakeProfit &amp; StopLoss (USDT)</h3>
 <p class="small-note">Совместный расчёт: каждый Take Profit проверяется с каждым Stop Loss.</p>
-<?= rankingRangeRow('Take Profit · совместный расчёт', 'fixed_tp', $rankingRanges['fixed_tp'], true) ?>
-<?= rankingRangeRow('Stop Loss · совместный расчёт', 'fixed_sl', $rankingRanges['fixed_sl'], true) ?>
-<?= rankingRangeRow('Только Take Profit', 'profit', $rankingRanges['profit'], true) ?>
-<?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], true) ?>
+<?= rankingRangeRow('Take Profit · совместный расчёт', 'fixed_tp', $rankingRanges['fixed_tp'], true, $defaultRankingRanges['fixed_tp']) ?>
+<?= rankingRangeRow('Stop Loss · совместный расчёт', 'fixed_sl', $rankingRanges['fixed_sl'], true, $defaultRankingRanges['fixed_sl']) ?>
+<?= rankingRangeRow('Только Take Profit', 'profit', $rankingRanges['profit'], true, $defaultRankingRanges['profit']) ?>
+<?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], true, $defaultRankingRanges['loss']) ?>
 <p class="small-note">Граница «до» включается, если на неё попадает шаг.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 </details>
 </form><p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Диапазоны входа:</strong> <?= h($entryThresholdText) ?> USDT. <strong>Окна:</strong> <?= h($entryWindowText) ?> снимков. Каждый порог проверяется на каждом окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Каждый порог задает движение Last в обе стороны за выбранное число снимков. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></section>
@@ -380,6 +382,17 @@ document.querySelectorAll('.ranking-mode-input').forEach(control => {
     };
     control.addEventListener('change', update);
     update();
+});
+document.querySelector('#reset-ranking-parameters').addEventListener('click', () => {
+    document.querySelectorAll('.ranking-range-input').forEach(input => {
+        input.value = input.dataset.defaultValue;
+    });
+    document.querySelectorAll('.ranking-mode-input').forEach(control => {
+        control.value = control.dataset.defaultValue;
+        control.dispatchEvent(new Event('change', {bubbles:true}));
+    });
+    resetPortfolioRankingForRelevantFilterChange();
+    filtersForm.requestSubmit();
 });
 saveModeToggle.addEventListener('change', () => {
     saveModeValue.value = saveModeToggle.checked ? '1' : '0';
