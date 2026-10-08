@@ -302,12 +302,12 @@ def simulate(
     martingale_attempts: int = 3,
     martingale_target_policy: str = "scaled",
 ) -> tuple[float, int]:
-    from numba_simulation import simulate_martingale_numba, simulate_numba
-
     indexes = signal_indexes if isinstance(signal_indexes, np.ndarray) else np.asarray(signal_indexes, dtype=np.int64)
     shorts = signal_shorts if isinstance(signal_shorts, np.ndarray) else np.asarray(signal_shorts, dtype=np.bool_)
 
     if martingale_mode != "none":
+        from numba_simulation import simulate_martingale_numba
+
         if martingale_mode not in ("simple", "reverse") or martingale_timing not in ("immediate", "rules") or not 2 <= martingale_attempts <= 10:
             raise ValueError("Invalid martingale options")
         if martingale_target_policy not in ("scaled", "fixed"):
@@ -328,7 +328,9 @@ def simulate(
             0 if martingale_target_policy == "scaled" else 1,
         )
 
-    return simulate_numba(
+    from pythran_simulation import simulate_standard
+
+    return simulate_standard(
         quotes.bids,
         quotes.asks,
         bid_tree.maximum,

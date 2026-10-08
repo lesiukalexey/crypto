@@ -51,9 +51,13 @@ CREATE DATABASE bitget_quotes CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
+python setup.py build_ext --inplace
 export BITGET_DB_PASSWORD='ваш-пароль'
 python app.py
 ```
+
+Для обычного рейтинга `setup.py build_ext --inplace` собирает Pythran-модуль и
+требует компилятор C++17. Расчёт с мартингейлом пока выполняется через Numba.
 
 ## Автозапуск при старте компьютера
 
