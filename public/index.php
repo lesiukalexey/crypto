@@ -295,8 +295,8 @@ if ($martingaleMode !== 'none') {
             if ($martingaleMode === 'simple') {
                 $equity = bcadd($balance, $unrealized, 24);
                 $freeMargin = bcsub($equity, $positionNotional, 24);
-                $addNotional = bccomp($freeMargin, $positionNotional, 24) < 0 ? $freeMargin : $positionNotional;
-                $addNotional = bcdiv($addNotional, bcadd('1', $feeRate, 24), 24);
+                $maxAffordable = bcdiv($freeMargin, bcadd('1', $feeRate, 24), 24);
+                $addNotional = bccomp($maxAffordable, $positionNotional, 24) < 0 ? $maxAffordable : $positionNotional;
                 if ($martingaleTiming === 'rules') {
                     $nextSignal = $findCompatibleEntry($exitIndex + 1, $tradeIsShort);
                     if ($nextSignal === null) {
@@ -315,8 +315,8 @@ if ($martingaleMode !== 'none') {
                     $signalNet = bcsub(bcsub($signalGross, $signalFees, 24), bcmul(bcmul($signalQty, $signalQuote, 24), $feeRate, 24), 24);
                     $signalEquity = bcadd($balance, $signalNet, 24);
                     $signalFreeMargin = bcsub($signalEquity, $positionNotional, 24);
-                    $addNotional = bccomp($signalFreeMargin, $positionNotional, 24) < 0 ? $signalFreeMargin : $positionNotional;
-                    $addNotional = bcdiv($addNotional, bcadd('1', $feeRate, 24), 24);
+                    $maxSignalAffordable = bcdiv($signalFreeMargin, bcadd('1', $feeRate, 24), 24);
+                    $addNotional = bccomp($maxSignalAffordable, $positionNotional, 24) < 0 ? $maxSignalAffordable : $positionNotional;
                 } else $nextIndex = $exitIndex;
                 if (bccomp($addNotional, '0', 24) <= 0 || !$addLeg($nextIndex, $tradeIsShort, $addNotional)) {
                     $appendLegTrades($legs, $exitIndex, 'Недостаточно свободного баланса для следующего шага мартингейла', $balance);
