@@ -75,7 +75,16 @@ try {
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
         respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга.'], 500);
     }
-    $key = hash('sha256', json_encode(['symbol-ranking-v7-martingale-exit-policies', $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $maxIds, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
+    $generationPath = $cacheDir . '/strategy-ranking-generation.txt';
+    $cacheGeneration = 'initial';
+    if (is_file($generationPath)) {
+        $generationValue = file_get_contents($generationPath);
+        if ($generationValue === false || trim($generationValue) === '') {
+            respond(['status' => 'error', 'message' => 'Не удалось прочитать поколение кэша рейтинга.'], 503);
+        }
+        $cacheGeneration = trim($generationValue);
+    }
+    $key = hash('sha256', json_encode(['symbol-ranking-v8-martingale-reset-generation', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $maxIds, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/symbols-' . $key . '.json';
     $statusPath = $cacheDir . '/symbols-' . $key . '.status.json';
     if (is_file($resultPath)) {

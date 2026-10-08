@@ -92,9 +92,18 @@ try {
     if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
         respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга.'], 500);
     }
+    $generationPath = $cacheDir . '/strategy-ranking-generation.txt';
+    $cacheGeneration = 'initial';
+    if (is_file($generationPath)) {
+        $generationValue = file_get_contents($generationPath);
+        if ($generationValue === false || trim($generationValue) === '') {
+            respond(['status' => 'error', 'message' => 'Не удалось прочитать поколение кэша рейтинга.'], 503);
+        }
+        $cacheGeneration = trim($generationValue);
+    }
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $key = hash('sha256', json_encode([
-        'portfolio-ranking-v7-martingale-exit-policies', $config['category'], $startValue, $endValue, $balance, $fee,
+        'portfolio-ranking-v8-martingale-reset-generation', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
         $minTrades, $entryConfig, $maxIds, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';

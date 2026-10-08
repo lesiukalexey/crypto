@@ -461,7 +461,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<fieldset class="martingale-block"><legend>Мартингейл</legend><label class="field">Режим<select name="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select name="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select name="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><p class="small-note">Рейтинг мартингейла отдельно сравнивает два расчёта: TP/SL растут с суммой позиции или остаются фиксированными в USDT. Стартовая сумма подбирается под выбранный Stop Loss, комиссию и число попыток; при ценовом разрыве или задержке сигнала следующий шаг ограничивается балансом.</p></fieldset>
+<fieldset class="martingale-block"><legend>Мартингейл</legend><label class="field">Режим<select name="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select name="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select name="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><p class="small-note">Рейтинг мартингейла отдельно сравнивает два расчёта: TP/SL растут с суммой позиции или остаются фиксированными в USDT. Стартовая сумма подбирается под выбранный Stop Loss, комиссию и число попыток; при ценовом разрыве или задержке сигнала следующий шаг ограничивается балансом.</p><p class="small-note">Сумма первого ордера по выбранным TP/SL: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></fieldset>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php foreach ($entryFamilies as $family => $familySettings):
@@ -543,6 +543,61 @@ const resetSymbolCacheButton = document.querySelector('#reset-symbol-cache');
 const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel');
 const portfolioRankingContent = document.querySelector('#portfolio-ranking-content');
 const portfolioRankingStatus = document.querySelector('#portfolio-ranking-status');
+const martingaleCacheStatus = document.querySelector('#martingale-cache-status');
+const martingaleInitialNotional = document.querySelector('#martingale-initial-notional');
+const martingaleControls = ['martingale_mode', 'martingale_timing', 'martingale_attempts']
+    .map(name => filtersForm.elements.namedItem(name));
+function readMartingaleSettings() {
+    return Object.fromEntries(martingaleControls.map(control => [control.name, control.value]));
+}
+let lastMartingaleSettings = readMartingaleSettings();
+let martingaleSettingsResetPending = false;
+function updateMartingaleInitialNotional() {
+    if (!martingaleInitialNotional) return;
+    const settings = readMartingaleSettings();
+    if (settings.martingale_mode === 'none') {
+        martingaleInitialNotional.textContent = 'Мартингейл выключен';
+        return;
+    }
+    const balance = Number(filtersForm.elements.namedItem('balance').value);
+    const fee = Number(filtersForm.elements.namedItem('fee').value) / 100;
+    const attempts = Number(settings.martingale_attempts);
+    const selectedExit = exitConfigSelect.value;
+    const policyMatch = selectedExit.match(/:(scaled|fixed)$/);
+    const policy = policyMatch?.[1] || 'scaled';
+    const exitId = selectedExit.replace(/:(scaled|fixed)$/, '');
+    let stopLoss = null;
+    let match = exitId.match(/^fixed:\d+:(\d+)$/) || exitId.match(/^loss:(\d+)$/);
+    if (match) stopLoss = Number(match[1]) / 100;
+
+    if (!(balance > 0) || !(attempts >= 2) || !Number.isFinite(fee)) {
+        martingaleInitialNotional.textContent = 'Проверьте баланс и комиссию';
+        return;
+    }
+    const finalScale = 2 ** (attempts - 1);
+    const previousScale = 2 ** (attempts - 2);
+    let reservedLoss = 0;
+    let requiredPerInitialDollar = finalScale;
+    if (stopLoss !== null) {
+        if (settings.martingale_mode === 'simple') {
+            reservedLoss = stopLoss * (policy === 'scaled' ? previousScale : 1);
+            requiredPerInitialDollar += fee * previousScale;
+        } else {
+            reservedLoss = stopLoss * (policy === 'scaled' ? finalScale - 1 : attempts - 1);
+            requiredPerInitialDollar *= 1 + fee;
+        }
+    }
+    let initialNotional = Math.max(0, (balance - reservedLoss) / requiredPerInitialDollar);
+    initialNotional = Math.min(initialNotional, balance / (1 + fee));
+    if (initialNotional <= 0) {
+        martingaleInitialNotional.textContent = '0,00 USDT · баланса не хватает на всю серию';
+        return;
+    }
+    martingaleInitialNotional.textContent = new Intl.NumberFormat('ru-RU', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 6,
+    }).format(initialNotional) + ' USDT';
+}
 function setRefreshProgress(progress, title) {
     const percent = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
     refreshSymbolsButton.disabled = true;
@@ -631,7 +686,12 @@ async function refreshStrategyResults() {
 filtersForm.querySelectorAll('select, input').forEach(control => {
     control.addEventListener('change', () => {
         if (control.classList.contains('ranking-range-input') || control.classList.contains('ranking-mode-input')) return;
+        if (martingaleControls.includes(control)) {
+            handleMartingaleSettingsChange();
+            return;
+        }
         if (control.id === 'entry-config' || control.id === 'exit-config') {
+            updateMartingaleInitialNotional();
             refreshStrategyResults();
             return;
         }
@@ -643,6 +703,7 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
     });
     if (control.type === 'number' && !control.classList.contains('ranking-range-input')) {
         control.addEventListener('input', () => {
+            updateMartingaleInitialNotional();
             clearTimeout(filterSubmitTimer);
             filterSubmitTimer = setTimeout(() => {
                 if (control.value !== '' && control.checkValidity()) {
@@ -676,6 +737,57 @@ function promoteRankedSymbol(symbol) {
 }
 let exitRankingRequestVersion = 0;
 let isResettingSymbolCache = false;
+async function handleMartingaleSettingsChange() {
+    const nextSettings = readMartingaleSettings();
+    if (JSON.stringify(nextSettings) === JSON.stringify(lastMartingaleSettings) || martingaleSettingsResetPending) return;
+    const previousSettings = lastMartingaleSettings;
+    lastMartingaleSettings = nextSettings;
+    updateMartingaleInitialNotional();
+    const martingaleWasActive = previousSettings.martingale_mode !== 'none';
+    const martingaleIsActive = nextSettings.martingale_mode !== 'none';
+    if (!martingaleWasActive && !martingaleIsActive) {
+        filtersForm.requestSubmit();
+        return;
+    }
+
+    martingaleSettingsResetPending = true;
+    isResettingSymbolCache = true;
+    exitRankingRequestVersion++;
+    replayRequest?.abort();
+    resetPortfolioRankingForRelevantFilterChange();
+    entryConfigSelect.disabled = true;
+    exitConfigSelect.disabled = true;
+    martingaleControls.forEach(control => { control.disabled = true; });
+    resetSymbolCacheButton.disabled = true;
+    martingaleCacheStatus.hidden = false;
+    martingaleCacheStatus.textContent = 'Останавливаю старые расчёты и обновляю рейтинг мартингейла…';
+    let resetSucceeded = false;
+    try {
+        const response = await fetch('reset-strategy-ranking-cache.php', {
+            method: 'POST',
+            headers: {Accept: 'application/json'},
+            cache: 'no-store',
+        });
+        const result = await response.json();
+        if (!response.ok || result.status !== 'ready') {
+            throw new Error(result.message || 'Не удалось сбросить предыдущие рейтинги');
+        }
+        resetSucceeded = true;
+    } catch (error) {
+        martingaleControls.forEach(control => { control.value = previousSettings[control.name]; });
+        lastMartingaleSettings = previousSettings;
+        updateMartingaleInitialNotional();
+        martingaleCacheStatus.textContent = (error.message || 'Не удалось сбросить предыдущие рейтинги') + '. Настройки восстановлены.';
+    } finally {
+        isResettingSymbolCache = false;
+        martingaleSettingsResetPending = false;
+        entryConfigSelect.disabled = false;
+        exitConfigSelect.disabled = false;
+        martingaleControls.forEach(control => { control.disabled = false; });
+        resetSymbolCacheButton.disabled = false;
+    }
+    if (resetSucceeded) filtersForm.requestSubmit();
+}
 async function loadExitRanking() {
     if (isResettingSymbolCache) return;
     const requestVersion = exitRankingRequestVersion;
@@ -738,6 +850,7 @@ async function loadExitRanking() {
                 if (selected && fallback.value !== selected) filtersForm.requestSubmit();
             }
         }
+        updateMartingaleInitialNotional();
         promoteRankedSymbol(params.get('symbol'));
     } catch (_) {
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
@@ -1042,6 +1155,7 @@ async function refreshCollectorStatus() {
 }
 refreshCollectorStatus();
 window.setInterval(refreshCollectorStatus, 30000);
+updateMartingaleInitialNotional();
 if (symbolSortMode.value === 'profit') {
     loadPortfolioRanking();
 }
