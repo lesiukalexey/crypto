@@ -137,6 +137,7 @@ def main() -> int:
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
 
+        price_trees_by_symbol: dict[str, tuple[PriceTree, PriceTree]] = {}
         specs = build_entry_specs(ranking)
         base_candidate_count = exit_count(exit_profiles)
         duplicate_exit_policies = 2 if args.martingale_mode != "none" else 1
@@ -166,12 +167,19 @@ def main() -> int:
                     args.martingale_mode == "none" and len(signals) < args.min_trades
                 ):
                     continue
+                price_trees = price_trees_by_symbol.get(symbol)
+                if price_trees is None:
+                    price_trees = (
+                        PriceTree([float(row["bid_price"]) for row in rows]),
+                        PriceTree([float(row["ask_price"]) for row in rows]),
+                    )
+                    price_trees_by_symbol[symbol] = price_trees
                 contexts[symbol] = (
                     rows,
                     signals,
                     shorts,
-                    PriceTree([float(row["bid_price"]) for row in rows]),
-                    PriceTree([float(row["ask_price"]) for row in rows]),
+                    price_trees[0],
+                    price_trees[1],
                 )
 
             if not contexts:
