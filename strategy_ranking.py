@@ -57,28 +57,44 @@ class PriceTree:
             self.minimum[node] = min(self.minimum[node * 2], self.minimum[node * 2 + 1])
 
     def first_ge(self, start: int, target: float) -> int | None:
-        def visit(node: int, left: int, right: int) -> int | None:
-            if right <= start or left >= self.length or self.maximum[node] < target:
-                return None
-            if right - left == 1:
-                return left
-            middle = (left + right) // 2
-            found = visit(node * 2, left, middle)
-            return found if found is not None else visit(node * 2 + 1, middle, right)
-
-        return visit(1, 0, self.size)
+        start = max(0, start)
+        if start >= self.length:
+            return None
+        node = self.size + start
+        if self.maximum[node] >= target:
+            return start
+        while node > 1:
+            if node % 2 == 0:
+                candidate = node + 1
+                if self.maximum[candidate] >= target:
+                    while candidate < self.size:
+                        candidate *= 2
+                        if self.maximum[candidate] < target:
+                            candidate += 1
+                    index = candidate - self.size
+                    return index if index < self.length else None
+            node //= 2
+        return None
 
     def first_le(self, start: int, target: float) -> int | None:
-        def visit(node: int, left: int, right: int) -> int | None:
-            if right <= start or left >= self.length or self.minimum[node] > target:
-                return None
-            if right - left == 1:
-                return left
-            middle = (left + right) // 2
-            found = visit(node * 2, left, middle)
-            return found if found is not None else visit(node * 2 + 1, middle, right)
-
-        return visit(1, 0, self.size)
+        start = max(0, start)
+        if start >= self.length:
+            return None
+        node = self.size + start
+        if self.minimum[node] <= target:
+            return start
+        while node > 1:
+            if node % 2 == 0:
+                candidate = node + 1
+                if self.minimum[candidate] <= target:
+                    while candidate < self.size:
+                        candidate *= 2
+                        if self.minimum[candidate] > target:
+                            candidate += 1
+                    index = candidate - self.size
+                    return index if index < self.length else None
+            node //= 2
+        return None
 
 
 @dataclass(slots=True)
