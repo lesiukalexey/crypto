@@ -96,7 +96,7 @@ try {
     }
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $maxId = (int) ($snapshotIds[$symbol] ?? 0);
-    $key = hash('sha256', json_encode(['ranking-v25-percent-entry-tpsl', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
+    $key = hash('sha256', json_encode(['ranking-v26-short-targets', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/' . $key . '.json';
     $statusPath = $cacheDir . '/' . $key . '.status.json';
     $profilePath = $cacheDir . '/' . $key . '.' . $entryConfig . '.json';

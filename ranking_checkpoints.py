@@ -48,7 +48,7 @@ def daily_quote_boundaries(timestamps: np.ndarray, start_day: str, end_day: str)
 def state_checkpoint_path(state: dict[str, Any], symbol: str, entry_id: str) -> Path:
     args = state["args"]
     key = hashlib.sha256(json.dumps([
-        "portfolio-closed-state-v3-percent-entry-tpsl",
+        "portfolio-closed-state-v4-short-targets",
         state["category"], symbol, args.start_day, args.balance, args.fee_percent,
         args.min_trades, args.ranking_params, args.martingale_mode,
         args.martingale_timing, args.martingale_attempts, entry_id,

@@ -76,7 +76,7 @@ try {
     $symbols = [];
     foreach ($snapshotIds as $symbol => $_maxId) {
         $key = hash('sha256', json_encode([
-            'ranking-v25-percent-entry-tpsl', $generation, $config['category'], $symbol,
+            'ranking-v26-short-targets', $generation, $config['category'], $symbol,
             $startValue, $endValue, $balance, $fee, $minTrades, $ranking,
             $martingaleMode, $martingaleTiming, $martingaleAttempts,
         ], JSON_THROW_ON_ERROR));

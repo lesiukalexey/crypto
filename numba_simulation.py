@@ -103,10 +103,10 @@ def simulate_numba(
         first_stop = -1
         if is_short:
             if has_take and take_profit < start_balance:
-                take_price = entry_price * inverse_fee_factor * (1.0 - take_profit / start_balance)
+                take_price = entry_price * (inverse_fee_factor - take_profit / start_balance)
                 first_take = _first_le(ask_minimum, tree_size, tree_length, entry_index + 1, take_price)
             if has_stop:
-                stop_price = entry_price * inverse_fee_factor * (1.0 + stop_loss / start_balance)
+                stop_price = entry_price * (inverse_fee_factor + stop_loss / start_balance)
                 first_stop = _first_ge(ask_maximum, tree_size, tree_length, entry_index + 1, stop_price)
         else:
             if has_take:
@@ -180,10 +180,10 @@ def simulate_standard_stateful_numba(
         entry_price = bids[open_index] if open_short else asks[open_index]
         if open_short:
             if has_take and take_profit < start_balance:
-                target = entry_price * inverse_fee_factor * (1.0 - take_profit / start_balance)
+                target = entry_price * (inverse_fee_factor - take_profit / start_balance)
                 first_take = _first_le(ask_minimum, tree_size, count, open_index + 1, target)
             if has_stop:
-                target = entry_price * inverse_fee_factor * (1.0 + stop_loss / start_balance)
+                target = entry_price * (inverse_fee_factor + stop_loss / start_balance)
                 first_stop = _first_ge(ask_maximum, tree_size, count, open_index + 1, target)
         else:
             if has_take:
@@ -223,10 +223,10 @@ def simulate_standard_stateful_numba(
         first_stop = -1
         if is_short:
             if has_take and take_profit < start_balance:
-                target = entry_price * inverse_fee_factor * (1.0 - take_profit / start_balance)
+                target = entry_price * (inverse_fee_factor - take_profit / start_balance)
                 first_take = _first_le(ask_minimum, tree_size, count, entry_index + 1, target)
             if has_stop:
-                target = entry_price * inverse_fee_factor * (1.0 + stop_loss / start_balance)
+                target = entry_price * (inverse_fee_factor + stop_loss / start_balance)
                 first_stop = _first_ge(ask_maximum, tree_size, count, entry_index + 1, target)
         else:
             if has_take:

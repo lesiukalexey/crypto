@@ -106,7 +106,7 @@ try {
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $key = hash('sha256', json_encode([
-        'portfolio-combination-details-v5-percent-entry-tpsl', $generation, hash('sha256', $snapshotJson), $config['category'],
+        'portfolio-combination-details-v6-short-targets', $generation, hash('sha256', $snapshotJson), $config['category'],
         $startValue, $endValue, $balance, $fee, $minTrades, $entryConfig, $originalExitConfig,
         $ranking['worker'], $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ], JSON_THROW_ON_ERROR));

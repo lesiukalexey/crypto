@@ -64,7 +64,7 @@ def durable_result_path(
         for symbol in sorted(max_ids)
     ]
     key = hashlib.sha256(json.dumps([
-        "portfolio-durable-result-v4-percent-entry-tpsl", category, args.start_day, args.end_day,
+        "portfolio-durable-result-v5-short-targets", category, args.start_day, args.end_day,
         args.balance, args.fee_percent, args.min_trades, args.entry_config,
         args.ranking_params, args.martingale_mode, args.martingale_timing,
         args.martingale_attempts, quote_versions,
@@ -116,7 +116,7 @@ def pair_result_cache_paths(
 
     scope_keys = {
         symbol: hashlib.sha256(json.dumps([
-            "portfolio-pair-simulation-v5-percent-entry-tpsl",
+            "portfolio-pair-simulation-v6-short-targets",
             category,
             symbol,
             max_ids[symbol],
