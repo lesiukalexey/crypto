@@ -131,7 +131,8 @@ try {
             file_put_contents($statusPath, json_encode(['status' => 'pending', 'progress' => 0]));
             $python = $root . '/.venv/bin/python';
             if (!is_executable($python)) $python = '/usr/bin/python3';
-            $command = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/portfolio_combination_details.py')
+            $command = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/launch-ranking-worker.py')
+                . ' ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/portfolio_combination_details.py')
                 . ' --cache-key ' . escapeshellarg($key)
                 . ' --start-day ' . escapeshellarg($startValue)
                 . ' --end-day ' . escapeshellarg($endValue)

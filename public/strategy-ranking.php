@@ -147,10 +147,12 @@ try {
         if ($lock !== false && flock($lock, LOCK_EX | LOCK_NB)) {
             file_put_contents($statusPath, json_encode(['status' => 'pending', 'progress' => 0]));
             $worker = dirname(__DIR__) . '/strategy_ranking.py';
+            $launcher = dirname(__DIR__) . '/launch-ranking-worker.py';
             $python = dirname(__DIR__) . '/.venv/bin/python';
             if (!is_executable($python)) $python = '/usr/bin/python3';
             $logPath = $cacheDir . '/' . $key . '.log';
-            $command = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($worker)
+            $command = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($launcher)
+                . ' ' . escapeshellarg($python) . ' ' . escapeshellarg($worker)
                 . ' --cache-key ' . escapeshellarg($key)
                 . ' --symbol ' . escapeshellarg($symbol)
                 . ' --start-day ' . escapeshellarg($startValue)
