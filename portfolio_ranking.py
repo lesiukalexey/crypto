@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from array import array
 import fcntl
 import heapq
 import json
@@ -159,7 +160,9 @@ def main() -> int:
         universe_size = len(max_ids)
         fee_rate = args.fee_percent / 100
         global_top: list[tuple[float, int, str, dict[str, Any]]] = []
-        global_candidates: list[tuple[float, int, str]] = []
+        global_average_pnls = array("d")
+        global_eligible_counts = array("I")
+        global_combination_keys: list[str] = []
         best_by_symbol: dict[str, dict[str, Any]] = {}
         selected_entry_best: dict[str, dict[str, Any]] = {}
 
@@ -277,7 +280,9 @@ def main() -> int:
                             "profitable_symbols": profitable_symbols,
                         }
                         combination_key = f"{entry_id}|{exit_id}"
-                        global_candidates.append((average_all_symbols, eligible_symbols, combination_key))
+                        global_average_pnls.append(average_all_symbols)
+                        global_eligible_counts.append(eligible_symbols)
+                        global_combination_keys.append(combination_key)
                         heap_item = (average_all_symbols, eligible_symbols, combination_key, candidate)
                         if len(global_top) < 5:
                             heapq.heappush(global_top, heap_item)
@@ -295,13 +300,19 @@ def main() -> int:
         ranked_ticker_leaders = sorted(best_by_symbol.values(), key=lambda item: (-item["pnl"], item["symbol"]))
         for rank, leader in enumerate(ranked_ticker_leaders, start=1):
             leader["rank"] = rank
-        global_rank_by_combination = {
-            combination_key: rank
-            for rank, (_, _, combination_key) in enumerate(
-                sorted(global_candidates, key=lambda item: (-item[0], -item[1], item[2])),
-                start=1,
-            )
+        ranked_candidate_indexes = list(range(len(global_combination_keys)))
+        ranked_candidate_indexes.sort(key=global_combination_keys.__getitem__)
+        ranked_candidate_indexes.sort(key=global_eligible_counts.__getitem__, reverse=True)
+        ranked_candidate_indexes.sort(key=global_average_pnls.__getitem__, reverse=True)
+        winning_combinations = {
+            f"{leader['entry_id']}|{leader['exit_id']}"
+            for leader in ranked_ticker_leaders
         }
+        global_rank_by_combination: dict[str, int] = {}
+        for rank, candidate_index in enumerate(ranked_candidate_indexes, start=1):
+            combination_key = global_combination_keys[candidate_index]
+            if combination_key in winning_combinations:
+                global_rank_by_combination[combination_key] = rank
         for leader in ranked_ticker_leaders:
             combination_key = f"{leader['entry_id']}|{leader['exit_id']}"
             leader["global_rank"] = global_rank_by_combination.get(combination_key)
