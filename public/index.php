@@ -2212,10 +2212,13 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
             favoriteParams.set('exit_config', item.exit_id || '');
             favoriteParams.set('favorite_entry_label', item.entry_label || '');
             favoriteParams.set('favorite_exit_label', item.exit_label || '');
-            const result = type === 'global_top' ? item.average_pnl : item.pnl;
-            if (result !== null && result !== undefined && Number.isFinite(Number(result))) {
-                favoriteParams.set('favorite_result', Number(result).toFixed(8));
-                favoriteParams.set('favorite_result_label', type === 'global_top' ? 'Средний итог на тикер' : 'Итог тикера');
+            if (type === 'ticker_leader' && item.pnl !== null && item.pnl !== undefined && Number.isFinite(Number(item.pnl))) {
+                favoriteParams.set('favorite_result', Number(item.pnl).toFixed(8));
+                favoriteParams.set('favorite_result_label', 'Итог тикера');
+            }
+            if (type === 'ticker_leader' && item.market_average_pnl !== null && item.market_average_pnl !== undefined && Number.isFinite(Number(item.market_average_pnl))) {
+                favoriteParams.set('favorite_market_average', Number(item.market_average_pnl).toFixed(8));
+                favoriteParams.set('favorite_market_average_label', 'Средний итог этой пары на рынке');
             }
             favoriteParams.set('favorite_name', `${type === 'global_top' ? 'Общий топ-5' : symbol} · ${item.entry_label || item.entry_id} · ${item.exit_label || item.exit_id}`);
             return favoriteParams;
