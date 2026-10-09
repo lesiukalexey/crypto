@@ -170,9 +170,13 @@ class ProgressReporter:
         return True
 
 
-def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction: str = "both") -> tuple[list[int], list[bool]]:
+def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction: str = "both", signal_mode: str = "exact") -> tuple[list[int], list[bool]]:
+    if ":" in direction:
+        direction, signal_mode = direction.split(":", 1)
     if direction not in ("both", "long", "short"):
         raise ValueError("Invalid entry direction")
+    if signal_mode not in ("exact", "within"):
+        raise ValueError("Invalid entry signal mode")
     count = len(quotes)
     gaps = [0.0] + [quotes.timestamps[index] - quotes.timestamps[index - 1] for index in range(1, count)]
     continuous = [False] * count
@@ -184,16 +188,30 @@ def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction
     for index in range(lookback + 1, count - 1):
         if not continuous[index] or not continuous[index - 1]:
             continue
-        current_base = quotes.lasts[index - lookback]
-        previous_base = quotes.lasts[index - lookback - 1]
-        if current_base <= 0 or previous_base <= 0:
-            continue
-        movement = (quotes.lasts[index] / current_base - 1.0) * 100.0
-        previous_movement = (quotes.lasts[index - 1] / previous_base - 1.0) * 100.0
+        if signal_mode == "within":
+            current_bases = quotes.lasts[max(0, index - lookback):index]
+            previous_bases = quotes.lasts[max(0, index - lookback - 1):index - 1]
+            if np.any(current_bases <= 0) or np.any(previous_bases <= 0):
+                continue
+            current_moves = (quotes.lasts[index] / current_bases - 1.0) * 100.0
+            previous_moves = (quotes.lasts[index - 1] / previous_bases - 1.0) * 100.0
+            movement = float(np.max(current_moves))
+            previous_movement = float(np.max(previous_moves))
+            negative_movement = float(np.min(current_moves))
+            previous_negative_movement = float(np.min(previous_moves))
+        else:
+            current_base = quotes.lasts[index - lookback]
+            previous_base = quotes.lasts[index - lookback - 1]
+            if current_base <= 0 or previous_base <= 0:
+                continue
+            movement = (quotes.lasts[index] / current_base - 1.0) * 100.0
+            previous_movement = (quotes.lasts[index - 1] / previous_base - 1.0) * 100.0
+            negative_movement = movement
+            previous_negative_movement = previous_movement
         if direction != "short" and movement >= threshold and previous_movement < threshold:
             indexes.append(index)
             directions.append(False)
-        elif direction != "long" and movement <= -threshold and previous_movement > -threshold:
+        elif direction != "long" and negative_movement <= -threshold and previous_negative_movement > -threshold:
             indexes.append(index)
             directions.append(True)
     return np.asarray(indexes, dtype=np.int64), np.asarray(directions, dtype=np.bool_)
@@ -206,6 +224,57 @@ def make_signal_profiles(
     """Build every configured momentum signal from one quote scan per window."""
     count = len(quotes)
     profiles = ranking["entry_profiles"]
+    signal_mode = ranking.get("entry_signal_mode", "exact")
+    if signal_mode == "within":
+        thresholds_by_family = {
+            family: sorted({int(value) for value in profile["thresholds_tenths_percent"]})
+            for family, profile in profiles.items()
+        }
+        values_by_family = {
+            family: [value / 10 for value in values]
+            for family, values in thresholds_by_family.items()
+        }
+        signals: dict[tuple[int, str, int], tuple[list[int], list[bool]]] = {
+            (int(window), family + ":within", threshold): ([], [])
+            for family, profile in profiles.items()
+            for window in profile["windows"]
+            for threshold in thresholds_by_family[family]
+        }
+        gaps = [0.0] + [quotes.timestamps[index] - quotes.timestamps[index - 1] for index in range(1, count)]
+        for lookback in sorted({int(window) for profile in profiles.values() for window in profile["windows"]}):
+            for index in range(lookback + 1, count - 1):
+                if any(gaps[j] > 120 for j in range(index - lookback + 1, index + 1)):
+                    continue
+                if any(gaps[j] > 120 for j in range(index - lookback, index)):
+                    continue
+                current_bases = quotes.lasts[index - lookback:index]
+                previous_bases = quotes.lasts[index - lookback - 1:index - 1]
+                if np.any(current_bases <= 0) or np.any(previous_bases <= 0):
+                    continue
+                current_moves = (quotes.lasts[index] / current_bases - 1.0) * 100.0
+                previous_moves = (quotes.lasts[index - 1] / previous_bases - 1.0) * 100.0
+                up_move, previous_up_move = float(np.max(current_moves)), float(np.max(previous_moves))
+                down_move, previous_down_move = float(np.min(current_moves)), float(np.min(previous_moves))
+                for family, cents_values in thresholds_by_family.items():
+                    candidates = values_by_family[family]
+                    if family != "short":
+                        first = bisect.bisect_right(candidates, previous_up_move)
+                        last = bisect.bisect_right(candidates, up_move)
+                        for candidate_index in range(first, last):
+                            threshold = cents_values[candidate_index]
+                            signals[(lookback, family + ":within", threshold)][0].append(index)
+                            signals[(lookback, family + ":within", threshold)][1].append(False)
+                    if family != "long":
+                        first = bisect.bisect_right(candidates, -previous_down_move)
+                        last = bisect.bisect_right(candidates, -down_move)
+                        for candidate_index in range(first, last):
+                            threshold = cents_values[candidate_index]
+                            signals[(lookback, family + ":within", threshold)][0].append(index)
+                            signals[(lookback, family + ":within", threshold)][1].append(True)
+        return {
+            key: (np.asarray(indexes, dtype=np.int64), np.asarray(directions, dtype=np.bool_))
+            for key, (indexes, directions) in signals.items()
+        }
     thresholds = {
         family: sorted({int(value) for value in profile["thresholds_tenths_percent"]})
         for family, profile in profiles.items()
@@ -274,12 +343,15 @@ def build_entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | Non
         for window in profile["windows"]:
             for threshold in profile["thresholds_tenths_percent"]:
                 suffix = f"{window}:{threshold}"
+                if ranking.get("entry_signal_mode", "exact") == "within":
+                    suffix += ":within"
+                signal_family = family + (":within" if ranking.get("entry_signal_mode", "exact") == "within" else "")
                 specs.append((
                     f"{prefix}:{suffix}",
-                    f"{labels[family](threshold / 10)} за {window} снимков",
+                    f"{labels[family](threshold / 10)} за {window} снимков" + (" · в пределах окна" if ranking.get("entry_signal_mode", "exact") == "within" else ""),
                     int(window),
                     int(threshold),
-                    family,
+                    signal_family,
                     None,
                 ))
     for direction in ranking["immediate_directions"]:
@@ -301,7 +373,7 @@ def resolve_entry_config(entry_config: str, ranking: dict[str, Any]) -> dict[str
         if direction in ranking["immediate_directions"] and direction in ("long", "short"):
             return {"type": "immediate", "direction": direction}
         return None
-    match = re.fullmatch(r"entry(?::(long|short))?:(\d+):(\d+)", entry_config)
+    match = re.fullmatch(r"entry(?::(long|short))?:(\d+):(\d+)(?::(within))?", entry_config)
     if match is None:
         return None
     family = match.group(1) or "both"
@@ -310,7 +382,10 @@ def resolve_entry_config(entry_config: str, ranking: dict[str, Any]) -> dict[str
     profile = ranking["entry_profiles"].get(family)
     if not isinstance(profile, dict) or window not in profile["windows"] or threshold not in profile["thresholds_tenths_percent"]:
         return None
-    return {"type": "momentum", "family": family, "window": window, "threshold_tenths_percent": threshold}
+    mode = "within" if match.group(4) else "exact"
+    if mode != ranking.get("entry_signal_mode", "exact"):
+        return None
+    return {"type": "momentum", "family": family, "window": window, "threshold_tenths_percent": threshold, "signal_mode": mode}
 
 
 def simulate(

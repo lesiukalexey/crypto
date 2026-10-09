@@ -137,7 +137,7 @@ def main() -> int:
         is_immediate = entry_selection["type"] == "immediate"
         lookback = None if is_immediate else entry_selection["window"]
         threshold = None if is_immediate else entry_selection["threshold_tenths_percent"] / 10
-        entry_direction = "both" if is_immediate else entry_selection["family"]
+        entry_direction = "both" if is_immediate else entry_selection["family"] + (":within" if entry_selection["signal_mode"] == "within" else "")
         immediate_short = entry_selection["direction"] == "short" if is_immediate else None
         selected_entry_spec = next((spec for spec in build_entry_specs(ranking) if spec[0] == args.entry_config), None)
         if selected_entry_spec is None:

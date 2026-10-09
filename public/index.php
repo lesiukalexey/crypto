@@ -47,6 +47,8 @@ $startDayInput = (string) ($_GET['start_day'] ?? $_GET['day'] ?? '2026-10-06');
 $endDayInput = (string) ($_GET['end_day'] ?? $_GET['day'] ?? $today->format('Y-m-d'));
 $defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThresholdsTenthsPercent, true)
     ? 'entry:10:1' : 'entry:' . $entryWindows[0] . ':' . $entryThresholdsTenthsPercent[0];
+$entrySignalMode = $rankingParameters['worker']['entry_signal_mode'];
+if ($entrySignalMode === 'within') $defaultEntryConfig .= ':within';
 $entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
 $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
 $startingBalance = trim((string) ($_GET['balance'] ?? '10'));
@@ -350,18 +352,38 @@ $hasContinuousWindow = static function (int $index) use ($rows, $momentumLookbac
     }
     return true;
 };
-$findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $momentumLookback, $momentumThreshold, $entryDirection, $hasContinuousWindow): ?array {
+$findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $momentumLookback, $momentumThreshold, $entryDirection, $entrySignalMode, $hasContinuousWindow): ?array {
     for ($i = max($fromIndex, $momentumLookback + 1); $i < $rowCount - 1; $i++) {
         if (!$hasContinuousWindow($i) || !$hasContinuousWindow($i - 1)) continue;
         $priceNow = (float) $rows[$i]['last_price'];
-        $priceBefore = (float) $rows[$i - $momentumLookback]['last_price'];
         $pricePrevious = (float) $rows[$i - 1]['last_price'];
-        $pricePreviousBefore = (float) $rows[$i - $momentumLookback - 1]['last_price'];
-        if ($priceBefore <= 0 || $pricePreviousBefore <= 0) continue;
-        $move = ($priceNow / $priceBefore - 1) * 100;
-        $previousMove = ($pricePrevious / $pricePreviousBefore - 1) * 100;
+        if ($entrySignalMode === 'within') {
+            $move = -INF;
+            $previousMove = -INF;
+            $negativeMove = INF;
+            $previousNegativeMove = INF;
+            for ($offset = 1; $offset <= $momentumLookback; $offset++) {
+                $base = (float) $rows[$i - $offset]['last_price'];
+                $previousBase = (float) $rows[$i - 1 - $offset]['last_price'];
+                if ($base <= 0 || $previousBase <= 0) continue;
+                $relative = ($priceNow / $base - 1) * 100;
+                $previousRelative = ($pricePrevious / $previousBase - 1) * 100;
+                $move = max($move, $relative);
+                $previousMove = max($previousMove, $previousRelative);
+                $negativeMove = min($negativeMove, $relative);
+                $previousNegativeMove = min($previousNegativeMove, $previousRelative);
+            }
+        } else {
+            $priceBefore = (float) $rows[$i - $momentumLookback]['last_price'];
+            $pricePreviousBefore = (float) $rows[$i - $momentumLookback - 1]['last_price'];
+            if ($priceBefore <= 0 || $pricePreviousBefore <= 0) continue;
+            $move = ($priceNow / $priceBefore - 1) * 100;
+            $previousMove = ($pricePrevious / $pricePreviousBefore - 1) * 100;
+            $negativeMove = $move;
+            $previousNegativeMove = $previousMove;
+        }
         if ($entryDirection !== 'short' && $move >= $momentumThreshold && $previousMove < $momentumThreshold) return [$i, false];
-        if ($entryDirection !== 'long' && $move <= -$momentumThreshold && $previousMove > -$momentumThreshold) return [$i, true];
+        if ($entryDirection !== 'long' && $negativeMove <= -$momentumThreshold && $previousNegativeMove > -$momentumThreshold) return [$i, true];
     }
     return null;
 };
@@ -805,6 +827,8 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <div class="symbol-select-row date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="refresh-symbols refresh-today-snapshot" type="button" id="refresh-today-snapshot" aria-label="Обновить данные до выбранной даты" title="Подтянуть новые данные до выбранной даты в график и расчёты" <?= $snapshotNeedsRefresh ? '' : 'hidden' ?>>↻</button></div>
 
+<label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
+<p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию на первом снимке, где порог пересечён относительно любого из последних X снимков.</p>
 <label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
@@ -853,7 +877,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <section class="panel" id="results"><div class="chart-head"><h2>Сделки стратегии</h2><span class="count"><?= $closedTradeCount ?> закрытых сделок<?php if ($openTradeCount > 0): ?> · <?= $openTradeCount ?> открыто на последнем снимке<?php endif; ?></span></div>
 <div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div></div>
 <?php if (count($rows) < 2): ?><div class="empty">Нужно минимум два снимка в выбранном периоде, чтобы выполнить симуляцию.</div>
-<?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 1, ',', ' ') . '% за ' . $momentumLookback . ' снимков.' ?></div>
+<?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 1, ',', ' ') . '% ' . ($entrySignalMode === 'within' ? 'в пределах ' : 'за ') . $momentumLookback . ' снимков.' ?></div>
 <?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Сумма входа</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>
 <?php foreach ($trades as $index => $trade): $resultCompare = bccomp($trade['net'], '0', 24); $tradeIsOpen = $isOpenTrade($trade); $rowClass = $tradeIsOpen ? ($resultCompare > 0 ? 'trade-open-positive' : ($resultCompare < 0 ? 'trade-open-negative' : 'trade-flat')) : ($resultCompare > 0 ? 'trade-positive' : ($resultCompare < 0 ? 'trade-negative' : 'trade-flat')); $totalFees = bcadd($trade['entry_fee'], $trade['exit_fee'], 24); $tradeNotional = bcmul($trade['quantity'], $trade['entry_price'], 24); $tradeEntryLabel = $trade['is_short'] ? 'Продажа Bid' : 'Покупка Ask'; $tradeExitLabel = $trade['is_short'] ? 'Покупка Ask' : 'Продажа Bid'; ?>
 <tr class="<?= $rowClass ?> trade-row" tabindex="0" data-entry-time="<?= epochMilliseconds($trade['entry']['received_at_utc']) ?>" data-exit-time="<?= epochMilliseconds($trade['exit']['received_at_utc']) ?>" data-entry-price="<?= h((string) $trade['entry_price']) ?>" data-exit-price="<?= h((string) $trade['exit_price']) ?>" data-is-short="<?= $trade['is_short'] ? '1' : '0' ?>" data-net="<?= h((string) $trade['net']) ?>"><td><?= $index + 1 ?></td><td><?= h(formatKyivTime($trade['entry']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeEntryLabel . ' · ' . $trade['entry_price']) ?></td><td><?= h(formatKyivTime($trade['exit']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeExitLabel . ' · ' . $trade['exit_price']) ?></td><td><?= money($trade['quantity']) ?></td><td><?= money($tradeNotional) ?> USDT</td><td><?= money($trade['gross']) ?></td><td><?= money($totalFees) ?></td><td><?= $resultCompare > 0 ? '+' : '' ?><?= money($trade['net']) ?></td><td><?= money($trade['balance']) ?></td><td class="reason"><?= $tradeIsOpen ? 'Открыта · результат по последнему снимку' : h($trade['reason']) ?></td></tr>
@@ -1304,6 +1328,10 @@ saveModeToggle.addEventListener('change', () => {
 });
 let filterSubmitTimer;
 let replayRequest;
+document.querySelector('#entry-signal-mode')?.addEventListener('change', () => {
+    document.querySelector('#select-top-ranked-result').value = '1';
+    filtersForm.requestSubmit();
+});
 async function refreshStrategyResults() {
     replayRequest?.abort();
     replayRequest = new AbortController();

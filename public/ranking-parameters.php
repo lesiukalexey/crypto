@@ -183,7 +183,6 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
     $thresholdRanges = $thresholdMode === 'range'
         ? rankingPercentSegments($query, $thresholdSource, $thresholdDefaults)
         : $thresholdDefaults;
-    $windowDefault = ['from' => 5, 'to' => 40, 'step' => 5];
     $windowMode = (string) ($query['window_mode'] ?? 'default');
     $windowSource = 'window';
     if ($windowMode !== 'range') {
@@ -203,6 +202,10 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
     $windowRanges = $windowMode === 'range'
         ? rankingWindowSegments($query, $windowSource, $windowDefaults)
         : $windowDefaults;
+    $entrySignalMode = (string) ($query['entry_signal_mode'] ?? 'exact');
+    if (!in_array($entrySignalMode, ['exact', 'within'], true)) {
+        throw new InvalidArgumentException('Неизвестный тип сигнала входа.');
+    }
     $families = ['both', 'long', 'short'];
     $ranges = [];
     $modes = [];
@@ -308,6 +311,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
             'entry_thresholds_tenths_percent' => $entryProfiles['both']['thresholds_tenths_percent'],
             'entry_windows' => $entryProfiles['both']['windows'],
             'entry_profiles' => $entryProfiles,
+            'entry_signal_mode' => $entrySignalMode,
             'immediate_directions' => $entryDefaults['immediate_directions'] ?? [],
             'exit_profiles' => [
                 'fixed_tp' => $ranges['fixed_tp'],
@@ -325,7 +329,7 @@ function rankingEntryConfig(string $entryConfig, array $ranking, array $immediat
         && in_array($matches[1], $immediateDirections, true)) {
         return ['type' => 'immediate', 'direction' => $matches[1]];
     }
-    if (preg_match('/^entry(?::(long|short))?:(\d+):(\d+)$/', $entryConfig, $matches) !== 1) {
+    if (preg_match('/^entry(?::(long|short))?:(\d+):(\d+)(?::(within))?$/', $entryConfig, $matches) !== 1) {
         return null;
     }
     $family = ($matches[1] ?? '') !== '' ? $matches[1] : 'both';
@@ -337,7 +341,9 @@ function rankingEntryConfig(string $entryConfig, array $ranking, array $immediat
         || !in_array($threshold, $profile['thresholds_tenths_percent'], true)) {
         return null;
     }
-    return ['type' => 'momentum', 'family' => $family, 'window' => $window, 'threshold_tenths_percent' => $threshold];
+    $mode = ($matches[4] ?? '') === 'within' ? 'within' : 'exact';
+    if ($mode !== ($ranking['entry_signal_mode'] ?? 'exact')) return null;
+    return ['type' => 'momentum', 'family' => $family, 'window' => $window, 'threshold_tenths_percent' => $threshold, 'signal_mode' => $mode];
 }
 
 function rankingHasValue(int $value, array $range): bool
