@@ -48,7 +48,9 @@ $endDayInput = (string) ($_GET['end_day'] ?? $_GET['day'] ?? $today->format('Y-m
 $defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThresholdsTenthsPercent, true)
     ? 'entry:10:1' : 'entry:' . $entryWindows[0] . ':' . $entryThresholdsTenthsPercent[0];
 $entrySignalMode = $rankingParameters['worker']['entry_signal_mode'];
+$entryDirectionMode = $rankingParameters['worker']['entry_direction_mode'];
 if ($entrySignalMode === 'within') $defaultEntryConfig .= ':within';
+if ($entryDirectionMode === 'reverse') $defaultEntryConfig .= ':reverse';
 $entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
 $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
 $startingBalance = trim((string) ($_GET['balance'] ?? '10'));
@@ -352,7 +354,7 @@ $hasContinuousWindow = static function (int $index) use ($rows, $momentumLookbac
     }
     return true;
 };
-$findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $momentumLookback, $momentumThreshold, $entryDirection, $entrySignalMode, $hasContinuousWindow): ?array {
+$findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $momentumLookback, $momentumThreshold, $entryDirection, $entrySignalMode, $entryDirectionMode, $hasContinuousWindow): ?array {
     for ($i = max($fromIndex, $momentumLookback + 1); $i < $rowCount - 1; $i++) {
         if (!$hasContinuousWindow($i) || !$hasContinuousWindow($i - 1)) continue;
         $priceNow = (float) $rows[$i]['last_price'];
@@ -382,8 +384,8 @@ $findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $mo
             $negativeMove = $move;
             $previousNegativeMove = $previousMove;
         }
-        if ($entryDirection !== 'short' && $move >= $momentumThreshold && $previousMove < $momentumThreshold) return [$i, false];
-        if ($entryDirection !== 'long' && $negativeMove <= -$momentumThreshold && $previousNegativeMove > -$momentumThreshold) return [$i, true];
+        if ($entryDirection !== 'short' && $move >= $momentumThreshold && $previousMove < $momentumThreshold) return [$i, $entryDirectionMode === 'reverse'];
+        if ($entryDirection !== 'long' && $negativeMove <= -$momentumThreshold && $previousNegativeMove > -$momentumThreshold) return [$i, $entryDirectionMode !== 'reverse'];
     }
     return null;
 };
@@ -829,6 +831,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 
 <label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
 <p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию на первом снимке, где порог пересечён относительно любого из последних X снимков.</p>
+<label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения (как сейчас)</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
 <label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
@@ -1329,6 +1332,10 @@ saveModeToggle.addEventListener('change', () => {
 let filterSubmitTimer;
 let replayRequest;
 document.querySelector('#entry-signal-mode')?.addEventListener('change', () => {
+    document.querySelector('#select-top-ranked-result').value = '1';
+    filtersForm.requestSubmit();
+});
+document.querySelector('#entry-direction-mode')?.addEventListener('change', () => {
     document.querySelector('#select-top-ranked-result').value = '1';
     filtersForm.requestSubmit();
 });

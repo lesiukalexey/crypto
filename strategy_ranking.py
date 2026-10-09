@@ -154,6 +154,15 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def signal_profile_family(family: str, signal_mode: str, direction_mode: str) -> str:
+    suffix = []
+    if signal_mode == "within":
+        suffix.append("within")
+    if direction_mode == "reverse":
+        suffix.append("reverse")
+    return family + ((":" + ":".join(suffix)) if suffix else "")
+
+
 class ProgressReporter:
     """Throttle intermediate atomic progress writes while leaving final status immediate."""
 
@@ -170,13 +179,21 @@ class ProgressReporter:
         return True
 
 
-def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction: str = "both", signal_mode: str = "exact") -> tuple[list[int], list[bool]]:
+def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction: str = "both", signal_mode: str = "exact", direction_mode: str = "follow") -> tuple[list[int], list[bool]]:
     if ":" in direction:
-        direction, signal_mode = direction.split(":", 1)
+        parts = direction.split(":")
+        direction = parts[0]
+        for part in parts[1:]:
+            if part in ("exact", "within"):
+                signal_mode = part
+            elif part in ("follow", "reverse"):
+                direction_mode = part
     if direction not in ("both", "long", "short"):
         raise ValueError("Invalid entry direction")
     if signal_mode not in ("exact", "within"):
         raise ValueError("Invalid entry signal mode")
+    if direction_mode not in ("follow", "reverse"):
+        raise ValueError("Invalid entry direction mode")
     count = len(quotes)
     gaps = [0.0] + [quotes.timestamps[index] - quotes.timestamps[index - 1] for index in range(1, count)]
     continuous = [False] * count
@@ -210,10 +227,10 @@ def make_signals(quotes: QuoteArrays, threshold: float, lookback: int, direction
             previous_negative_movement = previous_movement
         if direction != "short" and movement >= threshold and previous_movement < threshold:
             indexes.append(index)
-            directions.append(False)
+            directions.append(direction_mode == "reverse")
         elif direction != "long" and negative_movement <= -threshold and previous_negative_movement > -threshold:
             indexes.append(index)
-            directions.append(True)
+            directions.append(direction_mode != "reverse")
     return np.asarray(indexes, dtype=np.int64), np.asarray(directions, dtype=np.bool_)
 
 
@@ -225,6 +242,7 @@ def make_signal_profiles(
     count = len(quotes)
     profiles = ranking["entry_profiles"]
     signal_mode = ranking.get("entry_signal_mode", "exact")
+    direction_mode = ranking.get("entry_direction_mode", "follow")
     if signal_mode == "within":
         thresholds_by_family = {
             family: sorted({int(value) for value in profile["thresholds_tenths_percent"]})
@@ -235,7 +253,7 @@ def make_signal_profiles(
             for family, values in thresholds_by_family.items()
         }
         signals: dict[tuple[int, str, int], tuple[list[int], list[bool]]] = {
-            (int(window), family + ":within", threshold): ([], [])
+            (int(window), signal_profile_family(family, signal_mode, direction_mode), threshold): ([], [])
             for family, profile in profiles.items()
             for window in profile["windows"]
             for threshold in thresholds_by_family[family]
@@ -262,15 +280,15 @@ def make_signal_profiles(
                         last = bisect.bisect_right(candidates, up_move)
                         for candidate_index in range(first, last):
                             threshold = cents_values[candidate_index]
-                            signals[(lookback, family + ":within", threshold)][0].append(index)
-                            signals[(lookback, family + ":within", threshold)][1].append(False)
+                            signals[(lookback, signal_profile_family(family, signal_mode, direction_mode), threshold)][0].append(index)
+                            signals[(lookback, signal_profile_family(family, signal_mode, direction_mode), threshold)][1].append(direction_mode == "reverse")
                     if family != "long":
                         first = bisect.bisect_right(candidates, -previous_down_move)
                         last = bisect.bisect_right(candidates, -down_move)
                         for candidate_index in range(first, last):
                             threshold = cents_values[candidate_index]
-                            signals[(lookback, family + ":within", threshold)][0].append(index)
-                            signals[(lookback, family + ":within", threshold)][1].append(True)
+                            signals[(lookback, signal_profile_family(family, signal_mode, direction_mode), threshold)][0].append(index)
+                            signals[(lookback, signal_profile_family(family, signal_mode, direction_mode), threshold)][1].append(direction_mode != "reverse")
         return {
             key: (np.asarray(indexes, dtype=np.int64), np.asarray(directions, dtype=np.bool_))
             for key, (indexes, directions) in signals.items()
@@ -284,7 +302,7 @@ def make_signal_profiles(
         for family, values in thresholds.items()
     }
     signals = {
-        (lookback, family, cents): ([], [])
+        (lookback, signal_profile_family(family, signal_mode, direction_mode), cents): ([], [])
         for family, values in thresholds.items()
         for lookback in {int(window) for window in profiles[family]["windows"]}
         for cents in values
@@ -315,15 +333,15 @@ def make_signal_profiles(
                     after_last = bisect.bisect_right(candidates, movement)
                     for candidate_index in range(first, after_last):
                         threshold_value = thresholds[family][candidate_index]
-                        signals[(lookback, family, threshold_value)][0].append(index)
-                        signals[(lookback, family, threshold_value)][1].append(False)
+                        signals[(lookback, signal_profile_family(family, signal_mode, direction_mode), threshold_value)][0].append(index)
+                        signals[(lookback, signal_profile_family(family, signal_mode, direction_mode), threshold_value)][1].append(direction_mode == "reverse")
                 if family != "long":
                     first = bisect.bisect_right(candidates, -previous_movement)
                     after_last = bisect.bisect_right(candidates, -movement)
                     for candidate_index in range(first, after_last):
                         threshold_value = thresholds[family][candidate_index]
-                        signals[(lookback, family, threshold_value)][0].append(index)
-                        signals[(lookback, family, threshold_value)][1].append(True)
+                        signals[(lookback, signal_profile_family(family, signal_mode, direction_mode), threshold_value)][0].append(index)
+                        signals[(lookback, signal_profile_family(family, signal_mode, direction_mode), threshold_value)][1].append(direction_mode != "reverse")
     return {
         key: (np.asarray(indexes, dtype=np.int64), np.asarray(directions, dtype=np.bool_))
         for key, (indexes, directions) in signals.items()
@@ -345,10 +363,12 @@ def build_entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | Non
                 suffix = f"{window}:{threshold}"
                 if ranking.get("entry_signal_mode", "exact") == "within":
                     suffix += ":within"
-                signal_family = family + (":within" if ranking.get("entry_signal_mode", "exact") == "within" else "")
+                if ranking.get("entry_direction_mode", "follow") == "reverse":
+                    suffix += ":reverse"
+                signal_family = signal_profile_family(family, ranking.get("entry_signal_mode", "exact"), ranking.get("entry_direction_mode", "follow"))
                 specs.append((
                     f"{prefix}:{suffix}",
-                    f"{labels[family](threshold / 10)} за {window} снимков" + (" · в пределах окна" if ranking.get("entry_signal_mode", "exact") == "within" else ""),
+                    f"{labels[family](threshold / 10)} за {window} снимков" + (" · в пределах окна" if ranking.get("entry_signal_mode", "exact") == "within" else "") + (" · против движения" if ranking.get("entry_direction_mode", "follow") == "reverse" else ""),
                     int(window),
                     int(threshold),
                     signal_family,
@@ -373,7 +393,7 @@ def resolve_entry_config(entry_config: str, ranking: dict[str, Any]) -> dict[str
         if direction in ranking["immediate_directions"] and direction in ("long", "short"):
             return {"type": "immediate", "direction": direction}
         return None
-    match = re.fullmatch(r"entry(?::(long|short))?:(\d+):(\d+)(?::(within))?", entry_config)
+    match = re.fullmatch(r"entry(?::(long|short))?:(\d+):(\d+)(?::(within))?(?::(reverse))?", entry_config)
     if match is None:
         return None
     family = match.group(1) or "both"
@@ -383,9 +403,10 @@ def resolve_entry_config(entry_config: str, ranking: dict[str, Any]) -> dict[str
     if not isinstance(profile, dict) or window not in profile["windows"] or threshold not in profile["thresholds_tenths_percent"]:
         return None
     mode = "within" if match.group(4) else "exact"
-    if mode != ranking.get("entry_signal_mode", "exact"):
+    direction_mode = "reverse" if match.group(5) else "follow"
+    if mode != ranking.get("entry_signal_mode", "exact") or direction_mode != ranking.get("entry_direction_mode", "follow"):
         return None
-    return {"type": "momentum", "family": family, "window": window, "threshold_tenths_percent": threshold, "signal_mode": mode}
+    return {"type": "momentum", "family": family, "window": window, "threshold_tenths_percent": threshold, "signal_mode": mode, "direction_mode": direction_mode}
 
 
 def simulate(

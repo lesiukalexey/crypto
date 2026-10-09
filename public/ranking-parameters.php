@@ -206,6 +206,10 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
     if (!in_array($entrySignalMode, ['exact', 'within'], true)) {
         throw new InvalidArgumentException('Неизвестный тип сигнала входа.');
     }
+    $entryDirectionMode = (string) ($query['entry_direction_mode'] ?? 'follow');
+    if (!in_array($entryDirectionMode, ['follow', 'reverse'], true)) {
+        throw new InvalidArgumentException('Неизвестное направление входа.');
+    }
     $families = ['both', 'long', 'short'];
     $ranges = [];
     $modes = [];
@@ -312,6 +316,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
             'entry_windows' => $entryProfiles['both']['windows'],
             'entry_profiles' => $entryProfiles,
             'entry_signal_mode' => $entrySignalMode,
+            'entry_direction_mode' => $entryDirectionMode,
             'immediate_directions' => $entryDefaults['immediate_directions'] ?? [],
             'exit_profiles' => [
                 'fixed_tp' => $ranges['fixed_tp'],
@@ -329,7 +334,7 @@ function rankingEntryConfig(string $entryConfig, array $ranking, array $immediat
         && in_array($matches[1], $immediateDirections, true)) {
         return ['type' => 'immediate', 'direction' => $matches[1]];
     }
-    if (preg_match('/^entry(?::(long|short))?:(\d+):(\d+)(?::(within))?$/', $entryConfig, $matches) !== 1) {
+    if (preg_match('/^entry(?::(long|short))?:(\d+):(\d+)(?::(within))?(?::(reverse))?$/', $entryConfig, $matches) !== 1) {
         return null;
     }
     $family = ($matches[1] ?? '') !== '' ? $matches[1] : 'both';
@@ -343,7 +348,9 @@ function rankingEntryConfig(string $entryConfig, array $ranking, array $immediat
     }
     $mode = ($matches[4] ?? '') === 'within' ? 'within' : 'exact';
     if ($mode !== ($ranking['entry_signal_mode'] ?? 'exact')) return null;
-    return ['type' => 'momentum', 'family' => $family, 'window' => $window, 'threshold_tenths_percent' => $threshold, 'signal_mode' => $mode];
+    $directionMode = ($matches[5] ?? '') === 'reverse' ? 'reverse' : 'follow';
+    if ($directionMode !== ($ranking['entry_direction_mode'] ?? 'follow')) return null;
+    return ['type' => 'momentum', 'family' => $family, 'window' => $window, 'threshold_tenths_percent' => $threshold, 'signal_mode' => $mode, 'direction_mode' => $directionMode];
 }
 
 function rankingHasValue(int $value, array $range): bool
