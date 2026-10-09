@@ -113,6 +113,95 @@ function simulate_cross_hedge(
     ];
 }
 
+/**
+ * Return the final net PnL for one ordered pair without allocating chart points.
+ * Ranking uses compact [timestamp_ms, bid, ask] rows fetched once per symbol.
+ */
+function cross_hedge_net_pnl(
+    array $longRows,
+    array $shortRows,
+    float $startingBalance,
+    float $feeRate,
+    int $maxQuoteAgeSeconds = 120,
+): ?float {
+    $longCursor = 0;
+    $shortCursor = 0;
+    $longEntry = null;
+    $shortEntry = null;
+    $maxAgeMs = $maxQuoteAgeSeconds * 1000;
+    $allocation = $startingBalance / 2.0;
+    $longNotional = $allocation / (1.0 + $feeRate);
+    $shortNotional = $allocation / (1.0 + $feeRate);
+
+    while ($longCursor < count($longRows) || $shortCursor < count($shortRows)) {
+        $longTime = $longRows[$longCursor][0] ?? PHP_INT_MAX;
+        $shortTime = $shortRows[$shortCursor][0] ?? PHP_INT_MAX;
+        $timestampMs = min($longTime, $shortTime);
+        $longQuote = null;
+        $shortQuote = null;
+
+        while (isset($longRows[$longCursor]) && $longRows[$longCursor][0] <= $timestampMs) {
+            $longQuote = $longRows[$longCursor++];
+        }
+        while (isset($shortRows[$shortCursor]) && $shortRows[$shortCursor][0] <= $timestampMs) {
+            $shortQuote = $shortRows[$shortCursor++];
+        }
+        $longQuote ??= $longRows[$longCursor - 1] ?? null;
+        $shortQuote ??= $shortRows[$shortCursor - 1] ?? null;
+        if ($longQuote === null || $shortQuote === null) continue;
+        // A side without an event at this timestamp keeps its latest quote,
+        // matching the chart replay's causal as-of alignment.
+        if ($timestampMs - $longQuote[0] > $maxAgeMs
+            || $timestampMs - $shortQuote[0] > $maxAgeMs) continue;
+
+        $longBid = $longQuote[1];
+        $longAsk = $longQuote[2];
+        $shortBid = $shortQuote[1];
+        $shortAsk = $shortQuote[2];
+        if (min($longBid, $longAsk, $shortBid, $shortAsk) <= 0.0) continue;
+        $longEntry = $longQuote;
+        $shortEntry = $shortQuote;
+        break;
+    }
+
+    if ($longEntry === null || $shortEntry === null) return null;
+
+    // The displayed final PnL depends only on the first and last valid aligned
+    // quotes. Walk backward to the last one instead of materializing chart points.
+    $longIndex = count($longRows) - 1;
+    $shortIndex = count($shortRows) - 1;
+    $lastLong = $longRows[$longIndex] ?? null;
+    $lastShort = $shortRows[$shortIndex] ?? null;
+    while ($longIndex >= 0 || $shortIndex >= 0) {
+        $longTime = $lastLong[0] ?? PHP_INT_MIN;
+        $shortTime = $lastShort[0] ?? PHP_INT_MIN;
+        $timestampMs = max($longTime, $shortTime);
+        if ($lastLong !== null && $lastShort !== null
+            && $timestampMs - $lastLong[0] <= $maxAgeMs
+            && $timestampMs - $lastShort[0] <= $maxAgeMs
+            && min($lastLong[1], $lastLong[2], $lastShort[1], $lastShort[2]) > 0.0) {
+            break;
+        }
+        while ($longIndex >= 0 && $longRows[$longIndex][0] === $timestampMs) $longIndex--;
+        while ($shortIndex >= 0 && $shortRows[$shortIndex][0] === $timestampMs) $shortIndex--;
+        $lastLong = $longIndex >= 0 ? $longRows[$longIndex] : null;
+        $lastShort = $shortIndex >= 0 ? $shortRows[$shortIndex] : null;
+    }
+    if ($lastLong === null || $lastShort === null) return null;
+
+    $entryLongAsk = $longEntry[2];
+    $entryShortBid = $shortEntry[1];
+    $lastLongBid = $lastLong[1];
+    $lastShortAsk = $lastShort[2];
+    $longQuantity = $longNotional / $entryLongAsk;
+    $shortQuantity = $shortNotional / $entryShortBid;
+    $entryFees = ($longNotional + $shortNotional) * $feeRate;
+    $grossPnl = ($lastLongBid - $entryLongAsk) * $longQuantity
+        + ($entryShortBid - $lastShortAsk) * $shortQuantity;
+    $exitFees = ($lastLongBid * $longQuantity + $lastShortAsk * $shortQuantity) * $feeRate;
+    return $grossPnl - $entryFees - $exitFees;
+}
+
 function hedge_timestamp_ms(array $row): int
 {
     if (isset($row['_timestamp_ms'])) return (int) $row['_timestamp_ms'];
