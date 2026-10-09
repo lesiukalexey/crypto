@@ -22,31 +22,47 @@ function readFavorites(string $path): array
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $params = $_POST;
+    $type = (string) ($params['favorite_type'] ?? 'strategy');
     $entryLabel = trim((string) ($params['favorite_entry_label'] ?? ''));
     $exitLabel = trim((string) ($params['favorite_exit_label'] ?? ''));
-    unset($params['favorite_entry_label'], $params['favorite_exit_label'], $params['favorite_action']);
-    if (($params['symbol'] ?? '') === '' || ($params['entry_config'] ?? '') === '' || ($params['exit_config'] ?? '') === '') {
+    $favoriteName = trim((string) ($params['favorite_name'] ?? ''));
+    unset($params['favorite_type'], $params['favorite_entry_label'], $params['favorite_exit_label'], $params['favorite_name'], $params['favorite_action']);
+    if (!in_array($type, ['strategy', 'global_top', 'ticker_leader', 'hedge'], true)) {
+        favoriteJsonResponse(['status' => 'error', 'error' => 'Неизвестный тип избранного.'], 422);
+    }
+    $isHedge = $type === 'hedge';
+    if ($isHedge) {
+        if (($params['long_symbol'] ?? '') === '' || ($params['short_symbol'] ?? '') === '' || $params['long_symbol'] === $params['short_symbol']) {
+            favoriteJsonResponse(['status' => 'error', 'error' => 'Не выбрана корректная пара лонг/шорт.'], 422);
+        }
+    } elseif (($params['symbol'] ?? '') === '' || ($params['entry_config'] ?? '') === '' || ($params['exit_config'] ?? '') === '') {
         favoriteJsonResponse(['status' => 'error', 'error' => 'Не хватает параметров стратегии.'], 422);
     }
     if (!is_dir($storeDir) && !mkdir($storeDir, 0700, true) && !is_dir($storeDir)) {
         favoriteJsonResponse(['status' => 'error', 'error' => 'Не удалось создать хранилище избранного.'], 500);
     }
-    $favorites = readFavorites($storePath);
+    $handle = fopen($storePath, 'c+');
+    if ($handle === false || !flock($handle, LOCK_EX)) {
+        if (is_resource($handle)) fclose($handle);
+        favoriteJsonResponse(['status' => 'error', 'error' => 'Не удалось сохранить избранное.'], 500);
+    }
+    rewind($handle);
+    $existing = json_decode((string) stream_get_contents($handle), true);
+    $favorites = is_array($existing) ? array_values(array_filter($existing, 'is_array')) : [];
     $id = 'fav_' . bin2hex(random_bytes(8));
+    $defaultName = $isHedge
+        ? 'Лонг ' . $params['long_symbol'] . ' / шорт ' . $params['short_symbol']
+        : (string) $params['symbol'] . ' · ' . ($entryLabel !== '' ? $entryLabel : (string) $params['entry_config']);
     $favorite = [
         'id' => $id,
-        'name' => (string) $params['symbol'] . ' · ' . ($entryLabel !== '' ? $entryLabel : (string) $params['entry_config']),
+        'type' => $type,
+        'name' => $favoriteName !== '' ? $favoriteName : $defaultName,
         'entry_label' => $entryLabel,
         'exit_label' => $exitLabel,
         'created_at' => (new DateTimeImmutable())->format(DateTimeInterface::ATOM),
         'params' => $params,
     ];
     $favorites[] = $favorite;
-    $handle = fopen($storePath, 'c+');
-    if ($handle === false || !flock($handle, LOCK_EX)) {
-        if (is_resource($handle)) fclose($handle);
-        favoriteJsonResponse(['status' => 'error', 'error' => 'Не удалось сохранить избранное.'], 500);
-    }
     ftruncate($handle, 0);
     rewind($handle);
     fwrite($handle, json_encode($favorites, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n");
@@ -71,7 +87,7 @@ $favorites = array_reverse(readFavorites($storePath));
 <nav class="nav"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php" aria-current="page">Избранное</a></nav>
 <section class="panel"><h1>Избранное</h1>
 <?php if ($favorites === []): ?><p class="empty">Сохранённых стратегий пока нет. Добавьте текущую стратегию кнопкой «Добавить в избранное».</p>
-<?php else: ?><table><thead><tr><th>Тикер</th><th>Стратегия входа</th><th>Стратегия выхода</th><th>Баланс</th><th>Комиссия</th><th>Добавлено</th></tr></thead><tbody>
-<?php foreach ($favorites as $favorite): $params = is_array($favorite['params'] ?? null) ? $favorite['params'] : []; $href = './?' . http_build_query(array_merge($params, ['favorite_id' => (string) ($favorite['id'] ?? '')])); ?>
-<tr><td><a href="<?= h($href) ?>"><strong><?= h((string) ($params['symbol'] ?? '—')) ?></strong></a></td><td><?= h((string) ($favorite['entry_label'] ?? $params['entry_config'] ?? '—')) ?></td><td><?= h((string) ($favorite['exit_label'] ?? $params['exit_config'] ?? '—')) ?></td><td><?= h((string) ($params['balance'] ?? '—')) ?> USDT</td><td><?= h((string) ($params['fee'] ?? '—')) ?>%</td><td class="muted"><?= h((string) ($favorite['created_at'] ?? '')) ?></td></tr>
+<?php else: ?><table><thead><tr><th>Тикер / пара</th><th>Стратегия входа</th><th>Стратегия выхода</th><th>Баланс</th><th>Комиссия</th><th>Добавлено</th></tr></thead><tbody>
+<?php foreach ($favorites as $favorite): $params = is_array($favorite['params'] ?? null) ? $favorite['params'] : []; $type = (string) ($favorite['type'] ?? 'strategy'); $favoriteId = (string) ($favorite['id'] ?? ''); $route = $type === 'hedge' ? 'hedging.php?' : './?'; $href = $route . http_build_query(array_merge($params, ['favorite_id' => $favoriteId])); $tickerLabel = $type === 'hedge' ? 'Лонг ' . (string) ($params['long_symbol'] ?? '—') . ' / шорт ' . (string) ($params['short_symbol'] ?? '—') : (($type === 'global_top' ? 'Топ-5 · ' : '') . (string) ($params['symbol'] ?? '—')); $entryCell = $type === 'hedge' ? 'Совместный лонг / шорт' : (string) ($favorite['entry_label'] ?? $params['entry_config'] ?? '—'); $exitCell = $type === 'hedge' ? 'Закрытие по последнему снимку' : (string) ($favorite['exit_label'] ?? $params['exit_config'] ?? '—'); ?>
+<tr><td><a href="<?= h($href) ?>"><strong><?= h($tickerLabel) ?></strong></a><div class="muted"><?= h((string) ($favorite['name'] ?? '')) ?></div></td><td><?= h($entryCell) ?></td><td><?= h($exitCell) ?></td><td><?= h((string) ($params['balance'] ?? '—')) ?> USDT</td><td><?= h((string) ($params['fee'] ?? '—')) ?>%</td><td class="muted"><?= h((string) ($favorite['created_at'] ?? '')) ?></td></tr>
 <?php endforeach; ?></tbody></table><?php endif; ?></section></main></body></html>

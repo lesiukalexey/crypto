@@ -13,7 +13,9 @@ if ($favoriteId !== '' && is_file($favoritesPath)) {
     $storedFavorites = json_decode((string) file_get_contents($favoritesPath), true);
     if (is_array($storedFavorites)) {
         foreach ($storedFavorites as $storedFavorite) {
-            if (is_array($storedFavorite) && (string) ($storedFavorite['id'] ?? '') === $favoriteId && is_array($storedFavorite['params'] ?? null)) {
+            if (is_array($storedFavorite) && (string) ($storedFavorite['id'] ?? '') === $favoriteId
+                && in_array((string) ($storedFavorite['type'] ?? 'strategy'), ['strategy', 'global_top', 'ticker_leader'], true)
+                && is_array($storedFavorite['params'] ?? null)) {
                 $favorite = $storedFavorite;
                 $_GET = array_merge($_GET, $storedFavorite['params']);
                 $favoriteView = true;
@@ -846,7 +848,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
 .calculation-queue-heading{display:flex;align-items:flex-start;gap:12px}.calculation-queue{flex:1;min-width:0}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}.reset-calculation-queue{flex:0 0 38px;width:38px;height:38px;min-width:38px;padding:0;background:transparent;color:var(--muted);font-size:20px;line-height:1}.reset-calculation-queue:hover{background:#273653;color:var(--text)}.reset-calculation-queue:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}}
-.ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}
+.ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}.ranking-favorite-button{width:34px;min-width:34px;padding:6px 4px;background:#263968;color:#fff}.ranking-favorite-button:hover{background:#405bad}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head h2{flex:1}.portfolio-ranking-head .refresh-symbols{margin-left:auto}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
 .portfolio-ranking-diagnostics{margin:0 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#0c1222;color:var(--muted);font-size:13px;white-space:pre-line;font-variant-numeric:tabular-nums}
@@ -891,7 +893,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
 <input type="hidden" name="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>">
 <input type="hidden" name="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>">
-<div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов" title="Сбросить кэш рейтингов">🧹</button></div>
+<div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов" title="Сбросить кэш рейтингов">🧹</button><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <div class="symbol-select-row date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="refresh-symbols refresh-today-snapshot" type="button" id="refresh-today-snapshot" aria-label="Обновить данные до выбранной даты" title="Подтянуть новые данные до выбранной даты в график и расчёты" <?= $snapshotNeedsRefresh ? '' : 'hidden' ?>>↻</button></div>
 
@@ -908,7 +910,6 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <p class="small-note">Варианты TP/SL сгруппированы по числу интервалов проверки. При достижении TP или SL позиция закроется, если порог всё ещё достигнут через указанное число интервалов.</p>
 </div></section>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
-<?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ Добавить в избранное</button><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
 <details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><label class="field">Макс. убыток цепочки (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>"></label><label class="field">Макс. убыток за день (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>"></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Ноль отключает лимит. Лимит цепочки закрывает её на первом снимке, где чистый убыток достигает суммы. Дневной лимит учитывает результат закрытых цепочек по дате закрытия и запрещает новые цепочки до следующего дня; лимит цепочки ограничивает текущую позицию.</p><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
@@ -1011,25 +1012,34 @@ const favoriteView = <?= $favoriteView ? 'true' : 'false' ?>;
 if (favoriteView && filtersForm) {
     filtersForm.querySelectorAll('select, input, button').forEach(control => { control.disabled = true; });
 }
-document.querySelector('#add-favorite')?.addEventListener('click', async () => {
-    const button = document.querySelector('#add-favorite');
-    const status = document.querySelector('#favorite-status');
-    if (!filtersForm || !button) return;
+async function postFavorite(params, button, status = null) {
+    if (!button) return;
     button.disabled = true;
-    status.textContent = 'Сохраняю стратегию…';
-    const body = new URLSearchParams(new FormData(filtersForm));
-    body.set('favorite_entry_label', document.querySelector('#entry-config')?.selectedOptions[0]?.textContent || '');
-    body.set('favorite_exit_label', document.querySelector('#exit-config')?.selectedOptions[0]?.textContent || '');
+    const originalText = button.textContent;
+    if (status) status.textContent = 'Сохраняю в избранное…';
+    const body = new URLSearchParams(params);
     try {
         const response = await fetch('favorites.php', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'}, body});
         const result = await response.json();
         if (!response.ok || result.status !== 'ok') throw new Error(result.error || 'Не удалось сохранить стратегию');
-        status.textContent = 'Стратегия добавлена в избранное.';
-        button.textContent = '✓ В избранном';
+        if (status) status.textContent = 'Добавлено в избранное.';
+        button.textContent = '✓ Добавлено';
+        button.title = 'Сохранено в избранном';
     } catch (error) {
-        status.textContent = error.message || 'Не удалось сохранить стратегию';
+        if (status) status.textContent = error.message || 'Не удалось сохранить стратегию';
+        button.title = error.message || 'Не удалось сохранить стратегию';
+        button.textContent = originalText;
         button.disabled = false;
     }
+}
+document.querySelector('#add-favorite')?.addEventListener('click', () => {
+    if (!filtersForm) return;
+    const params = new URLSearchParams(new FormData(filtersForm));
+    params.set('favorite_type', 'strategy');
+    params.set('favorite_entry_label', document.querySelector('#entry-config')?.selectedOptions[0]?.textContent || '');
+    params.set('favorite_exit_label', document.querySelector('#exit-config')?.selectedOptions[0]?.textContent || '');
+    params.set('favorite_name', symbolSelect.value + ' · текущая стратегия');
+    postFavorite(params, document.querySelector('#add-favorite'), document.querySelector('#favorite-status'));
 });
 function syncViewNavigation() {
     if (!filtersForm) return;
@@ -2026,6 +2036,24 @@ function rankingTable(container, columns, rows, sortOptions = null) {
                     link.textContent = value.text;
                     link.title = 'Открыть результаты этой комбинации по всем тикерам в новой вкладке';
                     cell.appendChild(link);
+                } else if (value && typeof value === 'object' && value.favoriteParams) {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'ranking-favorite-button';
+                    button.textContent = '☆';
+                    button.title = 'Добавить эту комбинацию в избранное';
+                    button.setAttribute('aria-label', button.title);
+                    button.addEventListener('click', () => postFavorite(value.favoriteParams, button));
+                    cell.appendChild(button);
+                } else if (value && typeof value === 'object' && value.favoriteUnavailable) {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'ranking-favorite-button';
+                    button.textContent = '☆';
+                    button.disabled = true;
+                    button.title = 'Для этой строки пока нет готовой стратегии';
+                    button.setAttribute('aria-label', button.title);
+                    cell.appendChild(button);
                 } else {
                     cell.textContent = value === null || value === undefined ? '—' : String(value);
                 }
@@ -2170,17 +2198,31 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
         }
         if (ranking.status !== 'ready') throw new Error(ranking.message || 'Общий рейтинг пока недоступен');
         portfolioRankingContent.hidden = false;
+        const favoritePayload = (item, type, symbol) => {
+            if (!item.entry_id || !item.exit_id) return {favoriteUnavailable: true};
+            const favoriteParams = new URLSearchParams(params);
+            favoriteParams.set('favorite_type', type);
+            favoriteParams.set('symbol', symbol || symbolSelect.value);
+            favoriteParams.set('entry_config', item.entry_id || '');
+            favoriteParams.set('exit_config', item.exit_id || '');
+            favoriteParams.set('favorite_entry_label', item.entry_label || '');
+            favoriteParams.set('favorite_exit_label', item.exit_label || '');
+            favoriteParams.set('favorite_name', `${type === 'global_top' ? 'Общий топ-5' : symbol} · ${item.entry_label || item.entry_id} · ${item.exit_label || item.exit_id}`);
+            return favoriteParams;
+        };
         const globalRows = (ranking.global_top || []).map(item => {
             const detailLink = portfolioCombinationDetailLink(params, item);
             return [
                 detailLink?.entry || item.entry_label, detailLink?.exit || item.exit_label, pnlText(item.average_pnl),
                 item.eligible_symbols + ' из ' + ranking.universe_size,
                 String(item.profitable_symbols),
+                {favoriteParams: favoritePayload(item, 'global_top', symbolSelect.value)},
             ];
         });
         rankingTable(document.querySelector('#portfolio-global-table'), [
             {label:'Порог входа'}, {label:'TakeProfit & StopLoss'},
             {label:'Средний итог на тикер',numeric:true}, {label:'Подходят по SAVE MODE',numeric:true}, {label:'В плюсе',numeric:true},
+            {label:'Избранное'},
         ], globalRows);
         const tickerRows = (ranking.ticker_leaders || []).map(item => {
             const detailLink = portfolioCombinationDetailLink(params, item);
@@ -2192,6 +2234,7 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
                     pnlText(item.pnl), pnlText(item.market_average_pnl),
                     item.market_eligible_symbols === undefined ? '—' : item.market_eligible_symbols + ' из ' + ranking.universe_size,
                     item.trade_count ? (!params.get('martingale_mode') || params.get('martingale_mode') === 'none' ? String(item.trade_count) : `${item.trade_count} · ${item.chain_count ?? 0}`) : 'нет надежных данных',
+                    {favoriteParams: favoritePayload(item, 'ticker_leader', item.symbol)},
                 ],
                 sortValues: {
                     tickerPnl: item.pnl === null || item.pnl === undefined ? null : Number(item.pnl),
@@ -2203,7 +2246,7 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
         rankingTable(document.querySelector('#portfolio-ticker-table'), [
             {label:'Тикер'}, {label:'Лучший порог входа'}, {label:'Лучший TakeProfit & StopLoss'},
             {label:'Итог тикера',numeric:true,sortKey:'tickerPnl',defaultDirection:'desc'}, {label:'Средний итог этой пары на рынке',numeric:true,sortKey:'marketAverage',defaultDirection:'desc'},
-            {label:'Поддержка',numeric:true}, {label:params.get('martingale_mode') && params.get('martingale_mode') !== 'none' ? 'Ордеров · цепочек' : 'Сделок',numeric:true},
+            {label:'Поддержка',numeric:true}, {label:params.get('martingale_mode') && params.get('martingale_mode') !== 'none' ? 'Ордеров · цепочек' : 'Сделок',numeric:true}, {label:'Избранное'},
         ], tickerRows, {initialKey:'tickerPnl',initialDirection:'desc'});
         portfolioRankingStatus.textContent = 'Средний итог рассчитан по ' + ranking.universe_size
             + ' тикерам с данными за период; пары без подходящей выборки учитываются как 0. SAVE MODE требует минимум '
