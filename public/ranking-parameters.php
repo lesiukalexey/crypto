@@ -210,6 +210,14 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
     if (!in_array($entryDirectionMode, ['follow', 'reverse'], true)) {
         throw new InvalidArgumentException('Неизвестное направление входа.');
     }
+    $exitConfirmationMode = (string) ($query['exit_confirmation_mode'] ?? 'immediate');
+    if (!in_array($exitConfirmationMode, ['immediate', 'both_delayed', 'tp_delayed', 'sl_delayed'], true)) {
+        throw new InvalidArgumentException('Неизвестный тип проверки Take Profit / Stop Loss.');
+    }
+    $exitConfirmationSnapshots = filter_var($query['exit_confirmation_snapshots'] ?? 60, FILTER_VALIDATE_INT);
+    if ($exitConfirmationSnapshots === false || $exitConfirmationSnapshots < 1 || $exitConfirmationSnapshots > 1000) {
+        throw new InvalidArgumentException('Число снимков для проверки выхода должно быть от 1 до 1000.');
+    }
     $families = ['both', 'long', 'short'];
     $ranges = [];
     $modes = [];
@@ -317,6 +325,8 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
             'entry_profiles' => $entryProfiles,
             'entry_signal_mode' => $entrySignalMode,
             'entry_direction_mode' => $entryDirectionMode,
+            'exit_confirmation_mode' => $exitConfirmationMode,
+            'exit_confirmation_snapshots' => $exitConfirmationSnapshots,
             'immediate_directions' => $entryDefaults['immediate_directions'] ?? [],
             'exit_profiles' => [
                 'fixed_tp' => $ranges['fixed_tp'],

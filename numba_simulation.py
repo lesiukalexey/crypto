@@ -66,6 +66,92 @@ def _lower_bound(values: np.ndarray, start: int, target: int) -> int:
 
 
 @njit(cache=True)
+def _find_delayed_standard_exit(
+    bids: np.ndarray,
+    asks: np.ndarray,
+    entry_index: int,
+    is_short: bool,
+    start_balance: float,
+    fee_rate: float,
+    take_profit: float,
+    stop_loss: float,
+    take_confirmation_snapshots: int,
+    stop_confirmation_snapshots: int,
+) -> tuple[int, bool]:
+    has_take = not np.isnan(take_profit)
+    has_stop = not np.isnan(stop_loss)
+    due_take = -1
+    due_stop = -1
+    saw_crossing = False
+    for index in range(entry_index + 1, len(bids)):
+        entry_price = bids[entry_index] if is_short else asks[entry_index]
+        exit_price = asks[index] if is_short else bids[index]
+        if is_short:
+            net = start_balance * (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+        else:
+            net = start_balance * (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+        take_condition = has_take and net >= take_profit
+        stop_condition = has_stop and net <= -stop_loss
+        if take_condition and due_take < 0:
+            due_take = index + take_confirmation_snapshots
+            saw_crossing = True
+        if stop_condition and due_stop < 0:
+            due_stop = index + stop_confirmation_snapshots
+            saw_crossing = True
+        if due_take >= 0 and index >= due_take:
+            if take_condition:
+                return index, saw_crossing
+            due_take = -1
+        if due_stop >= 0 and index >= due_stop:
+            if stop_condition:
+                return index, saw_crossing
+            due_stop = -1
+    return -1, saw_crossing
+
+
+@njit(cache=True)
+def _find_delayed_martingale_exit(
+    bids: np.ndarray,
+    asks: np.ndarray,
+    entry_index: int,
+    is_short: bool,
+    total_quantity: float,
+    entry_cost: float,
+    entry_fees: float,
+    fee_rate: float,
+    take_profit: float,
+    stop_loss: float,
+    take_confirmation_snapshots: int,
+    stop_confirmation_snapshots: int,
+) -> tuple[int, int]:
+    has_take = not np.isnan(take_profit)
+    has_stop = not np.isnan(stop_loss)
+    due_take = -1
+    due_stop = -1
+    for index in range(entry_index + 1, len(bids)):
+        exit_price = asks[index] if is_short else bids[index]
+        if is_short:
+            net = entry_cost - total_quantity * exit_price - entry_fees - total_quantity * exit_price * fee_rate
+        else:
+            net = total_quantity * exit_price - entry_cost - entry_fees - total_quantity * exit_price * fee_rate
+        take_condition = has_take and net >= take_profit
+        stop_condition = has_stop and net <= stop_loss
+        if take_condition and due_take < 0:
+            due_take = index + take_confirmation_snapshots
+        if stop_condition and due_stop < 0:
+            due_stop = index + stop_confirmation_snapshots
+        if due_take >= 0 and index >= due_take:
+            if take_condition:
+                return index, -1
+            due_take = -1
+        if due_stop >= 0 and index >= due_stop:
+            if stop_condition:
+                return -1, index
+            due_stop = -1
+    return -1, -1
+
+
+@njit(cache=True)
 def simulate_numba(
     bids: np.ndarray,
     asks: np.ndarray,
@@ -81,6 +167,8 @@ def simulate_numba(
     fee_rate: float,
     take_profit: float,
     stop_loss: float,
+    take_confirmation_snapshots: int,
+    stop_confirmation_snapshots: int,
 ) -> tuple[float, int]:
     balance = start_balance
     signal_cursor = 0
@@ -116,7 +204,16 @@ def simulate_numba(
                 stop_price = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
                 first_stop = _first_le(bid_minimum, tree_size, tree_length, entry_index + 1, stop_price)
 
-        has_crossing = first_take >= 0 or first_stop >= 0
+        delayed_crossing = False
+        if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
+            delayed_exit, delayed_crossing = _find_delayed_standard_exit(
+                bids, asks, entry_index, is_short, start_balance, fee_rate,
+                take_profit, stop_loss, take_confirmation_snapshots, stop_confirmation_snapshots,
+            )
+            first_take = delayed_exit
+            first_stop = -1
+
+        has_crossing = delayed_crossing if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0 else first_take >= 0 or first_stop >= 0
         if first_take >= 0 and first_stop >= 0:
             exit_index = min(first_take, first_stop)
         elif first_take >= 0:
@@ -162,6 +259,8 @@ def simulate_standard_stateful_numba(
     closed_trades: int,
     open_entry_index: int,
     open_is_short: bool,
+    take_confirmation_snapshots: int,
+    stop_confirmation_snapshots: int,
 ) -> tuple[float, int, float, int, int, bool]:
     """Resume a fixed-initial-stake run, retaining any open position at the boundary."""
     balance = closed_balance
@@ -192,6 +291,13 @@ def simulate_standard_stateful_numba(
             if has_stop and stop_loss < start_balance:
                 target = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
                 first_stop = _first_le(bid_minimum, tree_size, count, open_index + 1, target)
+
+        if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
+            delayed_exit, _ = _find_delayed_standard_exit(
+                bids, asks, open_index, open_short, start_balance, fee_rate,
+                take_profit, stop_loss, take_confirmation_snapshots, stop_confirmation_snapshots,
+            )
+            first_take, first_stop = delayed_exit, -1
 
         if first_take >= 0 or first_stop >= 0:
             if first_take >= 0 and first_stop >= 0:
@@ -235,6 +341,13 @@ def simulate_standard_stateful_numba(
             if has_stop and stop_loss < start_balance:
                 target = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
                 first_stop = _first_le(bid_minimum, tree_size, count, entry_index + 1, target)
+
+        if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
+            delayed_exit, _ = _find_delayed_standard_exit(
+                bids, asks, entry_index, is_short, start_balance, fee_rate,
+                take_profit, stop_loss, take_confirmation_snapshots, stop_confirmation_snapshots,
+            )
+            first_take, first_stop = delayed_exit, -1
 
         if first_take >= 0 and first_stop >= 0:
             exit_index = min(first_take, first_stop)
@@ -291,6 +404,8 @@ def simulate_standard_stateful_days_numba(
     closed_trades: int,
     open_entry_index: int,
     open_is_short: bool,
+    take_confirmation_snapshots: int,
+    stop_confirmation_snapshots: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     day_count = len(day_quote_counts)
     pnls = np.empty(day_count, dtype=np.float64)
@@ -314,7 +429,7 @@ def simulate_standard_stateful_days_numba(
             tree_size, quote_count, signal_indexes[:signal_count], signal_shorts[:signal_count],
             start_balance, fee_rate, take_profit, stop_loss,
             current_balance, current_signal_from, current_closed_trades,
-            current_open_index, current_open_short,
+            current_open_index, current_open_short, take_confirmation_snapshots, stop_confirmation_snapshots,
         )
         pnls[day_index], trade_counts[day_index] = result[0], result[1]
         current_balance, current_signal_from = result[2], result[3]
@@ -366,6 +481,8 @@ def simulate_martingale_numba(
     max_chain_loss: float,
     max_day_loss: float,
     day_ids: np.ndarray,
+    take_confirmation_snapshots: int,
+    stop_confirmation_snapshots: int,
 ) -> tuple[float, int, int]:
     balance = start_balance
     signal_cursor = 0
@@ -435,6 +552,13 @@ def simulate_martingale_numba(
                 stop_price = (entry_cost + entry_fees + stop_amount) / factor if has_stop else np.nan
                 first_take = _first_ge(bid_maximum, tree_size, tree_length, entry_index + 1, take_price) if has_take else -1
                 first_stop = _first_le(bid_minimum, tree_size, tree_length, entry_index + 1, stop_price) if has_stop else -1
+
+            if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
+                first_take, first_stop = _find_delayed_martingale_exit(
+                    bids, asks, entry_index, is_short, total_quantity, entry_cost,
+                    entry_fees, fee_rate, target_amount,
+                    stop_amount if has_stop else np.nan, take_confirmation_snapshots, stop_confirmation_snapshots,
+                )
 
             has_crossing = first_take >= 0 or first_stop >= 0
             first_risk = -1
@@ -697,6 +821,8 @@ def simulate_martingale_batch_numba(
     max_chain_loss: float,
     max_day_loss: float,
     day_ids: np.ndarray,
+    take_confirmation_snapshots: int,
+    stop_confirmation_snapshots: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Evaluate an exit grid in one compiled call using the exact scalar kernel."""
     pnls = np.empty(len(take_profits), dtype=np.float64)
@@ -709,6 +835,7 @@ def simulate_martingale_batch_numba(
             start_balance, fee_rate, take_profits[index], stop_losses[index],
             base_notionals[index], mode, timing, attempts,
             target_policies[index], max_chain_loss, max_day_loss, day_ids,
+            take_confirmation_snapshots, stop_confirmation_snapshots,
         )
         pnls[index] = pnl
         closed_orders[index] = order_count

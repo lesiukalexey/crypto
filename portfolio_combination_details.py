@@ -60,6 +60,10 @@ def main() -> int:
     write_json(status_path, {"status": "pending", "progress": 0})
     try:
         ranking = json.loads(args.ranking_params)
+        confirmation_snapshots = int(ranking.get("exit_confirmation_snapshots", 60))
+        confirmation_mode = ranking.get("exit_confirmation_mode", "immediate")
+        take_confirmation_snapshots = confirmation_snapshots if confirmation_mode in ("both_delayed", "tp_delayed") else 0
+        stop_confirmation_snapshots = confirmation_snapshots if confirmation_mode in ("both_delayed", "sl_delayed") else 0
         max_ids = {str(symbol): int(max_id) for symbol, max_id in json.loads(args.max_ids).items()}
         selected_entry = next((spec for spec in build_entry_specs(ranking) if spec[0] == args.entry_config), None)
         if selected_entry is None:
@@ -84,6 +88,8 @@ def main() -> int:
                     exit_label += " · цель рассчитана от стартового баланса"
                 elif args.martingale_mode != "none" and stop_loss is not None:
                     exit_label += " · TP/SL растут вместе с позицией"
+                if take_confirmation_snapshots or stop_confirmation_snapshots:
+                    exit_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}"
                 selected_exit = (exit_id, exit_label, take_profit, stop_loss)
                 break
         if selected_exit is None:
@@ -150,7 +156,7 @@ def main() -> int:
         checkpoint_exit_options = [
             (
                 f"{base_exit_id}:{policy}" if policy_label else base_exit_id,
-                label + (f" · {policy_label}" if policy_label else ""),
+                label + (f" · {policy_label}" if policy_label else "") + (f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}" if take_confirmation_snapshots or stop_confirmation_snapshots else ""),
                 target, loss, policy,
             )
             for base_exit_id, label, target, loss in exit_specs(ranking["exit_profiles"])
@@ -168,6 +174,8 @@ def main() -> int:
         checkpoint_cache_root = args.cache_dir / "combination-pair-results" / args.cache_key
         checkpoint_state = {
             "quotes_by_symbol": quotes_by_symbol,
+            "take_confirmation_snapshots": take_confirmation_snapshots,
+            "stop_confirmation_snapshots": stop_confirmation_snapshots,
             "signals_by_symbol": {},
             "pair_cache_scopes": {symbol: checkpoint_cache_root / symbol for symbol in quotes_by_symbol},
             "checkpoint_root": args.cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-state-v1",

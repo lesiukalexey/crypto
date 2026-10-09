@@ -293,6 +293,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                 args.martingale_timing, args.martingale_attempts,
                 args.martingale_max_chain_loss, args.martingale_max_day_loss,
                 uncached,
+                state["take_confirmation_snapshots"], state["stop_confirmation_snapshots"],
             )
     cache_updated = False
     checkpoint_updated = bool(boundaries_to_capture)
@@ -319,6 +320,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                         quotes, signals, shorts, price_trees[0], price_trees[1],
                         args.balance, state["fee_rate"], take_profit, stop_loss,
                         day_quote_counts_to_capture, previous_state,
+                        state["take_confirmation_snapshots"], state["stop_confirmation_snapshots"],
                     )
                     for index, (day, _) in enumerate(boundaries_to_capture):
                         states_by_day[day][state_index] = day_states[index]
@@ -327,6 +329,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                     pnl, trade_count, next_state = simulate_standard_checkpoint(
                         quotes, signals, shorts, price_trees[0], price_trees[1],
                         args.balance, state["fee_rate"], take_profit, stop_loss, previous_state,
+                        state["take_confirmation_snapshots"], state["stop_confirmation_snapshots"],
                     )
                 next_states.append(next_state)
                 if range_start_day is not None:
@@ -363,6 +366,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                         target_policy,
                         args.martingale_max_chain_loss,
                         args.martingale_max_day_loss,
+                        state["take_confirmation_snapshots"], state["stop_confirmation_snapshots"],
                     )
                     chain_count = trade_count
                 if use_checkpoint:
@@ -424,6 +428,10 @@ def main() -> int:
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
+    confirmation_snapshots = int(ranking.get("exit_confirmation_snapshots", 60))
+    confirmation_mode = ranking.get("exit_confirmation_mode", "immediate")
+    take_confirmation_snapshots = confirmation_snapshots if confirmation_mode in ("both_delayed", "tp_delayed") else 0
+    stop_confirmation_snapshots = confirmation_snapshots if confirmation_mode in ("both_delayed", "sl_delayed") else 0
 
     status_path = args.cache_dir / f"portfolio-{args.cache_key}.status.json"
     result_path = args.cache_dir / f"portfolio-{args.cache_key}.json"
@@ -575,6 +583,8 @@ def main() -> int:
         exit_index_by_id = {option[0]: index for index, option in enumerate(exit_options)}
         _PORTFOLIO_WORKER_STATE = {
             "quotes_by_symbol": quotes_by_symbol,
+            "take_confirmation_snapshots": take_confirmation_snapshots,
+            "stop_confirmation_snapshots": stop_confirmation_snapshots,
             "signals_by_symbol": signals_by_symbol,
             "pair_cache_scopes": pair_cache_scopes,
             "checkpoint_root": args.cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-state-v1",

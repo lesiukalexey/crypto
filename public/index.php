@@ -49,6 +49,10 @@ $defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThr
     ? 'entry:10:1' : 'entry:' . $entryWindows[0] . ':' . $entryThresholdsTenthsPercent[0];
 $entrySignalMode = $rankingParameters['worker']['entry_signal_mode'];
 $entryDirectionMode = $rankingParameters['worker']['entry_direction_mode'];
+$exitConfirmationMode = $rankingParameters['worker']['exit_confirmation_mode'];
+$exitConfirmationSnapshots = $rankingParameters['worker']['exit_confirmation_snapshots'];
+$takeConfirmationDelay = in_array($exitConfirmationMode, ['both_delayed', 'tp_delayed'], true) ? $exitConfirmationSnapshots : 0;
+$stopConfirmationDelay = in_array($exitConfirmationMode, ['both_delayed', 'sl_delayed'], true) ? $exitConfirmationSnapshots : 0;
 if ($entrySignalMode === 'within') $defaultEntryConfig .= ':within';
 if ($entryDirectionMode === 'reverse') $defaultEntryConfig .= ':reverse';
 $entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
@@ -195,8 +199,8 @@ $ledgerLastQuotes = [];
 $ledgerSourceDay = null;
 if ($martingaleMode === 'none' && $rows !== [] && $error === null) {
     $closedTradeLedgerKey = hash('sha256', json_encode([
-        'closed-trade-ledger-v1', $config['category'], $symbol, $startingBalance,
-        $feePercent, $entryConfig, $selectedExitConfig,
+        'closed-trade-ledger-v2-exit-confirmation', $config['category'], $symbol, $startingBalance,
+        $feePercent, $entryConfig, $selectedExitConfig, $exitConfirmationMode, $exitConfirmationSnapshots,
     ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
     $prefixContext = hash_init('sha256');
     $quoteCount = 0;
@@ -477,6 +481,8 @@ if ($cachedStandardTradeEvents !== null) {
             $targetScale = $martingaleTargetPolicy === 'scaled' ? $stageScale : '1';
             $stageTarget = $profitTarget === null ? null : bcmul($profitTarget, $targetScale, 24);
             $stageLoss = $lossThreshold === null ? null : bcmul($lossThreshold, $targetScale, 24);
+            $takeConfirmationIndex = null;
+            $stopConfirmationIndex = null;
             $foundStop = false;
             $hitRiskLimit = false;
             for ($i = $tradeEntryIndex + 1; $i < $rowCount; $i++) {
@@ -507,15 +513,35 @@ if ($cachedStandardTradeEvents !== null) {
                     $hitRiskLimit = true;
                     break;
                 }
-                if ($stageTarget !== null && bccomp($netNow, $stageTarget, 24) >= 0) {
+                $takeCondition = $stageTarget !== null && bccomp($netNow, $stageTarget, 24) >= 0;
+                $stopCondition = $stageLoss !== null && bccomp($netNow, $stageLoss, 24) <= 0;
+                if ($takeCondition && $takeConfirmationIndex === null) $takeConfirmationIndex = $i + $takeConfirmationDelay;
+                if ($stopCondition && $stopConfirmationIndex === null) $stopConfirmationIndex = $i + $stopConfirmationDelay;
+                if ($takeConfirmationDelay === 0 && $takeCondition) {
                     $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $formatTargetPercent($stageTarget, $startingBalance) . ' от стартового баланса';
                     $foundStop = str_ends_with($martingaleMode, '_profit');
                     break;
                 }
-                if ($stageLoss !== null && bccomp($netNow, $stageLoss, 24) <= 0) {
+                if ($stopConfirmationDelay === 0 && $stopCondition) {
                     $exitIndex = $i; $exitReason = 'Мартингейл · стоп чистого убытка ' . $formatTargetPercent(ltrim($stageLoss, '-'), $startingBalance) . ' от стартового баланса';
                     $foundStop = !str_ends_with($martingaleMode, '_profit');
                     break;
+                }
+                if ($takeConfirmationIndex !== null && $i >= $takeConfirmationIndex) {
+                    if ($takeCondition) {
+                        $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $formatTargetPercent($stageTarget, $startingBalance) . ' от стартового баланса';
+                        $foundStop = str_ends_with($martingaleMode, '_profit');
+                        break;
+                    }
+                    $takeConfirmationIndex = null;
+                }
+                if ($stopConfirmationIndex !== null && $i >= $stopConfirmationIndex) {
+                    if ($stopCondition) {
+                        $exitIndex = $i; $exitReason = 'Мартингейл · стоп чистого убытка ' . $formatTargetPercent(ltrim($stageLoss, '-'), $startingBalance) . ' от стартового баланса';
+                        $foundStop = !str_ends_with($martingaleMode, '_profit');
+                        break;
+                    }
+                    $stopConfirmationIndex = null;
                 }
             }
             if ($hitRiskLimit || !$foundStop || $stage >= $martingaleAttempts) {
@@ -662,21 +688,33 @@ while (bccomp($balance, '0', 24) > 0) {
     $exitIndex = $rowCount - 1;
     $exitReason = 'Открыта · последний снимок выбранного периода';
     $tradeNet = '0';
+    $takeConfirmationIndex = null;
+    $stopConfirmationIndex = null;
     for ($i = $tradeEntryIndex + 1; $i < $rowCount; $i++) {
         $exitPrice = $tradeIsShort ? $rows[$i]['ask_price'] : $rows[$i]['bid_price'];
         $priceMove = $tradeIsShort ? bcsub($entryPrice, $exitPrice, 24) : bcsub($exitPrice, $entryPrice, 24);
         $gross = bcmul($quantity, $priceMove, 24);
         $exitFee = bcmul(bcmul($quantity, $exitPrice, 24), $feeRate, 24);
         $tradeNet = bcsub(bcsub($gross, $entryFee, 24), $exitFee, 24);
-        if ($profitTarget !== null && bccomp($tradeNet, $profitTarget, 24) >= 0) {
-            $exitIndex = $i;
-            $exitReason = 'Цель: чистая прибыль ' . $formatTargetPercent($profitTarget, $startingBalance) . ' от стартового баланса';
-            break;
+        $takeCondition = $profitTarget !== null && bccomp($tradeNet, $profitTarget, 24) >= 0;
+        $stopCondition = $lossThreshold !== null && bccomp($tradeNet, $lossThreshold, 24) <= 0;
+        if ($takeCondition && $takeConfirmationIndex === null) $takeConfirmationIndex = $i + $takeConfirmationDelay;
+        if ($stopCondition && $stopConfirmationIndex === null) $stopConfirmationIndex = $i + $stopConfirmationDelay;
+        if ($takeConfirmationIndex !== null && $i >= $takeConfirmationIndex) {
+            if ($takeCondition) {
+                $exitIndex = $i;
+                $exitReason = 'Цель: чистая прибыль ' . $formatTargetPercent($profitTarget, $startingBalance) . ' от стартового баланса';
+                break;
+            }
+            $takeConfirmationIndex = null;
         }
-        if ($lossThreshold !== null && bccomp($tradeNet, $lossThreshold, 24) <= 0) {
-            $exitIndex = $i;
-            $exitReason = 'Стоп: чистый убыток ' . $formatTargetPercent(ltrim($lossThreshold, '-'), $startingBalance) . ' от стартового баланса';
-            break;
+        if ($stopConfirmationIndex !== null && $i >= $stopConfirmationIndex) {
+            if ($stopCondition) {
+                $exitIndex = $i;
+                $exitReason = 'Стоп: чистый убыток ' . $formatTargetPercent(ltrim($lossThreshold, '-'), $startingBalance) . ' от стартового баланса';
+                break;
+            }
+            $stopConfirmationIndex = null;
         }
     }
     $exit = $rows[$exitIndex];
@@ -834,6 +872,9 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения (как сейчас)</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
 <label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
+<label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL только (как сейчас)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с проверкой по снимкам</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP по снимкам, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL по снимкам</option></select></label>
+<label class="field">Проверить через снимков<select name="exit_confirmation_snapshots" id="exit-confirmation-snapshots"><?php foreach ([1, 2, 3, 5, 10, 20, 30, 40, 60, 80] as $snapshotCount): ?><option value="<?= $snapshotCount ?>" <?= $exitConfirmationSnapshots === $snapshotCount ? 'selected' : '' ?>><?= $snapshotCount ?></option><?php endforeach; ?></select></label>
+<p class="small-note">В режиме повторной проверки TP или SL запускает отсчёт. Через выбранное число снимков позиция закроется, только если порог всё ещё достигнут.</p>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
@@ -1339,6 +1380,8 @@ document.querySelector('#entry-direction-mode')?.addEventListener('change', () =
     document.querySelector('#select-top-ranked-result').value = '1';
     filtersForm.requestSubmit();
 });
+document.querySelector('#exit-confirmation-mode')?.addEventListener('change', () => filtersForm.requestSubmit());
+document.querySelector('#exit-confirmation-snapshots')?.addEventListener('change', () => filtersForm.requestSubmit());
 async function refreshStrategyResults() {
     replayRequest?.abort();
     replayRequest = new AbortController();

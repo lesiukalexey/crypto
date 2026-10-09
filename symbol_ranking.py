@@ -53,6 +53,10 @@ def main() -> int:
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
+    confirmation_snapshots = int(ranking.get("exit_confirmation_snapshots", 60))
+    confirmation_mode = ranking.get("exit_confirmation_mode", "immediate")
+    take_confirmation_snapshots = confirmation_snapshots if confirmation_mode in ("both_delayed", "tp_delayed") else 0
+    stop_confirmation_snapshots = confirmation_snapshots if confirmation_mode in ("both_delayed", "sl_delayed") else 0
     martingale_candidates = (
         martingale_exit_candidates(exit_profiles, args.martingale_mode)
         if args.martingale_mode != "none" else []
@@ -157,7 +161,7 @@ def main() -> int:
         checkpoint_exit_options = [
             (
                 f"{base_exit_id}:{policy}" if policy_label else base_exit_id,
-                label + (f" · {policy_label}" if policy_label else ""),
+                label + (f" · {policy_label}" if policy_label else "") + (f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}" if take_confirmation_snapshots or stop_confirmation_snapshots else ""),
                 target, loss, policy,
             )
             for base_exit_id, label, target, loss in exit_specs(exit_profiles)
@@ -184,6 +188,8 @@ def main() -> int:
                 }
         portfolio_engine._PORTFOLIO_WORKER_STATE = {
             "quotes_by_symbol": quotes_by_symbol,
+            "take_confirmation_snapshots": take_confirmation_snapshots,
+            "stop_confirmation_snapshots": stop_confirmation_snapshots,
             "signals_by_symbol": signals_by_symbol,
             "pair_cache_scopes": {symbol: pair_cache_root / symbol for symbol in quotes_by_symbol},
             "checkpoint_root": args.cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-state-v1",
@@ -245,6 +251,7 @@ def main() -> int:
                             args.martingale_timing, args.martingale_attempts,
                             args.martingale_max_chain_loss, args.martingale_max_day_loss,
                             martingale_candidates,
+                            take_confirmation_snapshots, stop_confirmation_snapshots,
                         )
 
                     def consider(target: float | None, loss: float | None, label: str) -> None:
@@ -264,12 +271,15 @@ def main() -> int:
                                     target, loss, args.martingale_mode, args.martingale_timing,
                                     args.martingale_attempts, target_policy,
                                     args.martingale_max_chain_loss, args.martingale_max_day_loss,
+                                    take_confirmation_snapshots, stop_confirmation_snapshots,
                                 )
                                 chain_count = trade_count
                             independent_count = chain_count if args.martingale_mode != "none" else trade_count
                             if independent_count >= args.min_trades and pnl > best_pnl:
                                 best_pnl = pnl
                                 best_label = label + (f" · {policy_label}" if policy_label else "")
+                                if take_confirmation_snapshots or stop_confirmation_snapshots:
+                                    best_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}"
                                 if args.martingale_mode != "none":
                                     best_label += f" · {chain_count} независимых цепочек / {trade_count} ордеров"
                             symbol_completed += 1

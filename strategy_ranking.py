@@ -425,6 +425,8 @@ def simulate(
     martingale_target_policy: str = "scaled",
     martingale_max_chain_loss: float | None = None,
     martingale_max_day_loss: float | None = None,
+    take_confirmation_snapshots: int = 0,
+    stop_confirmation_snapshots: int = 0,
 ) -> tuple[float, int] | tuple[float, int, int]:
     indexes = signal_indexes if isinstance(signal_indexes, np.ndarray) else np.asarray(signal_indexes, dtype=np.int64)
     shorts = signal_shorts if isinstance(signal_shorts, np.ndarray) else np.asarray(signal_shorts, dtype=np.bool_)
@@ -457,6 +459,7 @@ def simulate(
             np.nan if martingale_max_chain_loss is None else martingale_max_chain_loss,
             np.nan if martingale_max_day_loss is None else martingale_max_day_loss,
             quotes.local_days,
+            take_confirmation_snapshots, stop_confirmation_snapshots,
         )
         return pnl, order_count
 
@@ -477,6 +480,7 @@ def simulate(
         fee_rate,
         np.nan if take_profit_amount is None else take_profit_amount,
         np.nan if stop_loss_amount is None else stop_loss_amount,
+        take_confirmation_snapshots, stop_confirmation_snapshots,
     )
 
 
@@ -494,6 +498,8 @@ def simulate_martingale_batch(
     max_chain_loss: float | None,
     max_day_loss: float | None,
     candidates: list[tuple[str, float | None, float | None, str]],
+    take_confirmation_snapshots: int = 0,
+    stop_confirmation_snapshots: int = 0,
 ) -> dict[tuple[str, str], tuple[float, int, int]]:
     """Run a complete martingale exit grid in one Python-to-Numba call."""
     from martingale import martingale_base_notional
@@ -526,6 +532,7 @@ def simulate_martingale_batch(
         np.nan if max_chain_loss is None else max_chain_loss,
         np.nan if max_day_loss is None else max_day_loss,
         quotes.local_days,
+        take_confirmation_snapshots, stop_confirmation_snapshots,
     )
     return {
         (identifier, policy): (float(pnl), int(order_count), int(chain_count))
@@ -565,6 +572,8 @@ def simulate_standard_checkpoint(
     take_profit: float | None,
     stop_loss: float | None,
     checkpoint: tuple[float, int, int, int, bool],
+    take_confirmation_snapshots: int = 0,
+    stop_confirmation_snapshots: int = 0,
 ) -> tuple[float, int, tuple[float, int, int, int, bool]]:
     """Resume a non-martingale simulation from its last closed-trade boundary."""
     from numba_simulation import simulate_standard_stateful_numba
@@ -593,6 +602,7 @@ def simulate_standard_checkpoint(
         int(checkpoint[2]),
         int(checkpoint[3]),
         bool(checkpoint[4]),
+        take_confirmation_snapshots, stop_confirmation_snapshots,
     )
     state = (float(balance), int(signal_from), int(trade_count if open_entry_index < 0 else trade_count - 1), int(open_entry_index), bool(open_is_short))
     return float(pnl), int(trade_count), state
@@ -610,6 +620,8 @@ def simulate_standard_checkpoint_days(
     stop_loss: float | None,
     day_quote_counts: np.ndarray,
     checkpoint: tuple[float, int, int, int, bool],
+    take_confirmation_snapshots: int = 0,
+    stop_confirmation_snapshots: int = 0,
 ) -> tuple[float, int, tuple[float, int, int, int, bool], list[tuple[float, int, int, int, bool]]]:
     """Resume once through the range and capture each supplied day boundary."""
     from numba_simulation import simulate_standard_stateful_days_numba
@@ -627,6 +639,7 @@ def simulate_standard_checkpoint_days(
         np.asarray(day_quote_counts, dtype=np.int64),
         float(checkpoint[0]), int(checkpoint[1]), int(checkpoint[2]),
         int(checkpoint[3]), bool(checkpoint[4]),
+        take_confirmation_snapshots, stop_confirmation_snapshots,
     )
     pnls, trade_counts, balances, signal_positions, closed_counts, open_indexes, open_shorts = values
     states = [
@@ -805,6 +818,10 @@ def main() -> int:
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
+    confirmation_snapshots = int(ranking.get("exit_confirmation_snapshots", 60))
+    confirmation_mode = ranking.get("exit_confirmation_mode", "immediate")
+    take_confirmation_snapshots = confirmation_snapshots if confirmation_mode in ("both_delayed", "tp_delayed") else 0
+    stop_confirmation_snapshots = confirmation_snapshots if confirmation_mode in ("both_delayed", "sl_delayed") else 0
 
     status_path = args.cache_dir / f"{args.cache_key}.status.json"
     result_path = args.cache_dir / f"{args.cache_key}.json"
@@ -978,6 +995,7 @@ def main() -> int:
                         args.martingale_timing, args.martingale_attempts,
                         args.martingale_max_chain_loss, args.martingale_max_day_loss,
                         martingale_batch_candidates,
+                        take_confirmation_snapshots, stop_confirmation_snapshots,
                     )
 
                 checkpoint_path = None
@@ -1092,6 +1110,7 @@ def main() -> int:
                                         args.balance, fee_rate, target, loss,
                                         day_quote_counts_to_capture,
                                         previous_state,
+                                        take_confirmation_snapshots, stop_confirmation_snapshots,
                                     )
                                     for index, (day, _) in enumerate(boundaries_to_capture):
                                         states_by_day[day][state_index] = day_states[index]
@@ -1100,6 +1119,7 @@ def main() -> int:
                                     pnl, trade_count, next_state = simulate_standard_checkpoint(
                                         quotes, signals, shorts, bid_tree, ask_tree,
                                         args.balance, fee_rate, target, loss, previous_state,
+                                        take_confirmation_snapshots, stop_confirmation_snapshots,
                                     )
                                 next_states.append(next_state)
                                 if range_start_day is not None:
@@ -1160,6 +1180,8 @@ def main() -> int:
                         items = []
                         for pnl, ranked_id, display, trade_count, chain_count in best:
                             ranked_label = display + (f" · {policy_label}" if policy_label else "")
+                            if take_confirmation_snapshots or stop_confirmation_snapshots:
+                                ranked_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}"
                             sample_label = (
                                 f"{trade_count} ордеров · {chain_count} независимых цепочек"
                                 if args.martingale_mode != "none" else f"{trade_count} сделок"
