@@ -28,7 +28,13 @@
     "NKEUSDT",
     "NFLXUSDT",
     "IBMUSDT",
-    "WMTUSDT"
+    "WMTUSDT",
+    "XPTUSDT",
+    "XPDUSDT",
+    "COPPERUSDT",
+    "CLUSDT",
+    "BZUSDT",
+    "NATGASUSDT"
   ],
   "poll_interval_seconds": 60,
   "request_timeout_seconds": 10,
