@@ -89,7 +89,7 @@ def main() -> int:
                 elif args.martingale_mode != "none" and stop_loss is not None:
                     exit_label += " · TP/SL растут вместе с позицией"
                 if take_confirmation_snapshots or stop_confirmation_snapshots:
-                    exit_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}"
+                    exit_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' интервалов' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' интервалов' if stop_confirmation_snapshots else 'сразу'}"
                 selected_exit = (exit_id, exit_label, take_profit, stop_loss)
                 break
         if selected_exit is None:
@@ -156,7 +156,7 @@ def main() -> int:
         checkpoint_exit_options = [
             (
                 f"{base_exit_id}:{policy}" if policy_label else base_exit_id,
-                label + (f" · {policy_label}" if policy_label else "") + (f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}" if take_confirmation_snapshots or stop_confirmation_snapshots else ""),
+                label + (f" · {policy_label}" if policy_label else "") + (f" · TP {'через ' + str(take_confirmation_snapshots) + ' интервалов' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' интервалов' if stop_confirmation_snapshots else 'сразу'}" if take_confirmation_snapshots or stop_confirmation_snapshots else ""),
                 target, loss, policy,
             )
             for base_exit_id, label, target, loss in exit_specs(ranking["exit_profiles"])

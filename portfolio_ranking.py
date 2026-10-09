@@ -345,6 +345,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                         raise RuntimeError(f"Missing canonical checkpoint for range start {range_start_day}")
                     pnl -= float(start_state[0]) - args.balance
                     trade_count -= int(start_state[2])
+                chain_count = trade_count
                 checkpoint_updated = True
             else:
                 if args.martingale_mode != "none":

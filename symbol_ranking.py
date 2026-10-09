@@ -161,7 +161,7 @@ def main() -> int:
         checkpoint_exit_options = [
             (
                 f"{base_exit_id}:{policy}" if policy_label else base_exit_id,
-                label + (f" · {policy_label}" if policy_label else "") + (f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}" if take_confirmation_snapshots or stop_confirmation_snapshots else ""),
+                label + (f" · {policy_label}" if policy_label else "") + (f" · TP {'через ' + str(take_confirmation_snapshots) + ' интервалов' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' интервалов' if stop_confirmation_snapshots else 'сразу'}" if take_confirmation_snapshots or stop_confirmation_snapshots else ""),
                 target, loss, policy,
             )
             for base_exit_id, label, target, loss in exit_specs(exit_profiles)
@@ -279,7 +279,7 @@ def main() -> int:
                                 best_pnl = pnl
                                 best_label = label + (f" · {policy_label}" if policy_label else "")
                                 if take_confirmation_snapshots or stop_confirmation_snapshots:
-                                    best_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}"
+                                    best_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' интервалов' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' интервалов' if stop_confirmation_snapshots else 'сразу'}"
                                 if args.martingale_mode != "none":
                                     best_label += f" · {chain_count} независимых цепочек / {trade_count} ордеров"
                             symbol_completed += 1

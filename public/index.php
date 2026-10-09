@@ -108,6 +108,12 @@ $entryDirection = $isImmediateEntry ? 'both' : $entrySelection['family'];
 $momentumLookback = $isImmediateEntry ? 0 : $entrySelection['window'];
 $momentumThresholdTenthsPercent = $isImmediateEntry ? 0 : $entrySelection['threshold_tenths_percent'];
 $momentumThreshold = $momentumThresholdTenthsPercent / 10;
+$entryFamilyPrefix = $entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−');
+$entryLoadingLabel = $isImmediateEntry
+    ? 'Загружаю рейтинг входов…'
+    : $entryFamilyPrefix . number_format($momentumThreshold, 1, '.', '') . '% от баланса за ' . $momentumLookback . ' снимков'
+        . ($entrySignalMode === 'within' ? ' · внутри' : '')
+        . ($entryDirectionMode === 'reverse' ? ' · против движения' : '');
 $profitTarget = bcdiv($startingBalance, '1000', 24);
 $lossThreshold = bcsub('0', $profitTarget, 24);
 if (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
@@ -816,6 +822,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .page-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.page-heading .eyebrow{white-space:nowrap}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}.collector-status{margin:0;white-space:nowrap}.save-mode-toggle{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.save-mode-toggle input{position:absolute;opacity:0;width:1px;height:1px;min-width:0}.save-mode-switch{position:relative;width:38px;height:22px;border:1px solid #52617d;border-radius:999px;background:#263149;transition:.2s}.save-mode-switch:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#b7c1d5;transition:.2s}.save-mode-toggle input:checked+.save-mode-switch{background:#176647;border-color:#42d6a4}.save-mode-toggle input:checked+.save-mode-switch:after{transform:translateX(16px);background:#42d6a4}.save-mode-toggle input:focus-visible+.save-mode-switch{outline:2px solid #8ea5ff;outline-offset:2px}.save-mode-detail{color:var(--muted);font-weight:400}@media(max-width:700px){.page-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.header-actions{justify-content:flex-start}}
 .wrap{max-width:none;padding-left:20px;padding-right:20px}.chart-wrap{container-type:inline-size}#chart{height:27.1cqw}@media(max-width:600px){#chart{height:69cqw}}
 .entry-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.entry-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.entry-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.entry-strategy-fields>.field{flex:1 1 190px;min-width:150px}.entry-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.entry-strategy-fields>.field{flex-basis:100%;width:100%}}
+.exit-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.exit-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.exit-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.exit-strategy-fields>.field:first-child{flex:1 1 260px}.exit-strategy-fields>.field:nth-child(2){flex:2 1 420px}.exit-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.exit-strategy-fields>.field{flex-basis:100%;width:100%}}
 .ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}
 .combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
@@ -870,14 +877,16 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 
 <section class="entry-strategy-group" aria-labelledby="entry-strategy-heading"><h2 class="entry-strategy-heading" id="entry-strategy-heading">Стратегия входа</h2><div class="entry-strategy-fields">
 <label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
-<label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения (как сейчас)</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
-<label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
+<label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
+<label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>"><?= h($entryLoadingLabel) ?></option></select></label>
 <p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию при первом пересечении порога относительно любого из последних X снимков.</p>
 </div></section>
-<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
-<label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL только (как сейчас)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с проверкой по снимкам</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP по снимкам, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL по снимкам</option></select></label>
-<label class="field">Проверить через снимков<select name="exit_confirmation_snapshots" id="exit-confirmation-snapshots"><?php foreach ([1, 2, 3, 5, 10, 20, 30, 40, 60, 80] as $snapshotCount): ?><option value="<?= $snapshotCount ?>" <?= $exitConfirmationSnapshots === $snapshotCount ? 'selected' : '' ?>><?= $snapshotCount ?></option><?php endforeach; ?></select></label>
-<p class="small-note">В режиме повторной проверки TP или SL запускает отсчёт. Через выбранное число снимков позиция закроется, только если порог всё ещё достигнут.</p>
+<section class="exit-strategy-group" aria-labelledby="exit-strategy-heading"><h2 class="exit-strategy-heading" id="exit-strategy-heading">Стратегия выхода</h2><div class="exit-strategy-fields">
+<label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL (сразу)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с учетом интервалов</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP с учетом интервалов, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL с учетом интервалов</option></select></label>
+<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю варианты TP/SL…</option></select></label>
+<input type="hidden" name="exit_confirmation_snapshots" id="exit-confirmation-snapshots" value="<?= h((string) $exitConfirmationSnapshots) ?>">
+<p class="small-note">Варианты TP/SL сгруппированы по числу интервалов проверки. При достижении TP или SL позиция закроется, если порог всё ещё достигнут через указанное число интервалов.</p>
+</div></section>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
@@ -890,7 +899,7 @@ $defaultThresholdSegments = $defaultRankingRanges['both_threshold'];
 $sharedThresholdRanges = $sharedThresholdMode === 'range' ? $rankingRanges['threshold'] : $defaultThresholdSegments;
 $thresholdValuesText = implode(', ', array_map(static fn (int $value): string => '±' . number_format($value / 10, 1, ',', ' '), $entryThresholdsTenthsPercent));
 ?>
-<div class="ranking-range-heading"><h3>Порог входа · % от стартового баланса <small>общий набор для ±, + и −</small></h3><label class="ranking-mode-label"><select aria-label="Общий режим порогов входа" class="ranking-mode-input" name="threshold_mode" data-default-value="default" data-range="threshold"><option value="default" <?= $sharedThresholdMode === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $sharedThresholdMode === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
+<div class="ranking-range-heading"><h3>Порог входа · % от баланса <small>общий набор для ±, + и −</small></h3><label class="ranking-mode-label"><select aria-label="Общий режим порогов входа" class="ranking-mode-input" name="threshold_mode" data-default-value="default" data-range="threshold"><option value="default" <?= $sharedThresholdMode === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $sharedThresholdMode === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
 <p class="small-note">Порог входа задаёт ожидаемое движение в доле стартового баланса; при плече 1× и позиции на весь баланс это соответствует такому же проценту движения Last. Значения по умолчанию: <?= h($thresholdValuesText) ?>%. В режиме «Свой диапазон» шаг и значения применяются ко всем трём направлениям.</p>
 <div class="ranking-custom" id="threshold-custom" <?= $sharedThresholdMode === 'range' ? '' : 'hidden' ?>><?= rankingSegmentEditor('Порог входа (%)', 'threshold', $sharedThresholdRanges, $defaultThresholdSegments, true) ?></div>
 <?php
@@ -913,7 +922,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?= rankingSegmentEditor('Только Take Profit (%)', 'profit', $rankingRanges['profit'], $defaultRankingRanges['profit'], true) ?>
 <?= rankingSegmentEditor('Только Stop Loss (%)', 'loss', $rankingRanges['loss'], $defaultRankingRanges['loss'], true) ?>
 <p class="small-note">Для каждого параметра можно добавить несколько диапазонов. Внутри каждого задайте «от», «до» и шаг; граничные значения включаются.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
-<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от стартового баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
+<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
 <section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты и очищает очередь. 🧹 делает то же самое и дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= $visibleQuoteCount ?> снимков</span></div>
@@ -1376,7 +1385,6 @@ saveModeToggle.addEventListener('change', () => {
 let filterSubmitTimer;
 let replayRequest;
 document.querySelector('#exit-confirmation-mode')?.addEventListener('change', () => filtersForm.requestSubmit());
-document.querySelector('#exit-confirmation-snapshots')?.addEventListener('change', () => filtersForm.requestSubmit());
 async function refreshStrategyResults() {
     replayRequest?.abort();
     replayRequest = new AbortController();
@@ -1426,6 +1434,10 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
             selectTopRankedResultInput.value = '1';
         }
         if (control.id === 'exit-config') {
+            const selectedOption = control.selectedOptions[0];
+            if (selectedOption?.dataset.confirmationSnapshots) {
+                document.querySelector('#exit-confirmation-snapshots').value = selectedOption.dataset.confirmationSnapshots;
+            }
             updateMartingaleInitialNotional();
             refreshStrategyResults();
             return;
@@ -1465,7 +1477,11 @@ function renderEntryOptions(entries, selected) {
     for (const item of entries) {
         const option = document.createElement('option');
         option.value = item.id;
-        option.textContent = item.label;
+        const normalizedLabel = item.label
+            .replaceAll('от стартового баланса', 'от баланса')
+            .replaceAll('в пределах окна', 'внутри');
+        const rankingMatch = normalizedLabel.match(/^(.*) · лучший результат (.+)$/);
+        option.textContent = rankingMatch ? `${rankingMatch[2]} (${rankingMatch[1]})` : normalizedLabel;
         if (item.id === selected) option.selected = true;
         entryConfigSelect.appendChild(option);
     }
@@ -1537,6 +1553,7 @@ martingaleApplyButton.addEventListener('click', () => {
     writeAppliedMartingaleSettings(readMartingaleSettings());
     handleMartingaleSettingsChange();
 });
+const exitConfirmationSnapshotCounts = [1, 2, 3, 5, 10, 20, 30, 40, 60, 80];
 async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (isResettingSymbolCache) return;
     const params = new URLSearchParams(new FormData(filtersForm));
@@ -1548,102 +1565,168 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         strategyRankingTimer.start('strategy-ranking-elapsed:' + timerParams.toString());
     }
     const requestVersion = exitRankingRequestVersion;
+    const mode = params.get('exit_confirmation_mode') || 'immediate';
+    const selectedSnapshots = Number(params.get('exit_confirmation_snapshots')) || 60;
+    const snapshotCounts = mode === 'immediate' ? [selectedSnapshots] : exitConfirmationSnapshotCounts;
+    const currentExit = preferredExit ?? exitConfigSelect.value;
+    if (entryConfigSelect.options.length === 1 && entryConfigSelect.options[0].value === '') {
+        entryConfigSelect.options[0].textContent = 'Загружаю рейтинг порогов входа (% от баланса)…';
+    }
+    if (exitConfigSelect.options.length === 0) {
+        const loadingOption = document.createElement('option');
+        loadingOption.textContent = 'Загружаю варианты TP/SL…';
+        loadingOption.disabled = true;
+        loadingOption.selected = true;
+        exitConfigSelect.appendChild(loadingOption);
+    }
     try {
-        const response = await fetch(`strategy-ranking.php?${params.toString()}`, {headers:{Accept:'application/json'}});
-        const ranking = await response.json();
+        const responses = await Promise.all(snapshotCounts.map(async snapshots => {
+            const rankingParams = new URLSearchParams(params);
+            rankingParams.set('exit_confirmation_snapshots', String(snapshots));
+            const response = await fetch(`strategy-ranking.php?${rankingParams.toString()}`, {headers:{Accept:'application/json'}});
+            const ranking = await response.json();
+            return {snapshots, ranking, httpOk: response.ok};
+        }));
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
-        if (ranking.status === 'pending') {
+
+        const pending = responses.filter(({ranking}) => ranking.status === 'pending');
+        const elapsedSeconds = Math.max(0, ...responses.map(({ranking}) => Number(ranking.elapsed_seconds) || 0));
+        if (pending.length) {
             strategyRankingTimer.markPending();
-            strategyRankingTimer.setLabel(ranking.queued
-                ? 'В очереди · всего прошло'
-                : 'Расчёт выполняется · всего прошло');
+            strategyRankingTimer.setLabel(pending.some(({ranking}) => ranking.queued)
+                ? `В очереди · наборов интервалов готово ${responses.length - pending.length} из ${responses.length}`
+                : `Расчёт · наборов интервалов готово ${responses.length - pending.length} из ${responses.length}`);
             strategyRankingTimer.start();
         } else {
-            const completedStatus = ['ready', 'insufficient_data', 'entry_unavailable'].includes(ranking.status);
+            const completedStatus = responses.every(({ranking}) => ['ready', 'insufficient_data', 'entry_unavailable'].includes(ranking.status));
             strategyRankingTimer.finish('Общее время до ответа', {
                 useStored: completedStatus,
-                fallbackElapsedMs: Number(ranking.elapsed_seconds) * 1000,
+                fallbackElapsedMs: elapsedSeconds * 1000,
                 persist: completedStatus,
             });
         }
-        if (ranking.status === 'insufficient_data') {
+
+        const entriesById = new Map();
+        for (const {ranking} of responses) {
+            for (const entry of ranking.entries || []) {
+                const existing = entriesById.get(entry.id);
+                if (!existing || Number(entry.best_pnl) > Number(existing.best_pnl)) entriesById.set(entry.id, entry);
+            }
+        }
+        const rankedEntries = [...entriesById.values()].sort((left, right) => Number(right.best_pnl) - Number(left.best_pnl));
+        if (rankedEntries.length) renderEntryOptions(rankedEntries, params.get('entry_config'));
+        else if (entryConfigSelect.options.length === 1 && entryConfigSelect.options[0].value === '') entryConfigSelect.options[0].textContent = 'Рейтинг порогов входа (% от баланса) рассчитывается…';
+
+        if (!pending.length && selectTopRankedResult && rankedEntries[0] && params.get('entry_config') !== rankedEntries[0].id) {
+            entryConfigSelect.value = rankedEntries[0].id;
+            loadExitRanking(null, true);
+            return;
+        }
+
+        const allInsufficient = responses.every(({ranking}) => ranking.status === 'insufficient_data');
+        if (allInsufficient) {
             entryConfigSelect.replaceChildren();
             const entryMessage = document.createElement('option');
-            entryMessage.textContent = ranking.message || 'Для рейтинга нужно минимум три сделки';
+            entryMessage.textContent = responses[0].ranking.message || 'Для рейтинга нужно минимум три сделки';
             entryMessage.disabled = true;
             entryMessage.selected = true;
             entryConfigSelect.appendChild(entryMessage);
-            exitConfigSelect.replaceChildren();
-            const exitMessage = document.createElement('option');
-            exitMessage.textContent = 'Недостаточно сделок для рейтинга';
-            exitMessage.disabled = true;
-            exitMessage.selected = true;
-            exitConfigSelect.appendChild(exitMessage);
+        }
+
+        exitConfigSelect.replaceChildren();
+        const candidates = [];
+        const loadingMessages = [];
+        for (const {snapshots, ranking, httpOk} of responses) {
+            if (ranking.status === 'ready' && Array.isArray(ranking.groups)) {
+                for (const group of ranking.groups) {
+                    for (const item of group.items || []) {
+                        const label = mode === 'immediate'
+                            ? item.label
+                            : item.label
+                                .replace(/ · TP (?:через \d+ (?:снимков|интервалов)|сразу) \/ SL (?:через \d+ (?:снимков|интервалов)|сразу)/, '')
+                                .replaceAll('от стартового баланса', 'от баланса')
+                                + ` · ${snapshots} интервалов`;
+                        candidates.push({id: item.id, snapshots, pnl: Number(item.pnl) || 0, label});
+                    }
+                }
+            } else {
+                loadingMessages.push(ranking.status === 'pending'
+                    ? `Загружаю варианты… ${ranking.queued ? 'в очереди' : `${ranking.progress || 0}%`}`
+                    : ranking.status === 'entry_unavailable'
+                        ? ranking.message || 'Нет вариантов для этого порога'
+                        : ranking.status === 'insufficient_data'
+                            ? ranking.message || 'Недостаточно сделок'
+                            : ranking.message || (!httpOk ? 'Не удалось загрузить рейтинг' : 'Рейтинг временно недоступен'));
+            }
+        }
+        candidates.sort((left, right) => right.pnl - left.pnl || left.id.localeCompare(right.id));
+        for (const candidate of candidates) {
+            const option = document.createElement('option');
+            option.value = candidate.id;
+            option.dataset.confirmationSnapshots = String(candidate.snapshots);
+            option.textContent = candidate.label;
+            exitConfigSelect.appendChild(option);
+        }
+        if (!candidates.length && loadingMessages.length) {
+            const option = document.createElement('option');
+            option.disabled = true;
+            option.selected = true;
+            option.textContent = loadingMessages[0];
+            exitConfigSelect.appendChild(option);
+        }
+        if (![...exitConfigSelect.options].some(option => option.selected)) {
+            exitConfigSelect.options[0]?.setAttribute('selected', 'selected');
+            if (exitConfigSelect.options[0]) exitConfigSelect.options[0].selected = true;
+        }
+
+        let selectedCandidate = null;
+        if (selectTopRankedResult && candidates.length) {
+            selectedCandidate = candidates.reduce((best, candidate) => candidate.pnl > best.pnl ? candidate : best);
+        } else {
+            selectedCandidate = candidates.find(candidate => candidate.id === currentExit && candidate.snapshots === selectedSnapshots)
+                || candidates.find(candidate => candidate.id === currentExit && mode === 'immediate');
+        }
+        if (!selectedCandidate) selectedCandidate = candidates[0] || null;
+        if (selectedCandidate) {
+            const selectedOption = [...exitConfigSelect.options].find(option => option.value === selectedCandidate.id
+                && Number(option.dataset.confirmationSnapshots) === selectedCandidate.snapshots);
+            if (selectedOption) selectedOption.selected = true;
+            document.querySelector('#exit-confirmation-snapshots').value = String(selectedCandidate.snapshots);
+        }
+
+        if (allInsufficient || (!pending.length && responses.every(({ranking}) => ranking.status === 'entry_unavailable'))) {
+            if (selectTopRankedResult && rankedEntries[0]) {
+                entryConfigSelect.value = rankedEntries[0].id;
+                loadExitRanking(null, true);
+                return;
+            }
             if (refreshAfterExitRanking) {
                 refreshAfterExitRanking = false;
                 void refreshStrategyResults();
             }
             return;
         }
-        renderEntryOptions(ranking.entries, params.get('entry_config'));
-        if (ranking.status === 'entry_unavailable') {
-            if (selectTopRankedResult && ranking.entries?.[0]) {
-                entryConfigSelect.value = ranking.entries[0].id;
-                loadExitRanking(null, true);
-                return;
-            }
-            if (entryConfigSelect.value !== params.get('entry_config')) filtersForm.requestSubmit();
-            else if (refreshAfterExitRanking) {
-                refreshAfterExitRanking = false;
-                void refreshStrategyResults();
-            }
-            return;
-        }
-        if (ranking.status === 'pending') {
-            const progressLabel = ranking.queued ? 'в очереди' : `${ranking.progress || 0}%`;
-            if (!ranking.entries?.length) entryConfigSelect.options[0].textContent = `Рейтинг порогов и выходов… ${progressLabel}`;
-            exitConfigSelect.options[0].textContent = `Рейтинг TakeProfit & StopLoss… ${progressLabel}`;
+        if (pending.length) {
             window.setTimeout(() => {
                 if (requestVersion === exitRankingRequestVersion && !isResettingSymbolCache) loadExitRanking(null, true);
             }, 1500);
             return;
         }
-        if (ranking.status !== 'ready') {
-            exitConfigSelect.options[0].textContent = ranking.message || 'Рейтинг временно недоступен';
+        if (!candidates.length) {
+            if (!exitConfigSelect.options.length) {
+                const exitMessage = document.createElement('option');
+                exitMessage.textContent = 'Не удалось загрузить рейтинг вариантов';
+                exitMessage.disabled = true;
+                exitMessage.selected = true;
+                exitConfigSelect.appendChild(exitMessage);
+            }
             if (refreshAfterExitRanking) {
                 refreshAfterExitRanking = false;
                 void refreshStrategyResults();
             }
             return;
         }
-        if (selectTopRankedResult && ranking.entries?.[0] && params.get('entry_config') !== ranking.entries[0].id) {
-            entryConfigSelect.value = ranking.entries[0].id;
-            loadExitRanking(null, true);
-            return;
-        }
-        const selected = selectTopRankedResult
-            ? ranking.groups?.[0]?.items?.[0]?.id
-            : preferredExit ?? exitConfigSelect.value;
-        exitConfigSelect.replaceChildren();
-        for (const group of ranking.groups) {
-            const optgroup = document.createElement('optgroup');
-            optgroup.label = group.label;
-            for (const item of group.items) {
-                const option = document.createElement('option');
-                option.value = item.id;
-                option.textContent = item.label;
-                if (item.id === selected) option.selected = true;
-                optgroup.appendChild(option);
-            }
-            exitConfigSelect.appendChild(optgroup);
-        }
-        if (![...exitConfigSelect.options].some(option => option.value === selected)) {
-            const fallback = exitConfigSelect.options[0];
-            if (fallback) {
-                fallback.selected = true;
-                if (selected && fallback.value !== selected && !refreshAfterExitRanking) filtersForm.requestSubmit();
-            }
-        }
+
         const appliedAutomaticSelection = selectTopRankedResult;
         if (selectTopRankedResult) {
             selectTopRankedResult = false;
@@ -1661,7 +1744,12 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
     } catch (_) {
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
         strategyRankingTimer.finish('Общее время до ошибки', {persist: false});
-        exitConfigSelect.options[0].textContent = 'Не удалось загрузить рейтинг';
+        exitConfigSelect.replaceChildren();
+        const errorOption = document.createElement('option');
+        errorOption.textContent = 'Не удалось загрузить рейтинг';
+        errorOption.disabled = true;
+        errorOption.selected = true;
+        exitConfigSelect.appendChild(errorOption);
         if (refreshAfterExitRanking) {
             refreshAfterExitRanking = false;
             void refreshStrategyResults();

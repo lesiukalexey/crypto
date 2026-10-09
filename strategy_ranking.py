@@ -351,9 +351,9 @@ def make_signal_profiles(
 def build_entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | None, int | None, str | None, bool | None]]:
     specs: list[tuple[str, str, int | None, int | None, str | None, bool | None]] = []
     labels = {
-        "both": lambda amount: f"±{amount:.1f}% от стартового баланса",
-        "long": lambda amount: f"+{amount:.1f}% от стартового баланса при росте",
-        "short": lambda amount: f"−{amount:.1f}% от стартового баланса при падении",
+        "both": lambda amount: f"±{amount:.1f}% от баланса",
+        "long": lambda amount: f"+{amount:.1f}% от баланса при росте",
+        "short": lambda amount: f"−{amount:.1f}% от баланса при падении",
     }
     for family in ("both", "long", "short"):
         profile = ranking["entry_profiles"][family]
@@ -368,7 +368,7 @@ def build_entry_specs(ranking: dict[str, Any]) -> list[tuple[str, str, int | Non
                 signal_family = signal_profile_family(family, ranking.get("entry_signal_mode", "exact"), ranking.get("entry_direction_mode", "follow"))
                 specs.append((
                     f"{prefix}:{suffix}",
-                    f"{labels[family](threshold / 10)} за {window} снимков" + (" · в пределах окна" if ranking.get("entry_signal_mode", "exact") == "within" else "") + (" · против движения" if ranking.get("entry_direction_mode", "follow") == "reverse" else ""),
+                    f"{labels[family](threshold / 10)} за {window} снимков" + (" · внутри" if ranking.get("entry_signal_mode", "exact") == "within" else "") + (" · против движения" if ranking.get("entry_direction_mode", "follow") == "reverse" else ""),
                     int(window),
                     int(threshold),
                     signal_family,
@@ -1181,7 +1181,7 @@ def main() -> int:
                         for pnl, ranked_id, display, trade_count, chain_count in best:
                             ranked_label = display + (f" · {policy_label}" if policy_label else "")
                             if take_confirmation_snapshots or stop_confirmation_snapshots:
-                                ranked_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' снимков' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' снимков' if stop_confirmation_snapshots else 'сразу'}"
+                                ranked_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' интервалов' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' интервалов' if stop_confirmation_snapshots else 'сразу'}"
                             sample_label = (
                                 f"{trade_count} ордеров · {chain_count} независимых цепочек"
                                 if args.martingale_mode != "none" else f"{trade_count} сделок"
