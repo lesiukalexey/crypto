@@ -43,7 +43,7 @@ try {
     $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
     $martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');
     $martingaleAttempts = (int) ($_GET['martingale_attempts'] ?? 3);
-    if (!in_array($martingaleMode, ['none', 'simple', 'reverse'], true)
+    if (!in_array($martingaleMode, ['none', 'simple', 'reverse', 'simple_profit', 'reverse_profit'], true)
         || !in_array($martingaleTiming, ['immediate', 'rules'], true)
         || $martingaleAttempts < 2 || $martingaleAttempts > 10) {
         respondCachedSymbols(['status' => 'error', 'message' => 'Некорректные параметры мартингейла.'], 400);
@@ -72,14 +72,18 @@ try {
         $pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation,
     );
     $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
-    $minTrades = $saveMode ? 2 : 1;
+    $minTrades = $saveMode ? 3 : 1;
     $symbols = [];
     foreach ($snapshotIds as $symbol => $_maxId) {
-        $key = hash('sha256', json_encode([
-            'ranking-v26-short-targets', $generation, $config['category'], $symbol,
+        $keyParts = [
+            'ranking-v28-deduplicated-exits', $generation, $config['category'], $symbol,
             $startValue, $endValue, $balance, $fee, $minTrades, $ranking,
             $martingaleMode, $martingaleTiming, $martingaleAttempts,
-        ], JSON_THROW_ON_ERROR));
+        ];
+        if ($martingaleMode !== 'none') $keyParts[] = 'martingale-negative-stop-v1';
+        $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $generation);
+        if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
+        $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
         $resultPath = $cacheDir . '/' . $key . '.json';
         if (!is_file($resultPath)) continue;
         $result = json_decode((string) file_get_contents($resultPath), true);

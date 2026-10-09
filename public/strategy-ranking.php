@@ -27,13 +27,13 @@ try {
     $endValue = (string) ($_GET['end_day'] ?? $startValue);
     $entryConfig = (string) ($_GET['entry_config'] ?? 'entry:10:1');
     $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
-    $minTrades = $saveMode ? 2 : 1;
+    $minTrades = $saveMode ? 3 : 1;
     $balance = (string) ($_GET['balance'] ?? '10');
     $fee = (string) ($_GET['fee'] ?? '0.06');
     $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
     $martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');
     $martingaleAttempts = (int) ($_GET['martingale_attempts'] ?? 3);
-    if (!in_array($martingaleMode, ['none', 'simple', 'reverse'], true)
+    if (!in_array($martingaleMode, ['none', 'simple', 'reverse', 'simple_profit', 'reverse_profit'], true)
         || !in_array($martingaleTiming, ['immediate', 'rules'], true)
         || $martingaleAttempts < 2 || $martingaleAttempts > 10) {
         respond(['status' => 'error', 'message' => 'Некорректные параметры мартингейла.'], 400);
@@ -96,7 +96,11 @@ try {
     }
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $maxId = (int) ($snapshotIds[$symbol] ?? 0);
-    $key = hash('sha256', json_encode(['ranking-v26-short-targets', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts], JSON_THROW_ON_ERROR));
+    $keyParts = ['ranking-v28-deduplicated-exits', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
+    if ($martingaleMode !== 'none') $keyParts[] = 'martingale-negative-stop-v1';
+    $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration);
+    if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
+    $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/' . $key . '.json';
     $statusPath = $cacheDir . '/' . $key . '.status.json';
     $profilePath = $cacheDir . '/' . $key . '.' . $entryConfig . '.json';
@@ -142,6 +146,7 @@ try {
         fclose($workerLockProbe);
     }
     $isPending = is_array($status) && ($status['status'] ?? '') === 'pending';
+    $retryCancelled = (string) ($_GET['retry_cancelled'] ?? '') === '1';
     if (is_array($status) && ($status['status'] ?? '') === 'ready' && $entries !== []) {
         $entryAvailable = false;
         foreach ($entries as $entry) {
@@ -152,6 +157,7 @@ try {
         }
     }
     $stale = !is_array($status)
+        || ($retryCancelled && ($status['status'] ?? '') === 'cancelled')
         || ($isPending ? !$workerBusy : ($statusAge > 1800 || (($status['status'] ?? '') === 'error' && $statusAge > 300)));
     if ($stale) {
         $lock = fopen($cacheDir . '/' . $key . '.lock', 'c');

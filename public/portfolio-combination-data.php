@@ -42,12 +42,12 @@ try {
     $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
     $martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');
     $martingaleAttempts = filter_var($_GET['martingale_attempts'] ?? 3, FILTER_VALIDATE_INT);
-    if (!in_array($martingaleMode, ['none', 'simple', 'reverse'], true)
+    if (!in_array($martingaleMode, ['none', 'simple', 'reverse', 'simple_profit', 'reverse_profit'], true)
         || !in_array($martingaleTiming, ['immediate', 'rules'], true)
         || $martingaleAttempts === false || $martingaleAttempts < 2 || $martingaleAttempts > 10) {
         respond(['status' => 'error', 'message' => 'Некорректные параметры мартингейла.'], 400);
     }
-    $minTrades = (string) ($_GET['save_mode'] ?? '1') !== '0' ? 2 : 1;
+    $minTrades = (string) ($_GET['save_mode'] ?? '1') !== '0' ? 3 : 1;
     $entryConfig = (string) ($_GET['entry_config'] ?? '');
     if (rankingEntryConfig($entryConfig, $ranking['worker'], $entryDefaults['immediate_directions'] ?? []) === null) {
         respond(['status' => 'error', 'message' => 'Неизвестный порог входа.'], 400);
@@ -105,11 +105,13 @@ try {
     }
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
-    $key = hash('sha256', json_encode([
-        'portfolio-combination-details-v6-short-targets', $generation, hash('sha256', $snapshotJson), $config['category'],
+    $keyParts = [
+        'portfolio-combination-details-v7-canonical-ledger', $generation, hash('sha256', $snapshotJson), $config['category'],
         $startValue, $endValue, $balance, $fee, $minTrades, $entryConfig, $originalExitConfig,
         $ranking['worker'], $martingaleMode, $martingaleTiming, $martingaleAttempts,
-    ], JSON_THROW_ON_ERROR));
+    ];
+    if ($martingaleMode !== 'none') $keyParts[] = 'martingale-negative-stop-v1';
+    $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/combination-' . $key . '.json';
     $statusPath = $cacheDir . '/combination-' . $key . '.status.json';
     if (is_file($resultPath)) {

@@ -25,15 +25,25 @@ import pymysql
 from app import load_config
 from database import connect_mysql
 from martingale import martingale_base_notional
-from ranking_checkpoints import STATE_DTYPE, daily_quote_boundaries, dated_state_checkpoint_path, load_best_state_checkpoint, write_state_checkpoint
+from ranking_checkpoints import STATE_DTYPE, daily_quote_boundaries, dated_state_checkpoint_path, has_dated_state_checkpoint, load_best_state_checkpoint, load_exact_state_checkpoint, write_state_checkpoint
 
 TOP_PER_GROUP = 500
 KYIV = ZoneInfo("Europe/Kyiv")
 EXIT_PROFILE_CONFIG = json.loads(Path(__file__).with_name("exit_profiles.json").read_text(encoding="utf-8"))
 
 
-def exit_values(family: str, profiles: dict[str, Any] | None = None) -> range:
+def exit_values(family: str, profiles: dict[str, Any] | None = None) -> range | list[int]:
     profile = (profiles or EXIT_PROFILE_CONFIG)[family]
+    if family in ("fixed_tp", "fixed_sl") and isinstance(profile.get("values_basis_points"), list):
+        return sorted({int(value) for value in profile["values_basis_points"]})
+    if isinstance(profile.get("segments"), list):
+        values: set[int] = set()
+        for segment in profile["segments"]:
+            start = int(segment["from"])
+            end = int(segment["to"])
+            step = int(segment["step"])
+            values.update(range(start, end + 1, step))
+        return sorted(values)
     start = profile.get("from", profile.get("min_tenths_percent"))
     end = profile.get("to", profile.get("max_tenths_percent"))
     step = profile.get("step", profile.get("step_tenths_percent"))
@@ -319,7 +329,7 @@ def simulate(
     if martingale_mode != "none":
         from numba_simulation import simulate_martingale_numba
 
-        if martingale_mode not in ("simple", "reverse") or martingale_timing not in ("immediate", "rules") or not 2 <= martingale_attempts <= 10:
+        if martingale_mode not in ("simple", "reverse", "simple_profit", "reverse_profit") or martingale_timing not in ("immediate", "rules") or not 2 <= martingale_attempts <= 10:
             raise ValueError("Invalid martingale options")
         if martingale_target_policy not in ("scaled", "fixed"):
             raise ValueError("Invalid martingale exit target policy")
@@ -329,11 +339,11 @@ def simulate(
             bid_tree.size, bid_tree.length, indexes, shorts,
             start_balance, fee_rate,
             np.nan if take_profit_amount is None else take_profit_amount,
-            np.nan if stop_loss_amount is None else stop_loss_amount,
+            np.nan if stop_loss_amount is None else -stop_loss_amount,
             martingale_base_notional(
                 start_balance, fee_rate, stop_loss_amount, martingale_mode, martingale_attempts, martingale_target_policy,
             ),
-            0 if martingale_mode == "simple" else 1,
+            {"simple": 0, "reverse": 1, "simple_profit": 2, "reverse_profit": 3}[martingale_mode],
             0 if martingale_timing == "immediate" else 1,
             martingale_attempts,
             0 if martingale_target_policy == "scaled" else 1,
@@ -481,6 +491,25 @@ def finalize_standard_checkpoints(
     return pnls, trade_counts
 
 
+def standard_range_results(
+    quotes: QuoteArrays,
+    start_balance: float,
+    fee_rate: float,
+    start_states: np.ndarray | None,
+    end_states: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Aggregate canonical closed trades by close day and mark one end-open trade."""
+    end_pnls, end_trade_counts = finalize_standard_checkpoints(
+        quotes, start_balance, fee_rate, end_states,
+    )
+    if start_states is None:
+        return end_pnls, end_trade_counts
+    pnl_before_range = start_states["balance"] - start_balance
+    pnls = end_pnls - pnl_before_range
+    trade_counts = end_trade_counts - start_states["closed_trades"].astype(np.int64)
+    return pnls, trade_counts
+
+
 
 def martingale_target_policies(mode: str, stop_loss: float | None) -> list[tuple[str, str]]:
     if mode == "none" or stop_loss is None:
@@ -497,6 +526,32 @@ def saved_standard_group_ids(exit_profiles: dict[str, Any]) -> list[list[str]]:
         [f"loss:{loss}" for loss in exit_values("loss", exit_profiles)],
         [f"profit:{target}" for target in exit_values("profit", exit_profiles)],
     ]
+
+
+def deduplicate_ranked_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the highest-ranked exit for each displayed trade-count/PnL pair."""
+    flattened = [
+        (float(item["pnl"]), str(item["id"]), group_index, item_index, int(item["trade_count"]))
+        for group_index, group in enumerate(groups)
+        for item_index, item in enumerate(group["items"])
+        if "pnl" in item and "trade_count" in item
+    ]
+    flattened.sort(key=lambda row: (-row[0], row[1]))
+    seen: set[tuple[int, str]] = set()
+    keep: set[tuple[int, int]] = set()
+    for pnl, _, group_index, item_index, trade_count in flattened:
+        identity = (trade_count, f"{pnl:+.4f}")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        keep.add((group_index, item_index))
+    result = []
+    for group_index, group in enumerate(groups):
+        items = [item for item_index, item in enumerate(group["items"])
+                 if (group_index, item_index) in keep]
+        label = re.sub(r"топ \d+ из (\d+)$", f"топ {len(items)} из \\1", group["label"])
+        result.append({**group, "label": label, "items": items})
+    return result
 
 
 def rank_saved_standard_results(
@@ -525,7 +580,7 @@ def rank_saved_standard_results(
                 value = int(exit_id.rsplit(":", 1)[1])
                 if family == "fixed":
                     target = int(exit_id.split(":", 2)[1])
-                    display = f"TP {target / 10:.1f}% / SL {value / 10:.1f}% от стартового баланса"
+                    display = f"TP {target / 100:.2f}% / SL {value / 100:.2f}% от стартового баланса"
                 elif family == "loss":
                     display = f"Stop Loss {value / 10:.1f}% от стартового баланса · без фиксации прибыли"
                 else:
@@ -534,13 +589,15 @@ def rank_saved_standard_results(
                 items.append({
                     "id": exit_id,
                     "label": f"{display} · {int(group_trades[index])} сделок · итог {pnl:+.4f} USDT",
+                    "pnl": pnl,
+                    "trade_count": int(group_trades[index]),
                 })
         groups.append({
             "label": label + f" · топ {min(TOP_PER_GROUP, len(items))} из {candidate_count}",
             "items": items,
         })
         offset += candidate_count
-    return groups, profile_best
+    return deduplicate_ranked_groups(groups), profile_best
 
 
 def main() -> int:
@@ -551,11 +608,11 @@ def main() -> int:
     parser.add_argument("--end-day", required=True)
     parser.add_argument("--balance", required=True, type=float)
     parser.add_argument("--fee-percent", required=True, type=float)
-    parser.add_argument("--min-trades", required=True, type=int, choices=(1, 2))
+    parser.add_argument("--min-trades", required=True, type=int, choices=(1, 2, 3))
     parser.add_argument("--max-id", required=True, type=int)
     parser.add_argument("--cache-dir", required=True, type=Path)
     parser.add_argument("--ranking-params", required=True)
-    parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse"), default="none")
+    parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse", "simple_profit", "reverse_profit"), default="none")
     parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
     args = parser.parse_args()
@@ -599,25 +656,49 @@ def main() -> int:
         config = load_config(Path(__file__).with_name("config.json"))
         connection = connect_mysql(config["mysql"])
         try:
-            start_local = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV)
             end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
-            start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
             end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+            start_local = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV)
+            start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
             with connection.cursor(pymysql.cursors.DictCursor) as cursor:
-                cursor.execute(
-                    """SELECT received_at_utc, bid_price, ask_price, last_price
-                       FROM quote_snapshots
-                       WHERE category = %s AND symbol = %s AND id <= %s
-                         AND received_at_utc >= %s AND received_at_utc < %s
-                       ORDER BY received_at_utc, id""",
-                    (config["category"], args.symbol, args.max_id, start_utc, end_utc),
-                )
+                if args.martingale_mode == "none":
+                    cursor.execute(
+                        """SELECT received_at_utc, bid_price, ask_price, last_price
+                           FROM quote_snapshots
+                           WHERE category = %s AND symbol = %s AND id <= %s
+                             AND received_at_utc < %s
+                           ORDER BY received_at_utc, id""",
+                        (config["category"], args.symbol, args.max_id, end_utc),
+                    )
+                else:
+                    cursor.execute(
+                        """SELECT received_at_utc, bid_price, ask_price, last_price
+                           FROM quote_snapshots
+                           WHERE category = %s AND symbol = %s AND id <= %s
+                             AND received_at_utc >= %s AND received_at_utc < %s
+                           ORDER BY received_at_utc, id""",
+                        (config["category"], args.symbol, args.max_id, start_utc, end_utc),
+                    )
                 rows = cursor.fetchall()
         finally:
             connection.close()
         quotes = QuoteArrays.from_rows(rows)
         del rows
-        all_day_boundaries = daily_quote_boundaries(quotes.timestamps, args.start_day, args.end_day)
+        source_day = (
+            datetime.fromtimestamp(float(quotes.timestamps[0]), timezone.utc)
+            .astimezone(KYIV).date().isoformat()
+            if len(quotes) else args.end_day
+        )
+        all_day_boundaries = [
+            (day, count) for day, count in daily_quote_boundaries(
+                quotes.timestamps, source_day, args.end_day,
+            ) if count > 0
+        ]
+        previous_range_day = (date.fromisoformat(args.start_day) - timedelta(days=1)).isoformat()
+        range_start_day = next((day for day, count in reversed(all_day_boundaries)
+            if day <= previous_range_day and count > 0), None)
+        range_start_quote_count = next((count for day, count in all_day_boundaries
+            if day == range_start_day), 0) if range_start_day is not None else 0
 
         groups_specs = [
             ("fixed", "Автоматические · фиксированные Take Profit и Stop Loss", len(exit_values("fixed_tp", exit_profiles)) * len(exit_values("fixed_sl", exit_profiles))),
@@ -684,10 +765,12 @@ def main() -> int:
                 previous_quote_count = 0
                 previous_checkpoint_day = None
                 boundaries_to_capture: list[tuple[str, int]] = []
+                range_start_states = None
+                range_start_in_capture = False
                 if args.martingale_mode == "none":
                     checkpoint_path = dated_state_checkpoint_path(checkpoint_state, args.symbol, entry_id, args.end_day)
                     first_missing_day = next((index for index, (day, _) in enumerate(all_day_boundaries)
-                        if not dated_state_checkpoint_path(checkpoint_state, args.symbol, entry_id, day).is_file()), None)
+                        if not has_dated_state_checkpoint(checkpoint_state, args.symbol, entry_id, day)), None)
                     resume_until_day = (
                         all_day_boundaries[first_missing_day - 1][0]
                         if first_missing_day is not None and first_missing_day > 0
@@ -699,9 +782,21 @@ def main() -> int:
                     ) if resume_until_day is not None else None
                     if checkpoint is not None:
                         previous_states, previous_quote_count, previous_checkpoint_day = checkpoint
+                    if range_start_day is not None:
+                        range_start_states = load_exact_state_checkpoint(
+                            checkpoint_state, args.symbol, entry_id, range_start_day,
+                            quotes, total_per_entry, range_start_quote_count,
+                        )
                     if first_missing_day is None and checkpoint is not None and previous_quote_count == len(quotes):
-                        saved_pnls, saved_trades = finalize_standard_checkpoints(
-                            quotes, args.balance, fee_rate, previous_states,
+                        if range_start_day is not None and range_start_states is None:
+                            range_start_states = load_exact_state_checkpoint(
+                                checkpoint_state, args.symbol, entry_id, range_start_day,
+                                quotes, total_per_entry, range_start_quote_count,
+                            )
+                            if range_start_states is None:
+                                raise RuntimeError(f"Missing canonical range-start checkpoint for {range_start_day}")
+                        saved_pnls, saved_trades = standard_range_results(
+                            quotes, args.balance, fee_rate, range_start_states, previous_states,
                         )
                         groups, best_pnl = rank_saved_standard_results(
                             saved_pnls, saved_trades, args.min_trades,
@@ -732,6 +827,9 @@ def main() -> int:
                             or (day == previous_checkpoint_day and count > previous_quote_count)
                         )
                     ]
+                    range_start_in_capture = any(
+                        day == range_start_day for day, _ in boundaries_to_capture
+                    )
 
                 profile_best = [-math.inf]
                 groups: list[dict[str, Any]] = []
@@ -762,6 +860,7 @@ def main() -> int:
                         nonlocal completed
                         for target_policy, policy_label in martingale_target_policies(args.martingale_mode, loss):
                             if args.martingale_mode == "none":
+                                candidate_index = len(next_states)
                                 previous_state = (
                                     previous_states[len(next_states)]
                                     if previous_states is not None else (args.balance, 0, 0, -1, False)
@@ -783,6 +882,21 @@ def main() -> int:
                                         args.balance, fee_rate, target, loss, previous_state,
                                     )
                                 next_states.append(next_state)
+                                if range_start_day is not None:
+                                    if range_start_states is not None:
+                                        start_state = range_start_states[candidate_index]
+                                    elif range_start_in_capture:
+                                        start_boundary_index = next(
+                                            index for index, (day, _) in enumerate(boundaries_to_capture)
+                                            if day == range_start_day
+                                        )
+                                        start_state = day_states[start_boundary_index]
+                                    else:
+                                        raise RuntimeError(
+                                            f"Missing canonical checkpoint for range start {range_start_day}"
+                                        )
+                                    pnl -= float(start_state[0]) - args.balance
+                                    trade_count -= int(start_state[2])
                             else:
                                 pnl, trade_count = simulate(
                                     quotes, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
@@ -796,7 +910,7 @@ def main() -> int:
                                 enters_top = len(best) < TOP_PER_GROUP or (pnl, ranked_id) > (best[0][0], best[0][1])
                                 if enters_top:
                                     if display_kind == "fixed":
-                                        display = f"TP {target_tenths_percent / 10:.1f}% / SL {loss_tenths_percent / 10:.1f}% от стартового баланса"
+                                        display = f"TP {target_tenths_percent / 100:.2f}% / SL {loss_tenths_percent / 100:.2f}% от стартового баланса"
                                     elif display_kind == "loss":
                                         display = f"Stop Loss {loss_tenths_percent / 10:.1f}% от стартового баланса · без фиксации прибыли"
                                     else:
@@ -811,9 +925,9 @@ def main() -> int:
                                 progress_reporter.update(status_path, {"status": "pending", "progress": int(completed * 100 / total), "elapsed_seconds": int(time.monotonic() - started)})
 
                     if family == "fixed":
-                        for target_tenths_percent in exit_values("fixed_tp", exit_profiles):
-                            for loss_tenths_percent in exit_values("fixed_sl", exit_profiles):
-                                consider(f"fixed:{target_tenths_percent}:{loss_tenths_percent}", "fixed", target_tenths_percent, loss_tenths_percent, float(target_tenths_percent), float(loss_tenths_percent))
+                        for target_basis_points in exit_values("fixed_tp", exit_profiles):
+                            for loss_basis_points in exit_values("fixed_sl", exit_profiles):
+                                consider(f"fixed:{target_basis_points}:{loss_basis_points}", "fixed", target_basis_points, loss_basis_points, target_basis_points / 10.0, loss_basis_points / 10.0)
                     elif family == "loss":
                         for loss_tenths_percent in exit_values("loss", exit_profiles):
                             consider(f"loss:{loss_tenths_percent}", "loss", None, loss_tenths_percent, None, float(loss_tenths_percent))
@@ -831,11 +945,16 @@ def main() -> int:
                             items.append({
                                 "id": ranked_id,
                                 "label": f"{ranked_label} · {trade_count} сделок · итог {pnl:+.4f} USDT",
+                                "pnl": float(pnl),
+                                "trade_count": int(trade_count),
                             })
                         groups.append({
                             "label": group_label + f" · топ {min(TOP_PER_GROUP, len(best))} из {candidate_count}",
                             "items": items,
                         })
+
+                if args.martingale_mode == "none":
+                    groups = deduplicate_ranked_groups(groups)
 
                 write_json(args.cache_dir / f"{args.cache_key}.{entry_id}.json", {"status": "ready", "groups": groups})
                 if checkpoint_path is not None and len(next_states) == total_per_entry:

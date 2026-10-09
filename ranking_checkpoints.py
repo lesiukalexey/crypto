@@ -48,18 +48,43 @@ def daily_quote_boundaries(timestamps: np.ndarray, start_day: str, end_day: str)
 def state_checkpoint_path(state: dict[str, Any], symbol: str, entry_id: str) -> Path:
     args = state["args"]
     key = hashlib.sha256(json.dumps([
-        "portfolio-closed-state-v4-short-targets",
-        state["category"], symbol, args.start_day, args.balance, args.fee_percent,
-        args.min_trades, args.ranking_params, args.martingale_mode,
+        "portfolio-closed-state-v6-canonical-ledger",
+        state["category"], symbol, args.balance, args.fee_percent,
+        args.ranking_params, args.martingale_mode,
         args.martingale_timing, args.martingale_attempts, entry_id,
     ], separators=(",", ":")).encode("utf-8")).hexdigest()
     return state["checkpoint_root"] / key[:2] / f"{key}.bin.z"
 
 
+def legacy_state_checkpoint_paths(state: dict[str, Any], symbol: str, entry_id: str) -> list[Path]:
+    """Return pre-v6 checkpoint paths, whose identity unnecessarily included SAVE MODE."""
+    args = state["args"]
+    paths = []
+    for min_trades in (1, 2):
+        key = hashlib.sha256(json.dumps([
+            "portfolio-closed-state-v5-canonical-ledger",
+            state["category"], symbol, args.balance, args.fee_percent,
+            min_trades, args.ranking_params, args.martingale_mode,
+            args.martingale_timing, args.martingale_attempts, entry_id,
+        ], separators=(",", ":")).encode("utf-8")).hexdigest()
+        paths.append(state["checkpoint_root"] / key[:2] / f"{key}.bin.z")
+    return paths
+
+
 def dated_state_checkpoint_path(state: dict[str, Any], symbol: str, entry_id: str, end_day: str) -> Path:
-    legacy = state_checkpoint_path(state, symbol, entry_id)
+    base = state_checkpoint_path(state, symbol, entry_id)
     day = date.fromisoformat(end_day).strftime("%Y%m%d")
-    return legacy.with_name(f"{legacy.name.removesuffix('.bin.z')}-{day}.bin.z")
+    return base.with_name(f"{base.name.removesuffix('.bin.z')}-{day}.bin.z")
+
+
+def dated_state_checkpoint_candidates(state: dict[str, Any], symbol: str, entry_id: str, end_day: str) -> list[Path]:
+    day = date.fromisoformat(end_day).strftime("%Y%m%d")
+    bases = [state_checkpoint_path(state, symbol, entry_id), *legacy_state_checkpoint_paths(state, symbol, entry_id)]
+    return [base.with_name(f"{base.name.removesuffix('.bin.z')}-{day}.bin.z") for base in bases]
+
+
+def has_dated_state_checkpoint(state: dict[str, Any], symbol: str, entry_id: str, end_day: str) -> bool:
+    return any(path.is_file() for path in dated_state_checkpoint_candidates(state, symbol, entry_id, end_day))
 
 
 def _checkpoint_end_day(path: Path) -> str | None:
@@ -80,9 +105,11 @@ def load_best_state_checkpoint(
     state: dict[str, Any], symbol: str, entry_id: str,
     end_day: str, quotes: Any, expected_records: int,
 ) -> tuple[np.ndarray, int, str] | None:
-    legacy = state_checkpoint_path(state, symbol, entry_id)
-    stem = legacy.name.removesuffix(".bin.z")
-    candidates = [legacy, *legacy.parent.glob(f"{stem}-*.bin.z")]
+    bases = [state_checkpoint_path(state, symbol, entry_id), *legacy_state_checkpoint_paths(state, symbol, entry_id)]
+    candidates = []
+    for base in bases:
+        stem = base.name.removesuffix(".bin.z")
+        candidates.extend([base, *base.parent.glob(f"{stem}-*.bin.z")])
     dated = []
     for path in candidates:
         checkpoint_day = _checkpoint_end_day(path)
@@ -131,6 +158,21 @@ def load_state_checkpoint(
         return None
 
 
+def load_exact_state_checkpoint(
+    state: dict[str, Any], symbol: str, entry_id: str, day: str,
+    quotes: Any, expected_records: int, expected_quote_count: int | None = None,
+) -> np.ndarray | None:
+    """Load the state at a canonical day boundary, if its quote prefix still matches."""
+    for path in dated_state_checkpoint_candidates(state, symbol, entry_id, day):
+        loaded = load_state_checkpoint(path, day, quotes, expected_records)
+        if loaded is None or _checkpoint_end_day(path) != day:
+            continue
+        if expected_quote_count is not None and loaded[1] != expected_quote_count:
+            continue
+        return loaded[0]
+    return None
+
+
 def write_state_checkpoint(
     path: Path, end_day: str, quotes: Any,
     states: list[tuple[float, int, int, int, bool]] | np.ndarray,
@@ -157,7 +199,7 @@ def write_state_checkpoint(
         for index, state in enumerate(states):
             STATE_RECORD.pack_into(raw_buffer, index * STATE_RECORD.size, *state)
         raw = bytes(raw_buffer)
-    payload = STATE_MAGIC + struct.pack("<I", len(header)) + header + zlib.compress(raw, level=1)
+    payload = STATE_MAGIC + struct.pack("<I", len(header)) + header + zlib.compress(raw, level=6)
     temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         temporary_path.write_bytes(payload)

@@ -38,8 +38,81 @@ function rankingSinglePercent(array $query, string $name, array $default): array
     return $range;
 }
 
+function rankingPercentSegments(array $query, string $name, array $defaults): array
+{
+    $raw = $query[$name . '_ranges'] ?? null;
+    if (!is_array($raw)) {
+        if (array_key_exists($name . '_from', $query)) return [rankingSinglePercent($query, $name, $defaults[0] ?? ['from' => 1, 'to' => 1, 'step' => 1])];
+        return $defaults;
+    }
+    if ($raw === [] || count($raw) > 50) throw new InvalidArgumentException('Укажите от 1 до 50 диапазонов.');
+    $segments = [];
+    foreach ($raw as $segment) {
+        if (!is_array($segment)) throw new InvalidArgumentException('Проверьте диапазоны от / до / шаг.');
+        $segments[] = rankingSinglePercent([
+            $name . '_from' => $segment['from'] ?? null,
+            $name . '_to' => $segment['to'] ?? null,
+            $name . '_step' => $segment['step'] ?? null,
+        ], $name, $defaults[0] ?? ['from' => 1, 'to' => 1, 'step' => 1]);
+    }
+    return $segments;
+}
+
+function rankingFixedSegments(array $query, string $name, array $defaults): array
+{
+    $raw = $query[$name . '_ranges'] ?? null;
+    if (!is_array($raw)) {
+        if (!array_key_exists($name . '_from', $query)) return $defaults;
+        $legacy = rankingSinglePercent($query, $name, $defaults[0] ?? ['from' => 1, 'to' => 500, 'step' => 1]);
+        return [['from' => $legacy['from'] * 10, 'to' => $legacy['to'] * 10, 'step' => $legacy['step'] * 10]];
+    }
+    if ($raw === [] || count($raw) > 50) throw new InvalidArgumentException('Укажите от 1 до 50 диапазонов.');
+    $segments = [];
+    foreach ($raw as $segment) {
+        if (!is_array($segment)) throw new InvalidArgumentException('Проверьте диапазоны от / до / шаг.');
+        $values = [];
+        foreach (['from', 'to', 'step'] as $field) {
+            $value = $segment[$field] ?? null;
+            if (!is_string($value) && !is_int($value) && !is_float($value)) throw new InvalidArgumentException('Укажите числовые границы диапазонов.');
+            $text = (string) $value;
+            if (!preg_match('/^\d+(?:\.\d{1,2})?$/', $text)) throw new InvalidArgumentException('Совместные TP/SL задаются с точностью до 0,01%.');
+            [$whole, $fraction] = array_pad(explode('.', $text, 2), 2, '');
+            $values[$field] = (int) $whole * 100 + (int) str_pad($fraction, 2, '0');
+        }
+        if ($values['from'] < 1 || $values['to'] > 5000 || $values['to'] < $values['from'] || $values['step'] < 1) {
+            throw new InvalidArgumentException('Проверьте диапазон TP/SL: от 0,01% до 50%, шаг не меньше 0,01%.');
+        }
+        $segments[] = $values;
+    }
+    return $segments;
+}
+
+function rankingWindowSegments(array $query, string $name, array $defaults): array
+{
+    $raw = $query[$name . '_ranges'] ?? null;
+    if (!is_array($raw)) {
+        if (!array_key_exists($name . '_from', $query)) return $defaults;
+        return [rankingRange($query[$name . '_from'], $query[$name . '_to'] ?? null, $query[$name . '_step'] ?? null)];
+    }
+    if ($raw === [] || count($raw) > 50) throw new InvalidArgumentException('Укажите от 1 до 50 диапазонов.');
+    $segments = [];
+    foreach ($raw as $segment) {
+        if (!is_array($segment)) throw new InvalidArgumentException('Проверьте диапазоны от / до / шаг.');
+        $segments[] = rankingRange($segment['from'] ?? null, $segment['to'] ?? null, $segment['step'] ?? null);
+    }
+    return $segments;
+}
+
 function rankingValues(array $ranges): array
 {
+    if (isset($ranges['values_basis_points']) && is_array($ranges['values_basis_points'])) {
+        $values = array_values(array_unique(array_map('intval', $ranges['values_basis_points'])));
+        sort($values, SORT_NUMERIC);
+        return $values;
+    }
+    if (isset($ranges['segments']) && is_array($ranges['segments'])) {
+        return rankingValues($ranges['segments']);
+    }
     $values = [];
     foreach ($ranges as $range) {
         for ($value = $range['from']; $value <= $range['to']; $value += $range['step']) $values[$value] = $value;
@@ -62,7 +135,6 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         || rankingValues($windowDefaults) !== array_map('intval', $entryDefaults['snapshot_windows'])) {
         throw new LogicException('Наборы значений входа не совпадают с настройками диапазонов.');
     }
-    $thresholdDefault = ['from' => 1, 'to' => 100, 'step' => 1];
     $thresholdMode = (string) ($query['threshold_mode'] ?? 'default');
     $thresholdSource = 'threshold';
     if ($thresholdMode !== 'range') {
@@ -80,7 +152,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         throw new InvalidArgumentException('Неизвестный режим диапазона.');
     }
     $thresholdRanges = $thresholdMode === 'range'
-        ? [rankingSinglePercent($query, $thresholdSource, $thresholdDefault)]
+        ? rankingPercentSegments($query, $thresholdSource, $thresholdDefaults)
         : $thresholdDefaults;
     $windowDefault = ['from' => 5, 'to' => 40, 'step' => 5];
     $windowMode = (string) ($query['window_mode'] ?? 'default');
@@ -100,7 +172,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         throw new InvalidArgumentException('Неизвестный режим диапазона.');
     }
     $windowRanges = $windowMode === 'range'
-        ? [rankingRange($query[$windowSource . '_from'] ?? $windowDefault['from'], $query[$windowSource . '_to'] ?? $windowDefault['to'], $query[$windowSource . '_step'] ?? $windowDefault['step'])]
+        ? rankingWindowSegments($query, $windowSource, $windowDefaults)
         : $windowDefaults;
     $families = ['both', 'long', 'short'];
     $ranges = [];
@@ -121,24 +193,83 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
     $ranges['window'] = $ranges['both_window'];
     $modes['threshold'] = $modes['both_threshold'];
     $modes['window'] = $modes['both_window'];
+    // Old URLs can contain stale custom range values from previous UI builds.
+    // They must not silently override the configured segmented grid.
+    $fixedGridMode = (string) ($query['fixed_grid_mode'] ?? 'default');
+    if (!in_array($fixedGridMode, ['default', 'custom'], true)) {
+        throw new InvalidArgumentException('Неизвестный режим сетки совместного расчёта TP и SL.');
+    }
+    // Older page state could submit "custom" while its hidden inputs were
+    // disabled by the browser. Treat that incomplete state as the configured
+    // stepped grid instead of silently expanding to 0.1%–50% by 0.1%.
+    if ($fixedGridMode === 'custom'
+        && ((!isset($query['fixed_tp_ranges']) && !array_key_exists('fixed_tp_from', $query))
+            || (!isset($query['fixed_sl_ranges']) && !array_key_exists('fixed_sl_from', $query)))) {
+        $fixedGridMode = 'default';
+    }
+    $fixedValues = [];
+    foreach ($exitDefaults['fixed']['segments_basis_points'] ?? [] as $segment) {
+        $from = (int) ($segment['from'] ?? 0);
+        $to = (int) ($segment['to'] ?? 0);
+        $step = (int) ($segment['step'] ?? 0);
+        if ($from < 1 || $to < $from || $step < 1) throw new LogicException('Некорректная сетка совместного расчёта TP/SL.');
+        for ($value = $from; $value <= $to; $value += $step) $fixedValues[$value] = $value;
+        $fixedValues[$to] = $to;
+    }
+    $fixedValues = array_values($fixedValues);
+    sort($fixedValues, SORT_NUMERIC);
+    $modes['fixed_grid'] = $fixedGridMode;
     foreach (['fixed_tp' => 'fixed', 'fixed_sl' => 'fixed', 'profit' => 'profit', 'loss' => 'loss'] as $name => $family) {
         $profile = $exitDefaults[$family];
-        $default = ['from' => (int) $profile['min_tenths_percent'], 'to' => (int) $profile['max_tenths_percent'], 'step' => (int) $profile['step_tenths_percent']];
-        $ranges[$name] = rankingSinglePercent($query, $name, $default);
+        if (($name === 'fixed_tp' || $name === 'fixed_sl') && $fixedGridMode === 'default') {
+            $segments = array_map(static fn (array $segment): array => [
+                'from' => (int) $segment['from'],
+                'to' => (int) $segment['to'],
+                'step' => (int) $segment['step'],
+            ], $exitDefaults['fixed']['segments_basis_points'] ?? []);
+            $ranges[$name] = [
+                'from' => 1, 'to' => 500, 'step' => 1,
+                'values_basis_points' => $fixedValues,
+                'segments' => $segments,
+            ];
+            continue;
+        }
+        $defaultSegments = $family === 'fixed'
+            ? array_map(static fn (array $segment): array => [
+                'from' => (int) $segment['from'],
+                'to' => (int) $segment['to'],
+                'step' => (int) $segment['step'],
+            ], $exitDefaults['fixed']['segments_basis_points'] ?? [])
+            : [[
+                'from' => (int) $profile['min_tenths_percent'],
+                'to' => (int) $profile['max_tenths_percent'],
+                'step' => (int) $profile['step_tenths_percent'],
+            ]];
+        $segments = $family === 'fixed'
+            ? rankingFixedSegments($query, $name, $defaultSegments)
+            : rankingPercentSegments($query, $name, $defaultSegments);
+        $range = $segments[0];
+        if ($family === 'fixed') {
+            $range['values_basis_points'] = rankingValues($segments);
+            $range['segments'] = $segments;
+            $ranges[$name] = $range;
+        } else {
+            $ranges[$name] = $segments;
+        }
     }
     $entryVariantCount = array_sum(array_map(
         static fn (array $profile): int => count($profile['thresholds_tenths_percent']) * count($profile['windows']),
         $entryProfiles
     )) + count($entryDefaults['immediate_directions'] ?? []);
     $count = $entryVariantCount
-        * (count(rankingValues([$ranges['fixed_tp']])) * count(rankingValues([$ranges['fixed_sl']]))
-            + count(rankingValues([$ranges['profit']])) + count(rankingValues([$ranges['loss']])));
+        * (count(rankingValues($ranges['fixed_tp'])) * count(rankingValues($ranges['fixed_sl']))
+            + count(rankingValues($ranges['profit'])) + count(rankingValues($ranges['loss'])));
     foreach ($entryProfiles as $profile) {
         if (count($profile['thresholds_tenths_percent']) > 100 || count($profile['windows']) > 50) {
             throw new InvalidArgumentException('Слишком много сочетаний. Увеличьте шаг или сузьте диапазон.');
         }
     }
-    if ($count > 30000000) {
+    if ($count > 35000000) {
         throw new InvalidArgumentException('Слишком много сочетаний. Увеличьте шаг или сузьте диапазон.');
     }
     return [
@@ -152,8 +283,8 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
             'exit_profiles' => [
                 'fixed_tp' => $ranges['fixed_tp'],
                 'fixed_sl' => $ranges['fixed_sl'],
-                'profit' => $ranges['profit'],
-                'loss' => $ranges['loss'],
+                'profit' => ['segments' => $ranges['profit']],
+                'loss' => ['segments' => $ranges['loss']],
             ],
         ],
     ];
@@ -182,5 +313,11 @@ function rankingEntryConfig(string $entryConfig, array $ranking, array $immediat
 
 function rankingHasValue(int $value, array $range): bool
 {
+    if (isset($range['values_basis_points']) && is_array($range['values_basis_points'])) {
+        return in_array($value, $range['values_basis_points'], true);
+    }
+    if (array_is_list($range) || isset($range['segments'])) {
+        return in_array($value, rankingValues($range), true);
+    }
     return $value >= $range['from'] && $value <= $range['to'] && ($value - $range['from']) % $range['step'] === 0;
 }

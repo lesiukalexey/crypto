@@ -31,7 +31,9 @@ from ranking_checkpoints import (
     STATE_DTYPE,
     daily_quote_boundaries,
     dated_state_checkpoint_path,
+    has_dated_state_checkpoint,
     load_best_state_checkpoint,
+    load_exact_state_checkpoint,
     quote_prefix_fingerprint,
     write_state_checkpoint,
 )
@@ -47,6 +49,7 @@ from strategy_ranking import (
     simulate,
     simulate_standard_checkpoint,
     simulate_standard_checkpoint_days,
+    standard_range_results,
     write_json,
 )
 
@@ -64,7 +67,7 @@ def durable_result_path(
         for symbol in sorted(max_ids)
     ]
     key = hashlib.sha256(json.dumps([
-        "portfolio-durable-result-v5-short-targets", category, args.start_day, args.end_day,
+        "portfolio-durable-result-v6-canonical-ledger" if args.martingale_mode == "none" else "portfolio-durable-result-v7-negative-stop", category, args.start_day, args.end_day,
         args.balance, args.fee_percent, args.min_trades, args.entry_config,
         args.ranking_params, args.martingale_mode, args.martingale_timing,
         args.martingale_attempts, quote_versions,
@@ -77,9 +80,9 @@ def exit_specs(profiles: dict[str, Any]) -> Iterator[tuple[str, str, float | Non
         for loss in exit_values("fixed_sl", profiles):
             yield (
                 f"fixed:{target}:{loss}",
-                f"TP {target / 10:.1f}% / SL {loss / 10:.1f}% от стартового баланса",
-                float(target),
-                float(loss),
+                f"TP {target / 100:.2f}% / SL {loss / 100:.2f}% от стартового баланса",
+                target / 10.0,
+                loss / 10.0,
             )
     for loss in exit_values("loss", profiles):
         yield f"loss:{loss}", f"Stop Loss {loss / 10:.1f}% от стартового баланса", None, float(loss)
@@ -116,7 +119,7 @@ def pair_result_cache_paths(
 
     scope_keys = {
         symbol: hashlib.sha256(json.dumps([
-            "portfolio-pair-simulation-v6-short-targets",
+            "portfolio-pair-simulation-v7-canonical-ledger" if martingale_mode == "none" else "portfolio-pair-simulation-v8-negative-stop",
             category,
             symbol,
             max_ids[symbol],
@@ -179,7 +182,7 @@ _PORTFOLIO_WORKER_STATE: dict[str, Any] | None = None
 _PORTFOLIO_WORKER_PRICE_TREES: dict[str, tuple[PriceTree, PriceTree]] = {}
 
 
-def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | None, str | None, bool | None], bool]) -> tuple[str, np.ndarray | None, int, int, int, bool, str]:
+def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | None, str | None, bool | None], bool]) -> tuple[str, np.ndarray | None, int, int, int, bool, str, tuple[str, ...]]:
     symbol, entry_spec, include_results = task
     state = _PORTFOLIO_WORKER_STATE
     if state is None:
@@ -188,7 +191,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
     quotes_by_symbol = state["quotes_by_symbol"]
     quotes = quotes_by_symbol.get(symbol)
     if quotes is None or len(quotes) < 2:
-        return symbol, None, 0, 0, 0, False, "unused"
+        return symbol, None, 0, 0, 0, False, "unused", ()
 
     if immediate_short is not None:
         signals, shorts = np.array([0], dtype=np.int64), np.array([immediate_short], dtype=np.bool_)
@@ -199,14 +202,27 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
     args = state["args"]
     use_checkpoint = args.martingale_mode == "none"
     if not use_checkpoint and (len(signals) == 0 or args.min_trades > len(signals)):
-        return symbol, None, 0, 0, 0, False, "unused"
+        return symbol, None, 0, 0, 0, False, "unused", ()
 
     cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
     cache_path = state["pair_cache_scopes"][symbol] / cache_filename
     checkpoint_path = dated_state_checkpoint_path(state, symbol, entry_id, args.end_day) if use_checkpoint else None
-    all_day_boundaries = daily_quote_boundaries(quotes.timestamps, args.start_day, args.end_day) if use_checkpoint else []
+    source_day = (
+        datetime.fromtimestamp(float(quotes.timestamps[0]), timezone.utc)
+        .astimezone(KYIV).date().isoformat()
+    )
+    all_day_boundaries = [
+        (day, count) for day, count in daily_quote_boundaries(
+            quotes.timestamps, source_day, args.end_day,
+        ) if count > 0
+    ] if use_checkpoint else []
+    previous_range_day = (date.fromisoformat(args.start_day) - timedelta(days=1)).isoformat()
+    range_start_boundary = next(((day, count) for day, count in reversed(all_day_boundaries)
+        if day <= previous_range_day and count > 0), None)
+    range_start_day = range_start_boundary[0] if range_start_boundary else None
+    range_start_quote_count = range_start_boundary[1] if range_start_boundary else 0
     first_missing_day = next((index for index, (day, _) in enumerate(all_day_boundaries)
-        if not dated_state_checkpoint_path(state, symbol, entry_id, day).is_file()), None) if use_checkpoint else None
+        if not has_dated_state_checkpoint(state, symbol, entry_id, day)), None) if use_checkpoint else None
     resume_until_day = (
         all_day_boundaries[first_missing_day - 1][0]
         if first_missing_day is not None and first_missing_day > 0
@@ -218,16 +234,26 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
     previous_states = previous_checkpoint[0] if previous_checkpoint is not None else None
     previous_quote_count = previous_checkpoint[1] if previous_checkpoint is not None else 0
     previous_checkpoint_day = previous_checkpoint[2] if previous_checkpoint is not None else None
-    if use_checkpoint and first_missing_day is None and previous_states is not None and previous_quote_count == len(quotes):
-        result_pnls, result_trades = finalize_standard_checkpoints(
-            quotes, args.balance, state["fee_rate"], previous_states,
+    range_start_states = load_exact_state_checkpoint(
+        state, symbol, entry_id, range_start_day, quotes,
+        len(state["exit_options"]), range_start_quote_count,
+    ) if use_checkpoint and range_start_day is not None else None
+    if (use_checkpoint and first_missing_day is None and previous_states is not None
+        and previous_quote_count == len(quotes)
+        and (range_start_day is None or range_start_states is not None)):
+        result_pnls, result_trades = standard_range_results(
+            quotes, args.balance, state["fee_rate"], range_start_states, previous_states,
         )
         results = np.empty(len(result_pnls), dtype=PORTFOLIO_RESULT_DTYPE)
         results["pnl"] = result_pnls
         results["trade_count"] = result_trades
         # The durable checkpoint already contains the full simulation state;
         # no per-exit kernel call or broom-reset pair-result file is needed.
-        return symbol, results, 0, 0, len(result_pnls), True, "unused"
+        reused_days = tuple(day for day, loaded in (
+            (range_start_day, range_start_states is not None),
+            (previous_checkpoint_day, previous_checkpoint is not None),
+        ) if day is not None and loaded)
+        return symbol, results, 0, 0, len(result_pnls), True, "unused", reused_days
 
     boundaries_to_capture = [
         (day, count) for day, count in all_day_boundaries
@@ -237,6 +263,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
             or (day == previous_checkpoint_day and count > previous_quote_count)
         )
     ]
+    range_start_in_capture = any(day == range_start_day for day, _ in boundaries_to_capture)
     day_quote_counts_to_capture = np.fromiter((count for _, count in boundaries_to_capture), dtype=np.int64)
 
     price_trees = _PORTFOLIO_WORKER_PRICE_TREES.get(symbol)
@@ -279,6 +306,19 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                         args.balance, state["fee_rate"], take_profit, stop_loss, previous_state,
                     )
                 next_states.append(next_state)
+                if range_start_day is not None:
+                    if range_start_states is not None:
+                        start_state = range_start_states[exit_index]
+                    elif range_start_in_capture:
+                        start_boundary_index = next(
+                            index for index, (day, _) in enumerate(boundaries_to_capture)
+                            if day == range_start_day
+                        )
+                        start_state = day_states[start_boundary_index]
+                    else:
+                        raise RuntimeError(f"Missing canonical checkpoint for range start {range_start_day}")
+                    pnl -= float(start_state[0]) - args.balance
+                    trade_count -= int(start_state[2])
                 checkpoint_updated = True
             else:
                 pnl, trade_count = simulate(
@@ -323,7 +363,11 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
             day_path = dated_state_checkpoint_path(state, symbol, entry_id, day)
             if state_counts_by_day[day] != len(state["exit_options"]) or not write_state_checkpoint(day_path, day, quotes, day_states, day_quote_count):
                 checkpoint_status = "skipped_low_disk"
-    return symbol, results, hits, misses, 0, True, checkpoint_status
+    reused_days = tuple(day for day, loaded in (
+        (range_start_day, range_start_states is not None),
+        (previous_checkpoint_day, previous_checkpoint is not None),
+    ) if day is not None and loaded)
+    return symbol, results, hits, misses, 0, True, checkpoint_status, reused_days
 
 
 def main() -> int:
@@ -335,12 +379,12 @@ def main() -> int:
     parser.add_argument("--end-day", required=True)
     parser.add_argument("--balance", required=True, type=float)
     parser.add_argument("--fee-percent", required=True, type=float)
-    parser.add_argument("--min-trades", required=True, type=int, choices=(1, 2))
+    parser.add_argument("--min-trades", required=True, type=int, choices=(1, 2, 3))
     parser.add_argument("--entry-config", required=True)
     parser.add_argument("--max-ids", required=True)
     parser.add_argument("--cache-dir", required=True, type=Path)
     parser.add_argument("--ranking-params", required=True)
-    parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse"), default="none")
+    parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse", "simple_profit", "reverse_profit"), default="none")
     parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
     parser.add_argument("--workers", type=int, choices=range(1, 5), default=4)
@@ -391,19 +435,29 @@ def main() -> int:
             return 0
 
         config = load_config(Path(__file__).with_name("config.json"))
-        start_local = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV)
         end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
-        start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+        start_local = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV)
+        start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
+        snapshot_filter = " OR ".join("(symbol = %s AND id <= %s)" for _ in max_ids)
+        quote_parameters: list[Any] = [config["category"], end_utc]
+        if args.martingale_mode != "none":
+            quote_parameters.append(start_utc)
+        for snapshot_symbol, snapshot_max_id in sorted(max_ids.items()):
+            quote_parameters.extend((snapshot_symbol, snapshot_max_id))
         connection = connect_mysql(config["mysql"])
         try:
             with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+                quote_query = (
+                    "SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price "
+                    "FROM quote_snapshots WHERE category = %s AND received_at_utc < %s "
+                    + ("AND received_at_utc >= %s " if args.martingale_mode != "none" else "")
+                    + "AND ("
+                    + snapshot_filter
+                    + ") ORDER BY symbol, received_at_utc, id"
+                )
                 cursor.execute(
-                    """SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price
-                       FROM quote_snapshots
-                       WHERE category = %s AND received_at_utc >= %s AND received_at_utc < %s
-                       ORDER BY symbol, received_at_utc, id""",
-                    (config["category"], start_utc, end_utc),
+                    quote_query, quote_parameters,
                 )
                 raw_rows = cursor.fetchall()
         finally:
@@ -467,6 +521,7 @@ def main() -> int:
         checkpoint_result_reuses = 0
         checkpoint_writes = 0
         checkpoint_skips = 0
+        checkpoint_days_reused: dict[str, int] = {}
         global_top: list[tuple[float, int, str, dict[str, Any]]] = []
         exit_options = [
             (
@@ -518,12 +573,14 @@ def main() -> int:
             )
             active_symbols = 0
             ticker_results: dict[str, np.ndarray] = {}
-            for symbol, pair_results, hits, misses, checkpoint_reuses, active, checkpoint_status in simulation_results:
+            for symbol, pair_results, hits, misses, checkpoint_reuses, active, checkpoint_status, reused_days in simulation_results:
                 pair_cache_hits += hits
                 pair_cache_misses += misses
                 checkpoint_result_reuses += checkpoint_reuses
                 checkpoint_writes += checkpoint_status == "saved"
                 checkpoint_skips += checkpoint_status == "skipped_low_disk"
+                for reused_day in reused_days:
+                    checkpoint_days_reused[reused_day] = checkpoint_days_reused.get(reused_day, 0) + 1
                 if not active:
                     continue
                 active_symbols += 1
@@ -593,6 +650,16 @@ def main() -> int:
                     "completed_entry_profiles": entry_batch_index + 1,
                     "total_entry_profiles": len(specs),
                     "checkpoint_result_reuses": checkpoint_result_reuses,
+                    "pair_cache_hits": pair_cache_hits,
+                    "pair_cache_misses": pair_cache_misses,
+                    "checkpoint_days_reused": checkpoint_days_reused,
+                    "total_candidates": total,
+                    "completed_candidates": completed,
+                    "total_ticker_evaluations": total * universe_size,
+                    "completed_ticker_evaluations": completed * universe_size,
+                    "universe_size": universe_size,
+                    "start_day": args.start_day,
+                    "end_day": args.end_day,
                 })
                 continue
 
@@ -646,6 +713,14 @@ def main() -> int:
                 "checkpoint_result_reuses": checkpoint_result_reuses,
                 "checkpoint_writes": checkpoint_writes,
                 "checkpoint_skips_low_disk": checkpoint_skips,
+                "checkpoint_days_reused": checkpoint_days_reused,
+                "total_candidates": total,
+                "completed_candidates": completed,
+                "total_ticker_evaluations": total * universe_size,
+                "completed_ticker_evaluations": completed * universe_size,
+                "universe_size": universe_size,
+                "start_day": args.start_day,
+                "end_day": args.end_day,
             })
 
         if process_pool is not None:
@@ -703,6 +778,14 @@ def main() -> int:
             "checkpoint_skips_low_disk": checkpoint_skips,
             "durable_result_saved": durable_result_saved,
             "workers": worker_count,
+            "checkpoint_days_reused": checkpoint_days_reused,
+            "total_candidates": total,
+            "completed_candidates": completed,
+            "total_ticker_evaluations": total * universe_size,
+            "completed_ticker_evaluations": completed * universe_size,
+            "universe_size": universe_size,
+            "start_day": args.start_day,
+            "end_day": args.end_day,
         })
         return 0
     except Exception as exc:

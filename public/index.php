@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 date_default_timezone_set('Europe/Kyiv');
 require_once __DIR__ . '/ranking-parameters.php';
+require_once __DIR__ . '/ranking-snapshot.php';
 $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
 $rankingCacheDir = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-backtest-cache';
 $rankingGenerationPath = $rankingCacheDir . '/strategy-ranking-generation.txt';
@@ -25,11 +26,13 @@ $entryThresholdsTenthsPercent = $entryProfiles['both']['thresholds_tenths_percen
 $entryWindows = $entryProfiles['both']['windows'];
 $entryThresholdSummary = implode(', ', array_map(static fn (int $value): string => number_format($value / 10, 1, ',', ' '), $entryThresholdsTenthsPercent));
 $immediateEntryText = implode(' и ', array_map(static fn (string $direction): string => 'сразу — 1 заявка на ' . ($direction === 'short' ? 'продажу' : 'покупку'), $entryProfileConfig['immediate_directions'] ?? []));
-$exitRangeText = static function (array $range): string {
-    $min = number_format($range['from'] / 10, 1, ',', ' ');
-    $max = number_format($range['to'] / 10, 1, ',', ' ');
-    $step = number_format($range['step'] / 10, 1, ',', ' ');
-    return $min . '–' . $max . '% от стартового баланса (шаг ' . $step . '%)';
+$exitRangeText = static function (array $ranges): string {
+    return implode('; ', array_map(static function (array $range): string {
+        $min = number_format($range['from'] / 10, 1, ',', ' ');
+        $max = number_format($range['to'] / 10, 1, ',', ' ');
+        $step = number_format($range['step'] / 10, 1, ',', ' ');
+        return $min . '–' . $max . '% (шаг ' . $step . '%)';
+    }, array_is_list($ranges) ? $ranges : [$ranges])) . ' от стартового баланса';
 };
 $db = $config['mysql'];
 $symbols = [];
@@ -49,10 +52,11 @@ $feePercent = trim((string) ($_GET['fee'] ?? '0.06'));
 $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
 $martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');
 $martingaleAttempts = filter_var($_GET['martingale_attempts'] ?? 3, FILTER_VALIDATE_INT);
-if (!in_array($martingaleMode, ['none', 'simple', 'reverse'], true)) $martingaleMode = 'none';
+if (!in_array($martingaleMode, ['none', 'simple', 'reverse', 'simple_profit', 'reverse_profit'], true)) $martingaleMode = 'none';
 if (!in_array($martingaleTiming, ['immediate', 'rules'], true)) $martingaleTiming = 'immediate';
 if ($martingaleAttempts === false || $martingaleAttempts < 2 || $martingaleAttempts > 10) $martingaleAttempts = 3;
-$defaultExitConfig = 'fixed:' . $rankingRanges['fixed_tp']['from'] . ':' . $rankingRanges['fixed_sl']['from'];
+$defaultFixedValue = (int) ($rankingRanges['fixed_tp']['values_basis_points'][0] ?? 10);
+$defaultExitConfig = 'fixed:' . $defaultFixedValue . ':' . $defaultFixedValue;
 $exitConfig = (string) ($_GET['exit_config'] ?? $defaultExitConfig);
 $selectTopRankedResult = (string) ($_GET['select_top_ranked_result'] ?? '0') === '1';
 $martingaleTargetPolicy = 'scaled';
@@ -71,6 +75,7 @@ $detailSupport = filter_var($_GET['detail_support'] ?? null, FILTER_VALIDATE_INT
 $detailUniverseSize = filter_var($_GET['detail_universe_size'] ?? null, FILTER_VALIDATE_INT);
 $detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALIDATE_INT);
 $isCurrentDay = false;
+$snapshotNeedsRefresh = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
 if (!preg_match($decimalPattern, $startingBalance) || (float) $startingBalance <= 0 || (float) $startingBalance > 1000000000) {
     $error = 'Стартовый баланс должен быть больше 0 и не превышать 1 000 000 000 USDT.';
@@ -96,8 +101,8 @@ $lossThreshold = bcsub('0', $profitTarget, 24);
 if (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
     && rankingHasValue((int) $matches[1], $rankingRanges['fixed_tp'])
     && rankingHasValue((int) $matches[2], $rankingRanges['fixed_sl'])) {
-    $profitTarget = bcdiv(bcmul($startingBalance, $matches[1], 24), '1000', 24);
-    $lossThreshold = bcdiv(bcmul($startingBalance, (string) (0 - (int) $matches[2]), 24), '1000', 24);
+    $profitTarget = bcdiv(bcmul($startingBalance, $matches[1], 24), '10000', 24);
+    $lossThreshold = bcdiv(bcmul($startingBalance, (string) (0 - (int) $matches[2]), 24), '10000', 24);
 } elseif (preg_match('/^loss:(\d+)$/', $exitConfig, $matches)
     && rankingHasValue((int) $matches[1], $rankingRanges['loss'])) {
     $profitTarget = null;
@@ -151,15 +156,136 @@ try {
         $dayAfterEnd = $endDay->modify('+1 day');
         $startUtc = $startDay->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
         $endUtc = $dayAfterEnd->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
-        $stmt = $pdo->prepare('SELECT received_at_utc, bid_price, ask_price, last_price FROM quote_snapshots WHERE category = ? AND symbol = ? AND received_at_utc >= ? AND received_at_utc < ? ORDER BY received_at_utc, id');
-        $stmt->execute([$config['category'], $symbol, $startUtc, $endUtc]);
+        if (!is_dir($rankingCacheDir) && !mkdir($rankingCacheDir, 0700, true) && !is_dir($rankingCacheDir)) {
+            throw new RuntimeException('Не удалось подготовить кэш рейтинга.');
+        }
+        $snapshotIds = rankingSnapshotIds(
+            $pdo, $rankingCacheDir, $config['category'], $startDayInput, $endDayInput,
+            $startUtc, $endUtc, $rankingGeneration,
+        );
+        $snapshotNeedsRefresh = rankingSnapshotNeedsRefresh($pdo, $config['category'], $startUtc, $endUtc, $snapshotIds);
+        $maxQuoteId = (int) ($snapshotIds[$symbol] ?? 0);
+        if ($martingaleMode === 'none') {
+            $stmt = $pdo->prepare('SELECT id, received_at_utc, bid_price, ask_price, last_price FROM quote_snapshots WHERE category = ? AND symbol = ? AND id <= ? AND received_at_utc < ? ORDER BY received_at_utc, id');
+            $stmt->execute([$config['category'], $symbol, $maxQuoteId, $endUtc]);
+        } else {
+            $stmt = $pdo->prepare('SELECT id, received_at_utc, bid_price, ask_price, last_price FROM quote_snapshots WHERE category = ? AND symbol = ? AND id <= ? AND received_at_utc >= ? AND received_at_utc < ? ORDER BY received_at_utc, id');
+            $stmt->execute([$config['category'], $symbol, $maxQuoteId, $startUtc, $endUtc]);
+        }
         $rows = $stmt->fetchAll();
     }
 } catch (Throwable $e) {
     $error ??= $e instanceof InvalidArgumentException ? $e->getMessage() : 'Не удалось загрузить котировки. Проверьте доступность MySQL и настройки подключения.';
 }
 
+$cachedStandardTradeEvents = null;
+$closedTradeLedgerKey = null;
+$closedTradeLedgerRoot = dirname($rankingCacheDir) . '/bitget-closed-trades-v1';
+$ledgerFingerprints = [];
+$ledgerQuoteCounts = [];
+$ledgerLastQuotes = [];
+$ledgerSourceDay = null;
+if ($martingaleMode === 'none' && $rows !== [] && $error === null) {
+    $closedTradeLedgerKey = hash('sha256', json_encode([
+        'closed-trade-ledger-v1', $config['category'], $symbol, $startingBalance,
+        $feePercent, $entryConfig, $selectedExitConfig,
+    ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+    $prefixContext = hash_init('sha256');
+    $quoteCount = 0;
+    foreach ($rows as $row) {
+        $quote = [
+            (string) $row['id'], (string) $row['received_at_utc'],
+            (string) $row['bid_price'], (string) $row['ask_price'], (string) $row['last_price'],
+        ];
+        hash_update($prefixContext, implode("\0", $quote) . "\n");
+        $quoteCount++;
+        $quoteDay = (new DateTimeImmutable($row['received_at_utc'], new DateTimeZone('UTC')))
+            ->setTimezone($timezone)->format('Y-m-d');
+        $ledgerFingerprints[$quoteDay] = hash_final(hash_copy($prefixContext));
+        $ledgerQuoteCounts[$quoteDay] = $quoteCount;
+        $ledgerLastQuotes[$quoteDay] = $row;
+        $ledgerSourceDay ??= $quoteDay;
+    }
+    if ($ledgerSourceDay !== null && $endDayInput >= $ledgerSourceDay) {
+        $directoryReady = is_dir($closedTradeLedgerRoot)
+            || mkdir($closedTradeLedgerRoot, 0700, true)
+            || is_dir($closedTradeLedgerRoot);
+        if ($directoryReady) {
+            $previousFingerprint = null;
+            $previousQuoteCount = 0;
+            $previousLastQuote = $rows[0];
+            foreach ($ledgerFingerprints as $quotedDay => $quotedFingerprint) {
+                if ($quotedDay >= max($startDayInput, $ledgerSourceDay)) continue;
+                $previousFingerprint = $quotedFingerprint;
+                $previousQuoteCount = $ledgerQuoteCounts[$quotedDay];
+                $previousLastQuote = $ledgerLastQuotes[$quotedDay];
+            }
+            $cachedStandardTradeEvents = [];
+            $cacheComplete = true;
+            $ledgerDay = new DateTimeImmutable(max($startDayInput, $ledgerSourceDay), $timezone);
+            $ledgerEndDay = new DateTimeImmutable($endDayInput, $timezone);
+            while ($ledgerDay <= $ledgerEndDay) {
+                $day = $ledgerDay->format('Y-m-d');
+                if (isset($ledgerFingerprints[$day])) {
+                    $previousFingerprint = $ledgerFingerprints[$day];
+                    $previousQuoteCount = $ledgerQuoteCounts[$day];
+                    $previousLastQuote = $ledgerLastQuotes[$day];
+                }
+                $fingerprint = $previousFingerprint ?? hash('sha256', 'empty:' . $closedTradeLedgerKey);
+                $dayQuoteCount = $previousQuoteCount;
+                $path = $closedTradeLedgerRoot . '/' . $closedTradeLedgerKey . '-' . str_replace('-', '', $day) . '.json';
+                $payload = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
+                if (!is_array($payload)
+                    || ($payload['version'] ?? null) !== 1
+                    || ($payload['day'] ?? null) !== $day
+                    || ($payload['quote_count'] ?? null) !== $dayQuoteCount
+                    || !hash_equals($fingerprint, (string) ($payload['quote_prefix_sha256'] ?? ''))
+                    || !is_array($payload['closed_trades'] ?? null)) {
+                    $cacheComplete = false;
+                    break;
+                }
+                foreach ($payload['closed_trades'] as $trade) {
+                    if (is_array($trade)) $cachedStandardTradeEvents[] = $trade;
+                }
+                if ($day === $endDayInput && is_array($payload['open_trade'] ?? null)) {
+                    $cachedStandardTradeEvents[] = $payload['open_trade'];
+                }
+                $ledgerDay = $ledgerDay->modify('+1 day');
+            }
+            if (!$cacheComplete) $cachedStandardTradeEvents = null;
+        }
+    }
+}
+
 function h(string $value): string { return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+function cachedTradeIsOpen(array $trade): bool { return str_starts_with((string) ($trade['reason'] ?? ''), 'Открыта ·'); }
+function markTradeAtQuote(array $trade, array $quote, string $feeRate): array
+{
+    $short = (bool) $trade['is_short'];
+    $entryPrice = (string) $trade['entry_price'];
+    $exitPrice = (string) ($short ? $quote['ask_price'] : $quote['bid_price']);
+    $move = $short ? bcsub($entryPrice, $exitPrice, 24) : bcsub($exitPrice, $entryPrice, 24);
+    $gross = bcmul((string) $trade['quantity'], $move, 24);
+    $exitFee = bcmul(bcmul((string) $trade['quantity'], $exitPrice, 24), $feeRate, 24);
+    $net = bcsub(bcsub($gross, (string) $trade['entry_fee'], 24), $exitFee, 24);
+    return [
+        'entry' => $trade['entry'], 'exit' => $quote,
+        'quantity' => $trade['quantity'], 'entry_price' => $entryPrice,
+        'exit_price' => $exitPrice, 'entry_fee' => $trade['entry_fee'],
+        'exit_fee' => $exitFee, 'gross' => $gross, 'net' => $net,
+        'balance' => '0', 'reason' => 'Открыта · последний снимок выбранного периода',
+        'is_short' => $short,
+    ];
+}
+function writeClosedTradeDay(string $path, array $payload): void
+{
+    $temporaryPath = $path . '.' . getmypid() . '.tmp';
+    if (file_put_contents($temporaryPath, json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE)) === false
+        || !rename($temporaryPath, $path)) {
+        @unlink($temporaryPath);
+        throw new RuntimeException('Не удалось сохранить дневные закрытые сделки.');
+    }
+}
 function rankingRangeRow(string $label, string $name, array $range, bool $money, array $defaultRange = [], bool $percent = false): string
 {
     $format = static fn (int $value): string => $percent ? number_format($value / 10, 1, '.', '') : ($money ? number_format($value / 100, 2, '.', '') : (string) $value);
@@ -172,13 +298,35 @@ function rankingRangeRow(string $label, string $name, array $range, bool $money,
     }
     return '<div class="ranking-range-row"><span>' . h($label) . '</span>' . $cells . '</div>';
 }
+function rankingSegmentEditor(string $label, string $name, array $segments, array $defaultSegments, bool $percent, int $percentPrecision = 1): string
+{
+    $scale = 10 ** $percentPrecision;
+    $format = static fn (int|float $value): string => $percent ? number_format($value / $scale, $percentPrecision, '.', '') : (string) (int) $value;
+    $step = $percent ? number_format(1 / $scale, $percentPrecision, '.', '') : '1';
+    $defaultJson = h(json_encode($defaultSegments, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+    $html = '<div class="ranking-segment-editor" data-range-name="' . h($name . '_ranges') . '" data-percent="' . ($percent ? '1' : '0') . '" data-percent-precision="' . ($percent ? $percentPrecision : '0') . '" data-default-segments="' . $defaultJson . '">';
+    foreach ($segments as $index => $segment) {
+        $html .= '<div class="ranking-segment-row"><span>' . h($label) . ' · диапазон ' . ($index + 1) . '</span>';
+        foreach (['from' => 'От', 'to' => 'До', 'step' => 'Шаг'] as $field => $caption) {
+            $value = $format($segment[$field]);
+            $html .= '<label>' . $caption . '<input class="ranking-range-input" type="number" min="' . $step . '" step="' . $step
+                . '" name="' . h($name . '_ranges[' . $index . '][' . $field . ']') . '" data-field="' . $field
+                . '" value="' . h($value) . '" data-default-value="' . h($value) . '" required></label>';
+        }
+        $html .= '<button type="button" class="remove-range-segment" aria-label="Удалить диапазон">−</button></div>';
+    }
+    return $html . '<button type="button" class="add-range-segment">Добавить диапазон</button></div>';
+}
 function money(string $value): string { return number_format((float) $value, 6, '.', ' '); }
 function formatKyivTime(string $value, DateTimeZone $timezone): string { return (new DateTimeImmutable($value, new DateTimeZone('UTC')))->setTimezone($timezone)->format('d.m H:i:s'); }
 function epochMilliseconds(string $value): int { $time = new DateTimeImmutable($value, new DateTimeZone('UTC')); return ((int) $time->format('U')) * 1000 + (int) $time->format('v'); }
 $series = ['bid_price' => ['name' => 'Bid', 'color' => '#42d6a4'], 'ask_price' => ['name' => 'Ask', 'color' => '#ff7188'], 'last_price' => ['name' => 'Last', 'color' => '#86a8ff']];
 $points = [];
+$visibleQuoteCount = 0;
 foreach ($rows as $row) {
     $time = (new DateTimeImmutable($row['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone);
+    if ($time < $startDay || $time >= $dayAfterEnd) continue;
+    $visibleQuoteCount++;
     foreach ($series as $key => $meta) {
         $value = (float) $row[$key];
         if (is_finite($value)) $points[$key][] = ['t' => $time->getTimestamp() * 1000, 'v' => $value, 'label' => $row[$key]];
@@ -222,7 +370,10 @@ $findCompatibleEntry = static function (int $fromIndex, bool $wantedShort) use (
     }
     return null;
 };
-if ($martingaleMode !== 'none') {
+if ($cachedStandardTradeEvents !== null) {
+    $trades = $cachedStandardTradeEvents;
+    $balance = $startingBalance;
+} elseif ($martingaleMode !== 'none') {
     $appendLegTrades = static function (array $legs, int $exitIndex, string $reason, string &$currentBalance) use (&$trades, $rows, $feeRate, $martingaleMode): void {
         $exit = $rows[$exitIndex];
         foreach ($legs as $leg) {
@@ -237,7 +388,7 @@ if ($martingaleMode !== 'none') {
         }
     };
     $finalScale = (string) (2 ** ($martingaleAttempts - 1));
-    if ($lossThreshold === null) {
+    if (str_ends_with($martingaleMode, '_profit') || $lossThreshold === null) {
         $baseStake = bcdiv($startingBalance, $finalScale, 24);
     } else {
         $risk = bcmul(bccomp($lossThreshold, '0', 24) < 0 ? bcsub('0', $lossThreshold, 24) : $lossThreshold, '1', 24);
@@ -302,10 +453,14 @@ if ($martingaleMode !== 'none') {
                 $exitFeeNow = bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24);
                 $netNow = bcsub(bcsub($grossNow, $entryFeesNow, 24), $exitFeeNow, 24);
                 if ($stageTarget !== null && bccomp($netNow, $stageTarget, 24) >= 0) {
-                    $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $formatTargetPercent($stageTarget, $startingBalance) . ' от стартового баланса'; break;
+                    $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $formatTargetPercent($stageTarget, $startingBalance) . ' от стартового баланса';
+                    $foundStop = str_ends_with($martingaleMode, '_profit');
+                    break;
                 }
                 if ($stageLoss !== null && bccomp($netNow, $stageLoss, 24) <= 0) {
-                    $exitIndex = $i; $exitReason = 'Мартингейл · стоп чистого убытка ' . $formatTargetPercent(ltrim($stageLoss, '-'), $startingBalance) . ' от стартового баланса'; $foundStop = true; break;
+                    $exitIndex = $i; $exitReason = 'Мартингейл · стоп чистого убытка ' . $formatTargetPercent(ltrim($stageLoss, '-'), $startingBalance) . ' от стартового баланса';
+                    $foundStop = !str_ends_with($martingaleMode, '_profit');
+                    break;
                 }
             }
             if (!$foundStop || $stage >= $martingaleAttempts) {
@@ -324,6 +479,26 @@ if ($martingaleMode !== 'none') {
                 $totalQty = bcadd($totalQty, $leg['quantity'], 24);
             }
             $unrealized = bcsub(bcsub($grossNow, $entryFeesNow, 24), bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24), 24);
+            if ($martingaleMode === 'simple_profit') {
+                $closedNotional = $positionNotional;
+                $appendLegTrades($legs, $exitIndex, $exitReason, $balance);
+                $legs = [];
+                $nextIndex = $exitIndex;
+                if ($martingaleTiming === 'rules') {
+                    $nextSignal = $findCompatibleEntry($exitIndex + 1, $tradeIsShort);
+                    if ($nextSignal === null) { $tradeEntryIndex = $rowCount; break; }
+                    [$nextIndex] = $nextSignal;
+                }
+                $nextStake = bcmul($closedNotional, '2', 24);
+                $availableStake = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
+                if (bccomp($nextStake, $availableStake, 24) > 0) $nextStake = $availableStake;
+                if (!$addLeg($nextIndex, $tradeIsShort, $nextStake)) { $tradeEntryIndex = $exitIndex + 1; break; }
+                $positionNotional = $nextStake;
+                $stage++;
+                $tradeEntryIndex = $nextIndex;
+                continue;
+            }
+
             if ($martingaleMode === 'simple') {
                 $equity = bcadd($balance, $unrealized, 24);
                 $freeMargin = bcsub($equity, $positionNotional, 24);
@@ -394,7 +569,7 @@ while (bccomp($balance, '0', 24) > 0) {
     $quantity = bcdiv($startingBalance, bcmul($entryPrice, bcadd('1', $feeRate, 24), 24), 24);
     $entryFee = bcmul(bcmul($quantity, $entryPrice, 24), $feeRate, 24);
     $exitIndex = $rowCount - 1;
-    $exitReason = $isCurrentDay ? 'Последний доступный снимок' : 'Конец выбранного периода';
+    $exitReason = 'Открыта · последний снимок выбранного периода';
     $tradeNet = '0';
     for ($i = $tradeEntryIndex + 1; $i < $rowCount; $i++) {
         $exitPrice = $tradeIsShort ? $rows[$i]['ask_price'] : $rows[$i]['bid_price'];
@@ -426,9 +601,73 @@ while (bccomp($balance, '0', 24) > 0) {
     $tradeEntryIndex = $exitIndex + 1;
 }
 }
+if ($martingaleMode === 'none' && $cachedStandardTradeEvents === null
+    && $closedTradeLedgerKey !== null && $ledgerSourceDay !== null) {
+    try {
+        $closedByDay = [];
+        foreach ($trades as $trade) {
+            if (cachedTradeIsOpen($trade)) continue;
+            $closeDay = (new DateTimeImmutable($trade['exit']['received_at_utc'], new DateTimeZone('UTC')))
+                ->setTimezone($timezone)->format('Y-m-d');
+            $closedByDay[$closeDay][] = $trade;
+        }
+        $previousFingerprint = null;
+        $previousQuoteCount = 0;
+        $lastQuote = $rows[0];
+        $ledgerDay = new DateTimeImmutable($ledgerSourceDay, $timezone);
+        $ledgerEndDay = new DateTimeImmutable($endDayInput, $timezone);
+        while ($ledgerDay <= $ledgerEndDay) {
+            $day = $ledgerDay->format('Y-m-d');
+            if (isset($ledgerFingerprints[$day])) {
+                $previousFingerprint = $ledgerFingerprints[$day];
+                $previousQuoteCount = $ledgerQuoteCounts[$day];
+                $lastQuote = $ledgerLastQuotes[$day];
+            }
+            $dayFingerprint = $previousFingerprint ?? hash('sha256', 'empty:' . $closedTradeLedgerKey);
+            $openTrade = null;
+            $lastQuoteAt = new DateTimeImmutable($lastQuote['received_at_utc'], new DateTimeZone('UTC'));
+            foreach ($trades as $trade) {
+                $entryAt = new DateTimeImmutable($trade['entry']['received_at_utc'], new DateTimeZone('UTC'));
+                $exitAt = new DateTimeImmutable($trade['exit']['received_at_utc'], new DateTimeZone('UTC'));
+                if ($entryAt <= $lastQuoteAt
+                    && (cachedTradeIsOpen($trade) || $exitAt > $lastQuoteAt)) {
+                    $openTrade = markTradeAtQuote($trade, $lastQuote, $feeRate);
+                    break;
+                }
+            }
+            $path = $closedTradeLedgerRoot . '/' . $closedTradeLedgerKey . '-' . str_replace('-', '', $day) . '.json';
+            writeClosedTradeDay($path, [
+                'version' => 1,
+                'day' => $day,
+                'quote_count' => $previousQuoteCount,
+                'quote_prefix_sha256' => $dayFingerprint,
+                'closed_trades' => $closedByDay[$day] ?? [],
+                'open_trade' => $openTrade,
+            ]);
+            $ledgerDay = $ledgerDay->modify('+1 day');
+        }
+    } catch (Throwable $ledgerWriteError) {
+        error_log('Closed trade ledger write failed: ' . $ledgerWriteError->getMessage());
+    }
+}
+if ($martingaleMode === 'none') {
+    $rangeTrades = [];
+    $rangeBalance = $startingBalance;
+    foreach ($trades as $trade) {
+        $closedAt = new DateTimeImmutable($trade['exit']['received_at_utc'], new DateTimeZone('UTC'));
+        if ($closedAt < new DateTimeImmutable($startUtc, new DateTimeZone('UTC'))
+            || $closedAt >= new DateTimeImmutable($endUtc, new DateTimeZone('UTC'))) {
+            continue;
+        }
+        $rangeBalance = bcadd($rangeBalance, $trade['net'], 24);
+        $trade['balance'] = $rangeBalance;
+        $rangeTrades[] = $trade;
+    }
+    $trades = $rangeTrades;
+    $balance = $rangeBalance;
+}
 $totalPnl = bcsub($balance, $startingBalance, 24);
-$isOpenTrade = static fn (array $trade): bool => $isCurrentDay
-    && ($trade['reason'] === 'Последний доступный снимок' || strpos($trade['reason'], 'последний снимок') !== false);
+$isOpenTrade = static fn (array $trade): bool => str_starts_with($trade['reason'], 'Открыта ·');
 $openTradeCount = count(array_filter($trades, $isOpenTrade));
 $closedTradeCount = count($trades) - $openTradeCount;
 $entrySideLabel = 'Сторона · цена';
@@ -444,24 +683,26 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 :root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1200px;margin:0 auto;padding:42px 24px}.eyebrow{color:#8ea5ff;text-transform:uppercase;letter-spacing:.13em;font-size:12px;font-weight:700}h1{font-size:clamp(26px,4vw,40px);margin:5px 0 16px;letter-spacing:-.04em}.collector-status{display:inline-flex;align-items:center;gap:9px;margin:0 0 22px;padding:7px 11px;border:1px solid #34415e;border-radius:999px;background:#0c1222;color:#b7c1d5;font-size:13px}.collector-status:before{content:"";width:9px;height:9px;border-radius:50%;background:#8995ad;box-shadow:0 0 0 3px #8995ad22}.collector-status[data-status="active"]{color:#a8f0cf;border-color:#28654f}.collector-status[data-status="active"]:before{background:#42d6a4;box-shadow:0 0 0 3px #42d6a422}.collector-status[data-status="delayed"]{color:#ffe0a1;border-color:#705b2e}.collector-status[data-status="delayed"]:before{background:#f4c15f;box-shadow:0 0 0 3px #f4c15f22}.collector-status[data-status="stopped"],.collector-status[data-status="unknown"]{color:#ffb3bf;border-color:#733b49}.collector-status[data-status="stopped"]:before,.collector-status[data-status="unknown"]:before{background:#ff7188;box-shadow:0 0 0 3px #ff718822}.panel{background:color-mix(in srgb,var(--panel) 95%,transparent);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px;box-shadow:0 18px 50px #0003}.filters{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.field{display:grid;gap:7px;color:var(--muted);font-size:13px;font-weight:600}select,input,button{font:inherit;color:var(--text);background:#0c1222;border:1px solid #34415e;border-radius:10px;padding:11px 13px;min-width:190px}button{background:#607df4;border:0;font-weight:700;cursor:pointer;min-width:130px}button:hover{background:#7890ff}.hint{color:var(--muted);margin:15px 0 0;font-size:13px}.chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}.chart-head h2{font-size:17px;margin:0}.count{color:var(--muted);font-size:13px}.legend{display:flex;gap:18px;color:#b7c1d5;font-size:13px;margin:14px 0}.legend span{display:inline-flex;gap:7px;align-items:center}.dot{width:9px;height:9px;border-radius:50%}#chart{width:100%;height:clamp(180px,34vh,300px);display:block;overflow:visible}.chart-wrap{position:relative}.chart-panel-sticky{position:sticky;top:10px;z-index:5;background:#131a2d;box-shadow:0 12px 32px #0009}#tooltip{position:absolute;z-index:2;display:none;min-width:180px;padding:10px 12px;border:1px solid #394765;border-radius:10px;background:#0b1020f2;box-shadow:0 10px 30px #0008;pointer-events:none;font-size:12px;white-space:nowrap}#tooltip .tip-time{color:#dce5ff;font-weight:700;margin-bottom:5px}#tooltip .tip-row{display:flex;justify-content:space-between;gap:18px;font-variant-numeric:tabular-nums}#tooltip b{font-weight:700}.empty{display:grid;place-items:center;min-height:230px;color:var(--muted);text-align:center}.error{border-color:#733b49;color:#ffb3bf}.footer{color:var(--muted);font-size:12px;margin:0 4px}@media(max-width:600px){.wrap{padding:25px 14px}.panel{padding:16px}select,input{width:100%}.field{width:100%}button{width:100%}#chart{height:clamp(150px,27vh,220px)}.chart-panel-sticky{top:4px}.chart-head{align-items:flex-start;flex-direction:column}}
 .filters .field select,.filters .field input{min-width:150px}.strategy-link{color:#a9b9ff;text-decoration:none}.strategy-link:hover{text-decoration:underline}.summary{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 16px}.stat{flex:1;min-width:150px;background:#0c1222;border:1px solid var(--line);border-radius:12px;padding:13px 15px}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums}.table-wrap{overflow:auto;border-radius:10px}table{width:100%;min-width:1000px;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}th,td{text-align:right;padding:11px 10px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:#aab5cb;font-size:11px;text-transform:uppercase;letter-spacing:.04em;background:#0d1425;position:sticky;top:0}th:first-child,td:first-child,td.reason{text-align:left}.trade-positive td{background:#123126;color:#b9f2dc}.trade-negative td{background:#351e2a;color:#ffd0d5}.trade-open-positive td{background:#06291d;color:#83e8b8}.trade-open-negative td{background:#290810;color:#ff929d}.trade-flat td{background:#222b3d}.trade-positive td:first-child,.trade-open-positive td:first-child{box-shadow:inset 3px 0 #48d6a4}.trade-negative td:first-child,.trade-open-negative td:first-child{box-shadow:inset 3px 0 #ff7788}.trade-row{cursor:crosshair}.trade-row:hover td,.trade-row:focus td{filter:brightness(1.22)}.small-note{font-size:12px;color:var(--muted);margin:12px 0 0}.loss{color:#ff7788}.gain{color:#48d6a4}
 .refresh-symbols{display:grid;place-items:center;flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:20px;line-height:1}.refresh-symbols.is-loading{cursor:progress;background:#273653}.refresh-progress{position:relative;display:grid;place-items:center;width:34px;height:34px;font-size:9px;font-weight:700;font-variant-numeric:tabular-nums}.refresh-progress:before{position:absolute;inset:1px;border:2px solid #52617d;border-top-color:#a9b9ff;border-radius:50%;content:"";animation:ranking-spin .8s linear infinite}.refresh-progress-value{position:relative;z-index:1}@keyframes ranking-spin{to{transform:rotate(360deg)}}
+.refresh-today-snapshot[hidden]{display:none}.refresh-today-snapshot:disabled{cursor:progress;opacity:.65}
 .page-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.page-heading .eyebrow{white-space:nowrap}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}.collector-status{margin:0;white-space:nowrap}.save-mode-toggle{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.save-mode-toggle input{position:absolute;opacity:0;width:1px;height:1px;min-width:0}.save-mode-switch{position:relative;width:38px;height:22px;border:1px solid #52617d;border-radius:999px;background:#263149;transition:.2s}.save-mode-switch:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#b7c1d5;transition:.2s}.save-mode-toggle input:checked+.save-mode-switch{background:#176647;border-color:#42d6a4}.save-mode-toggle input:checked+.save-mode-switch:after{transform:translateX(16px);background:#42d6a4}.save-mode-toggle input:focus-visible+.save-mode-switch{outline:2px solid #8ea5ff;outline-offset:2px}.save-mode-detail{color:var(--muted);font-weight:400}@media(max-width:700px){.page-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.header-actions{justify-content:flex-start}}
 .wrap{max-width:none;padding-left:20px;padding-right:20px}.chart-wrap{container-type:inline-size}#chart{height:27.1cqw}@media(max-width:600px){#chart{height:69cqw}}
 .ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}
 .combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
-.calculation-queue{width:100%}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}}
+.calculation-queue-heading{display:flex;align-items:flex-start;gap:12px}.calculation-queue{flex:1;min-width:0}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}.reset-calculation-queue{flex:0 0 38px;width:38px;height:38px;min-width:38px;padding:0;background:transparent;color:var(--muted);font-size:20px;line-height:1}.reset-calculation-queue:hover{background:#273653;color:var(--text)}.reset-calculation-queue:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}}
 .ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head h2{flex:1}.portfolio-ranking-head .refresh-symbols{margin-left:auto}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
-.symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.reset-symbol-cache{flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:18px;line-height:1}.reset-symbol-cache:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}.symbol-select-row .reset-symbol-cache{width:42px}}
-.ranking-parameters{position:relative;--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{padding-right:44px;cursor:pointer;color:var(--text);font-weight:700}.reset-ranking-parameters{position:absolute;top:7px;right:12px;flex:0 0 36px;width:36px;height:36px;min-width:36px;padding:0;background:transparent;color:var(--muted);font-size:21px;line-height:1}.reset-ranking-parameters:hover{background:#273653;color:var(--text)}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}}
+.portfolio-ranking-diagnostics{margin:0 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#0c1222;color:var(--muted);font-size:13px;white-space:pre-line;font-variant-numeric:tabular-nums}
+.symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.reset-symbol-cache{flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:18px;line-height:1}.reset-symbol-cache:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}}
+.ranking-parameters{position:relative;--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{padding-right:44px;cursor:pointer;color:var(--text);font-weight:700}.reset-ranking-parameters{position:absolute;top:7px;right:12px;flex:0 0 36px;width:36px;height:36px;min-width:36px;padding:0;background:transparent;color:var(--muted);font-size:21px;line-height:1}.reset-ranking-parameters:hover{background:#273653;color:var(--text)}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-segment-editor{margin:10px 0}.ranking-segment-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px)) 36px;justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-segment-row>span{padding-bottom:11px;color:#b7c1d5;font-size:12px}.ranking-segment-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-segment-row input{width:100%;min-width:0}.ranking-segment-row button,.add-range-segment{min-width:36px;width:36px;padding:7px;background:#263653;color:#dce5ff}.ranking-segment-row button:disabled{opacity:.45;cursor:not-allowed}.add-range-segment{width:auto;min-width:0;margin:2px 0 10px}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}.ranking-segment-row{grid-template-columns:repeat(3,minmax(0,120px)) 36px}.ranking-segment-row>span{grid-column:1/-1;padding:0}.ranking-segment-row input{padding:9px 6px}}
 .martingale-block{flex-basis:100%;min-width:0;margin:4px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px}.martingale-block>summary{color:var(--text);font-weight:700;cursor:pointer}.martingale-controls{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin-top:12px}.martingale-block .field select{min-width:190px}.martingale-block #apply-martingale-settings{align-self:end;margin-bottom:1px}@media(max-width:600px){.martingale-block,.martingale-block .field{width:100%}.martingale-controls,.martingale-block .field{width:100%}.martingale-block .field select{width:100%}}
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
 </style>
 </head><body><main class="wrap">
-<header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 2 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
+<header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
 <?php if ($combinationDetail): ?>
 <section class="panel combination-detail" aria-labelledby="combination-detail-heading">
 <h1 id="combination-detail-heading">Детальный результат · <?= h($symbol !== '' ? $symbol : 'тикер') ?></h1>
@@ -489,48 +730,53 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="martingale_mode" value="<?= h($martingaleMode) ?>">
 <input type="hidden" name="martingale_timing" value="<?= h($martingaleTiming) ?>">
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
-<div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Остановить все расчёты и очистить очередь рейтингов" title="Остановить все расчёты и очистить очередь рейтингов">🧹</button></div>
+<div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов" title="Сбросить кэш рейтингов">🧹</button></div>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
-<label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label>
+<div class="symbol-select-row date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="refresh-symbols refresh-today-snapshot" type="button" id="refresh-today-snapshot" aria-label="Обновить данные до выбранной даты" title="Подтянуть новые данные до выбранной даты в график и расчёты" <?= $snapshotNeedsRefresh ? '' : 'hidden' ?>>↻</button></div>
 
 <label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<details class="martingale-block"><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой мартингейл</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный мартингейл</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">TP/SL задаются в процентах от стартового баланса. При старте с 10 USDT значение 0,1% соответствует 0,01 USDT. Рейтинг мартингейла отдельно сравнивает цели, растущие с суммой позиции, и цели, рассчитанные от стартового баланса.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
+<details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. Новый номинал шага удваивается, с ограничением доступного баланса. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php
 $sharedThresholdMode = $rankingModes['threshold'];
-$sharedThresholdRange = $sharedThresholdMode === 'range' ? $rankingRanges['threshold'][0] : ['from' => 1, 'to' => 100, 'step' => 1];
+$defaultThresholdSegments = $defaultRankingRanges['both_threshold'];
+$sharedThresholdRanges = $sharedThresholdMode === 'range' ? $rankingRanges['threshold'] : $defaultThresholdSegments;
 $thresholdValuesText = implode(', ', array_map(static fn (int $value): string => '±' . number_format($value / 10, 1, ',', ' '), $entryThresholdsTenthsPercent));
 ?>
 <div class="ranking-range-heading"><h3>Порог входа · % от стартового баланса <small>общий набор для ±, + и −</small></h3><label class="ranking-mode-label"><select aria-label="Общий режим порогов входа" class="ranking-mode-input" name="threshold_mode" data-default-value="default" data-range="threshold"><option value="default" <?= $sharedThresholdMode === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $sharedThresholdMode === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
 <p class="small-note">Порог входа задаёт ожидаемое движение в доле стартового баланса; при плече 1× и позиции на весь баланс это соответствует такому же проценту движения Last. Значения по умолчанию: <?= h($thresholdValuesText) ?>%. В режиме «Свой диапазон» шаг и значения применяются ко всем трём направлениям.</p>
-<div class="ranking-custom" id="threshold-custom" <?= $sharedThresholdMode === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон (%)', 'threshold', $sharedThresholdRange, false, ['from' => 1, 'to' => 100, 'step' => 1], true) ?></div>
+<div class="ranking-custom" id="threshold-custom" <?= $sharedThresholdMode === 'range' ? '' : 'hidden' ?>><?= rankingSegmentEditor('Порог входа (%)', 'threshold', $sharedThresholdRanges, $defaultThresholdSegments, true) ?></div>
 <?php
 $sharedWindowMode = $rankingModes['window'];
-$sharedWindowRange = $sharedWindowMode === 'range' ? $rankingRanges['window'][0] : ['from' => 5, 'to' => 40, 'step' => 5];
+$defaultWindowSegments = $defaultRankingRanges['both_window'];
+$sharedWindowRanges = $sharedWindowMode === 'range' ? $rankingRanges['window'] : $defaultWindowSegments;
 $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 ?>
 <div class="ranking-range-heading"><h3>Порог входа · окно (число снимков) <small>общее для ±, + и −</small></h3><label class="ranking-mode-label"><select aria-label="Общий режим окна входа" class="ranking-mode-input" name="window_mode" data-default-value="default" data-range="window"><option value="default" <?= $sharedWindowMode === 'default' ? 'selected' : '' ?>>Текущие значения</option><option value="range" <?= $sharedWindowMode === 'range' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
 <p class="small-note">Значения по умолчанию: <?= h($windowValuesText) ?> снимков. Общие окна применяются к симметричному режиму ±, росту + и падению −.</p>
-<div class="ranking-custom" id="window-custom" <?= $sharedWindowMode === 'range' ? '' : 'hidden' ?>><?= rankingRangeRow('Свой диапазон', 'window', $sharedWindowRange, false, ['from' => 5, 'to' => 40, 'step' => 5]) ?></div>
+<div class="ranking-custom" id="window-custom" <?= $sharedWindowMode === 'range' ? '' : 'hidden' ?>><?= rankingSegmentEditor('Окно снимков', 'window', $sharedWindowRanges, $defaultWindowSegments, false) ?></div>
 </div>
 <h3>TakeProfit &amp; StopLoss (% от стартового баланса)</h3>
 <p class="small-note">Совместный расчёт: каждый Take Profit проверяется с каждым Stop Loss.</p>
-<?= rankingRangeRow('Take Profit · совместный расчёт', 'fixed_tp', $rankingRanges['fixed_tp'], false, $defaultRankingRanges['fixed_tp'], true) ?>
-<?= rankingRangeRow('Stop Loss · совместный расчёт', 'fixed_sl', $rankingRanges['fixed_sl'], false, $defaultRankingRanges['fixed_sl'], true) ?>
-<?= rankingRangeRow('Только Take Profit', 'profit', $rankingRanges['profit'], false, $defaultRankingRanges['profit'], true) ?>
-<?= rankingRangeRow('Только Stop Loss', 'loss', $rankingRanges['loss'], false, $defaultRankingRanges['loss'], true) ?>
-<p class="small-note">Граница «до» включается, если на неё попадает шаг.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
-<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от стартового баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Такая заявка открывается по первому снимку выбранного периода и не повторяется.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Фиксация TP и SL: TP <?= h($exitRangeText($rankingRanges['fixed_tp'])) ?>; SL <?= h($exitRangeText($rankingRanges['fixed_sl'])) ?>.</li><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
-<section class="panel"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">Все рейтинги используют один фоновый обработчик. Ожидающие задачи показаны списком; система не гарантирует строгий порядок их запуска. Кнопка 🧹 останавливает индивидуальные рейтинги, рейтинг торговых пар и общий рейтинг.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details></section>
-<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
-<section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= count($rows) ?> снимков</span></div>
+<div class="ranking-range-heading"><h3>Take Profit + Stop Loss · совместный расчёт <small>шаг меняется по диапазонам</small></h3><label class="ranking-mode-label"><select aria-label="Сетка совместного расчёта TP и SL" class="ranking-mode-input" name="fixed_grid_mode" data-default-value="default" data-range="fixed-grid"><option value="default" <?= $rankingModes['fixed_grid'] === 'default' ? 'selected' : '' ?>>Текущая сетка</option><option value="custom" <?= $rankingModes['fixed_grid'] === 'custom' ? 'selected' : '' ?>>Свой диапазон</option></select></label></div>
+<div id="fixed-grid-custom" <?= $rankingModes['fixed_grid'] === 'custom' ? '' : 'hidden' ?>>
+<?= rankingSegmentEditor('Take Profit · свой диапазон (%)', 'fixed_tp', $rankingModes['fixed_grid'] === 'custom' ? $rankingRanges['fixed_tp']['segments'] : $defaultRankingRanges['fixed_tp']['segments'], $defaultRankingRanges['fixed_tp']['segments'], true, 2) ?>
+<?= rankingSegmentEditor('Stop Loss · свой диапазон (%)', 'fixed_sl', $rankingModes['fixed_grid'] === 'custom' ? $rankingRanges['fixed_sl']['segments'] : $defaultRankingRanges['fixed_sl']['segments'], $defaultRankingRanges['fixed_sl']['segments'], true, 2) ?>
+</div>
+<?= rankingSegmentEditor('Только Take Profit (%)', 'profit', $rankingRanges['profit'], $defaultRankingRanges['profit'], true) ?>
+<?= rankingSegmentEditor('Только Stop Loss (%)', 'loss', $rankingRanges['loss'], $defaultRankingRanges['loss'], true) ?>
+<p class="small-note">Для каждого параметра можно добавить несколько диапазонов. Внутри каждого задайте «от», «до» и шаг; граничные значения включаются.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
+<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от стартового баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
+<section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты и очищает очередь. 🧹 делает то же самое и дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
+<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><h2>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</h2><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
+<section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= $visibleQuoteCount ?> снимков</span></div>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
-<div class="legend"><?php foreach ($series as $meta): ?><span><i class="dot" style="background:<?= h($meta['color']) ?>"></i><?= h($meta['name']) ?></span><?php endforeach; ?></div>
+<div class="legend"><span><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span><i class="dot" style="background:#080d19;border:1px solid #48536c;border-radius:2px"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
 <div class="chart-wrap"><svg id="chart" role="img" aria-label="График bid, ask и last для <?= h($symbol) ?>"></svg><div id="tooltip" aria-hidden="true"></div></div>
 <?php endif; ?></section>
 <section class="panel" id="results"><div class="chart-head"><h2>Сделки стратегии</h2><span class="count"><?= $closedTradeCount ?> закрытых сделок<?php if ($openTradeCount > 0): ?> · <?= $openTradeCount ?> открыто на последнем снимке<?php endif; ?></span></div>
@@ -539,30 +785,53 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 1, ',', ' ') . '% за ' . $momentumLookback . ' снимков.' ?></div>
 <?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Сумма входа</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>
 <?php foreach ($trades as $index => $trade): $resultCompare = bccomp($trade['net'], '0', 24); $tradeIsOpen = $isOpenTrade($trade); $rowClass = $tradeIsOpen ? ($resultCompare > 0 ? 'trade-open-positive' : ($resultCompare < 0 ? 'trade-open-negative' : 'trade-flat')) : ($resultCompare > 0 ? 'trade-positive' : ($resultCompare < 0 ? 'trade-negative' : 'trade-flat')); $totalFees = bcadd($trade['entry_fee'], $trade['exit_fee'], 24); $tradeNotional = bcmul($trade['quantity'], $trade['entry_price'], 24); $tradeEntryLabel = $trade['is_short'] ? 'Продажа Bid' : 'Покупка Ask'; $tradeExitLabel = $trade['is_short'] ? 'Покупка Ask' : 'Продажа Bid'; ?>
-<tr class="<?= $rowClass ?> trade-row" tabindex="0" data-entry-time="<?= epochMilliseconds($trade['entry']['received_at_utc']) ?>" data-exit-time="<?= epochMilliseconds($trade['exit']['received_at_utc']) ?>"><td><?= $index + 1 ?></td><td><?= h(formatKyivTime($trade['entry']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeEntryLabel . ' · ' . $trade['entry_price']) ?></td><td><?= h(formatKyivTime($trade['exit']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeExitLabel . ' · ' . $trade['exit_price']) ?></td><td><?= money($trade['quantity']) ?></td><td><?= money($tradeNotional) ?> USDT</td><td><?= money($trade['gross']) ?></td><td><?= money($totalFees) ?></td><td><?= $resultCompare > 0 ? '+' : '' ?><?= money($trade['net']) ?></td><td><?= money($trade['balance']) ?></td><td class="reason"><?= $tradeIsOpen ? 'Открыта · результат по последнему снимку' : h($trade['reason']) ?></td></tr>
-<?php endforeach; ?></tbody></table></div><p class="small-note">Зелёная строка — закрытая сделка в плюсе; красная — закрытая сделка в минусе. Тёмно-зелёная или тёмно-красная — позиция на текущий день ещё открыта; результат рассчитан по последнему снимку и может измениться. Из-за промежутка между снимками фактический результат закрытой сделки может превысить заданный порог.</p><?php endif; ?></section>
+<tr class="<?= $rowClass ?> trade-row" tabindex="0" data-entry-time="<?= epochMilliseconds($trade['entry']['received_at_utc']) ?>" data-exit-time="<?= epochMilliseconds($trade['exit']['received_at_utc']) ?>" data-entry-price="<?= h((string) $trade['entry_price']) ?>" data-exit-price="<?= h((string) $trade['exit_price']) ?>" data-is-short="<?= $trade['is_short'] ? '1' : '0' ?>" data-net="<?= h((string) $trade['net']) ?>"><td><?= $index + 1 ?></td><td><?= h(formatKyivTime($trade['entry']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeEntryLabel . ' · ' . $trade['entry_price']) ?></td><td><?= h(formatKyivTime($trade['exit']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeExitLabel . ' · ' . $trade['exit_price']) ?></td><td><?= money($trade['quantity']) ?></td><td><?= money($tradeNotional) ?> USDT</td><td><?= money($trade['gross']) ?></td><td><?= money($totalFees) ?></td><td><?= $resultCompare > 0 ? '+' : '' ?><?= money($trade['net']) ?></td><td><?= money($trade['balance']) ?></td><td class="reason"><?= $tradeIsOpen ? 'Открыта · результат по последнему снимку' : h($trade['reason']) ?></td></tr>
+<?php endforeach; ?></tbody></table></div><p class="small-note">Зелёная строка — закрытая сделка в плюсе; красная — закрытая сделка в минусе. Тёмно-зелёная или тёмно-красная — позиция открыта на конец выбранного периода; её результат по последнему снимку включён в итог и может измениться. Из-за промежутка между снимками фактический результат закрытой сделки может превысить заданный порог.</p><?php endif; ?></section>
 <p class="footer">Источник: локальная база <?= h($db['database']) ?> · шаг сбора <?= (int) $config['poll_interval_seconds'] ?> сек.</p>
 </main>
 <?php if ($rows !== []): ?><script>
 const datasets = <?= json_encode($chart, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR) ?>;
 const colors = {bid_price:'#42d6a4',ask_price:'#ff7188',last_price:'#86a8ff'};
-const svg=document.querySelector('#chart'), ns='http://www.w3.org/2000/svg', W=1100,H=390,p={l:88,r:22,t:20,b:42};
+const svg=document.querySelector('#chart'), ns='http://www.w3.org/2000/svg',H=390,p={l:88,r:80,t:20,b:42};let W=H*svg.clientWidth/Math.max(1,svg.clientHeight);
 const all=Object.values(datasets).flat(); const xs=all.map(x=>x.t),ys=all.map(x=>x.v);let xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys);if(xmin===xmax){xmin-=30000;xmax+=30000}if(ymin===ymax){ymin*=.999;ymax*=1.001}const fullXmin=xmin,fullXmax=xmax;let viewMin=xmin,viewMax=xmax;const pad=(ymax-ymin)*.12;ymin-=pad;ymax+=pad;
 const X=x=>p.l+(x-viewMin)/(viewMax-viewMin)*(W-p.l-p.r),Y=y=>p.t+(ymax-y)/(ymax-ymin)*(H-p.t-p.b);
 function el(tag,attrs={},text=''){const n=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text)n.textContent=text;svg.appendChild(n);return n}
 svg.setAttribute('viewBox',`0 0 ${W} ${H}`);svg.setAttribute('preserveAspectRatio','none');
-for(let i=0;i<5;i++){const v=ymin+(ymax-ymin)*i/4,y=Y(v);el('line',{x1:p.l,y1:y,x2:W-p.r,y2:y,stroke:'#273149','stroke-width':1});el('text',{x:p.l-12,y:y+4,'text-anchor':'end',fill:'#8995ad','font-size':12},Number(v).toPrecision(7).replace(/\.?0+$/,''))}
-let xTicks=[];function buildXAxis(){for(const tick of xTicks){tick.line.remove();tick.label.remove()}xTicks=[];const tickCount=Math.max(4,Math.floor(svg.clientWidth/180));for(let i=0;i<=tickCount;i++){const line=el('line',{y1:p.t,y2:H-p.b,stroke:'#202a40','stroke-width':1}),label=el('text',{y:H-12,'text-anchor':'middle',fill:'#8995ad','font-size':12});xTicks.push({line,label,index:i/tickCount})}}function renderXAxis(){const day=(t)=>new Date(t).toLocaleDateString('en-CA',{timeZone:'Europe/Kyiv'}),showDate=day(viewMin)!==day(viewMax);for(const tick of xTicks){const t=viewMin+(viewMax-viewMin)*tick.index,x=X(t),date=new Date(t);tick.line.setAttribute('x1',x);tick.line.setAttribute('x2',x);tick.label.setAttribute('x',x);const time=date.toLocaleTimeString('ru-RU',{timeZone:'Europe/Kyiv',hour:'2-digit',minute:'2-digit'});tick.label.textContent=showDate?`${date.toLocaleDateString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit'})} ${time}`:time}}buildXAxis();renderXAxis();window.addEventListener('resize',()=>{buildXAxis();renderXAxis()});
+const yGrid=[];for(let i=0;i<5;i++){const v=ymin+(ymax-ymin)*i/4,y=Y(v);yGrid.push(el('line',{x1:p.l,y1:y,x2:W-p.r,y2:y,stroke:'#273149','stroke-width':1}));el('text',{x:p.l-12,y:y+4,'text-anchor':'end',fill:'#8995ad','font-size':12},Number(v).toPrecision(7).replace(/\.?0+$/,''))}
+let xTicks=[];function buildXAxis(){for(const tick of xTicks){tick.line.remove();tick.label.remove()}xTicks=[];const tickCount=Math.max(4,Math.floor(svg.clientWidth/180));for(let i=0;i<=tickCount;i++){const line=el('line',{y1:p.t,y2:H-p.b,stroke:'#202a40','stroke-width':1}),label=el('text',{y:H-12,'text-anchor':'middle',fill:'#8995ad','font-size':12});xTicks.push({line,label,index:i/tickCount})}}function renderXAxis(){const day=(t)=>new Date(t).toLocaleDateString('en-CA',{timeZone:'Europe/Kyiv'}),showDate=day(viewMin)!==day(viewMax);for(const tick of xTicks){const t=viewMin+(viewMax-viewMin)*tick.index,x=X(t),date=new Date(t);tick.line.setAttribute('x1',x);tick.line.setAttribute('x2',x);tick.label.setAttribute('x',x);const time=date.toLocaleTimeString('ru-RU',{timeZone:'Europe/Kyiv',hour:'2-digit',minute:'2-digit'});tick.label.textContent=showDate?`${date.toLocaleDateString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit'})} ${time}`:time}}buildXAxis();renderXAxis();
+const tradingHoursGroup=el('g',{'pointer-events':'none','aria-hidden':'true'});
+function kyivWallTimeToEpoch(day,hour,minute){const[y,m,d]=day.split('-').map(Number),utc=Date.UTC(y,m-1,d,hour,minute),parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Kyiv',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date(utc)),values=Object.fromEntries(parts.map(part=>[part.type,part.value])),asUtc=Date.UTC(Number(values.year),Number(values.month)-1,Number(values.day),Number(values.hour),Number(values.minute),Number(values.second));return utc-(asUtc-utc)}
+function renderTradingHours(){tradingHoursGroup.replaceChildren();let day=new Date(viewMin).toLocaleDateString('en-CA',{timeZone:'Europe/Kyiv'}),lastDay=new Date(viewMax).toLocaleDateString('en-CA',{timeZone:'Europe/Kyiv'});while(day<=lastDay){const start=Math.max(viewMin,kyivWallTimeToEpoch(day,16,30)),end=Math.min(viewMax,kyivWallTimeToEpoch(day,23,0));if(end>start){const band=document.createElementNS(ns,'rect');band.setAttribute('x',X(start));band.setAttribute('y',p.t);band.setAttribute('width',Math.max(0,X(end)-X(start)));band.setAttribute('height',H-p.t-p.b);band.setAttribute('fill','#080d19');band.setAttribute('opacity','.28');tradingHoursGroup.appendChild(band)}const next=new Date(day+'T12:00:00Z');next.setUTCDate(next.getUTCDate()+1);day=next.toISOString().slice(0,10)}}renderTradingHours();
 const tradeInterval=el('rect',{y:p.t,height:H-p.t-p.b,fill:'#c4a7ff',opacity:.18,visibility:'hidden','pointer-events':'none'}),tradeEntryLine=el('line',{y1:p.t,y2:H-p.b,stroke:'#d9c6ff','stroke-width':2,'stroke-dasharray':'5 4',visibility:'hidden','pointer-events':'none'}),tradeExitLine=el('line',{y1:p.t,y2:H-p.b,stroke:'#d9c6ff','stroke-width':2,'stroke-dasharray':'5 4',visibility:'hidden','pointer-events':'none'});
-const defs=el('defs'),clipPath=document.createElementNS(ns,'clipPath'),clipRect=document.createElementNS(ns,'rect'),clipId='chart-plot-clip';clipPath.setAttribute('id',clipId);clipRect.setAttribute('x',p.l);clipRect.setAttribute('y',p.t);clipRect.setAttribute('width',W-p.l-p.r);clipRect.setAttribute('height',H-p.t-p.b);clipPath.appendChild(clipRect);defs.appendChild(clipPath);const markers={},paths={};for(const[key,arr]of Object.entries(datasets)){const path=el('path',{d:arr.map((q,i)=>`${i?'L':'M'}${X(q.t).toFixed(2)},${Y(q.v).toFixed(2)}`).join(' '),fill:'none',stroke:colors[key],'stroke-width':2.2,'stroke-linejoin':'round','stroke-linecap':'round',opacity:.94,'clip-path':`url(#${clipId})`});paths[key]=path;markers[key]=el('circle',{r:5,fill:colors[key],stroke:'#0b1020','stroke-width':2,visibility:'hidden','pointer-events':'none'})}function renderSeries(){for(const[key,arr]of Object.entries(datasets)){paths[key].setAttribute('d',arr.map((q,i)=>`${i?'L':'M'}${X(q.t).toFixed(2)},${Y(q.v).toFixed(2)}`).join(' '))}}
-const crosshair=el('line',{y1:p.t,y2:H-p.b,stroke:'#d5defa','stroke-width':1,'stroke-dasharray':'4 5',opacity:.65,visibility:'hidden','pointer-events':'none'}),tip=document.querySelector('#tooltip'),wrap=document.querySelector('.chart-wrap'),sampleTimes=datasets.last_price.map(q=>q.t);
+const tradeEntryArrow=el('text',{x:0,y:0,'text-anchor':'middle','dominant-baseline':'central','font-size':17,'font-weight':800,'paint-order':'stroke','stroke':'#0b1020','stroke-width':2.5,visibility:'hidden','pointer-events':'none'});
+const tradeEntryPriceLabel=el('text',{x:0,y:0,'text-anchor':'middle','dominant-baseline':'central','font-size':11,'font-weight':700,'fill':'#e9eefb','paint-order':'stroke','stroke':'#0b1020','stroke-width':4,'stroke-linejoin':'round',visibility:'hidden','pointer-events':'none'}),tradeExitPriceLabel=el('text',{x:0,y:0,'text-anchor':'middle','dominant-baseline':'central','font-size':11,'font-weight':700,'fill':'#e9eefb','paint-order':'stroke','stroke':'#0b1020','stroke-width':4,'stroke-linejoin':'round',visibility:'hidden','pointer-events':'none'});
+const tradeExitBadge=el('g',{visibility:'hidden','pointer-events':'none'}),tradeExitBadgeCircle=document.createElementNS(ns,'circle'),tradeFaceLeftEye=document.createElementNS(ns,'circle'),tradeFaceRightEye=document.createElementNS(ns,'circle'),tradeFaceMouth=document.createElementNS(ns,'path'),tradeExitBadgeTitle=document.createElementNS(ns,'title');
+tradeExitBadgeCircle.setAttribute('r','9');tradeExitBadgeCircle.setAttribute('fill','#0b1020');tradeExitBadgeCircle.setAttribute('stroke-width','1.8');for(const eye of [tradeFaceLeftEye,tradeFaceRightEye]){eye.setAttribute('cy','-2');eye.setAttribute('r','1.1')}tradeFaceLeftEye.setAttribute('cx','-3');tradeFaceRightEye.setAttribute('cx','3');tradeFaceMouth.setAttribute('fill','none');tradeFaceMouth.setAttribute('stroke-width','1.5');tradeFaceMouth.setAttribute('stroke-linecap','round');tradeExitBadge.append(tradeExitBadgeCircle,tradeFaceLeftEye,tradeFaceRightEye,tradeFaceMouth,tradeExitBadgeTitle);svg.appendChild(tradeExitBadge);
+const defs=el('defs'),clipPath=document.createElementNS(ns,'clipPath'),clipRect=document.createElementNS(ns,'rect'),clipId='chart-plot-clip';clipPath.setAttribute('id',clipId);clipRect.setAttribute('x',p.l);clipRect.setAttribute('y',p.t);clipRect.setAttribute('width',W-p.l-p.r);clipRect.setAttribute('height',H-p.t-p.b);clipPath.appendChild(clipRect);defs.appendChild(clipPath);
+const lastDayPalette=['#86a8ff','#ffc857','#b69cff','#55d6be','#ff8f70','#6ed0ff','#d6a6ff','#a8df65'];
+const lastDayKey=t=>new Date(t).toLocaleDateString('en-CA',{timeZone:'Europe/Kyiv'}),lastDayColors=new Map(),lastDaySegments=[];
+for(const q of datasets.last_price){const day=lastDayKey(q.t);if(!lastDayColors.has(day))lastDayColors.set(day,lastDayPalette[lastDayColors.size%lastDayPalette.length]);let segment=lastDaySegments[lastDaySegments.length-1];if(!segment||segment.day!==day){segment={day,color:lastDayColors.get(day),points:lastDaySegments.length?[lastDaySegments[lastDaySegments.length-1].points.slice(-1)[0]]:[]};lastDaySegments.push(segment)}segment.points.push(q)}
+const markers={},paths={};for(const[key]of Object.entries(datasets)){if(key==='last_price'){paths[key]=lastDaySegments.map(segment=>el('path',{d:'',fill:'none',stroke:segment.color,'stroke-width':2.7,'stroke-linejoin':'round','stroke-linecap':'round',opacity:.98,'clip-path':`url(#${clipId})`}))}else paths[key]=[];markers[key]=el('circle',{r:5,fill:colors[key],stroke:'#0b1020','stroke-width':2,visibility:'hidden','pointer-events':'none'})}
+function renderSeries(){lastDaySegments.forEach((segment,index)=>paths.last_price[index].setAttribute('d',segment.points.map((q,i)=>`${i?'L':'M'}${X(q.t).toFixed(2)},${Y(q.v).toFixed(2)}`).join(' ')))}renderSeries();
+const lastLegend=document.querySelector('.legend span:first-child');if(lastLegend)lastLegend.title='Цвет линии Last соответствует календарному дню по Киеву; при наведении видны Bid, Ask и Last';
+const crosshair=el('line',{y1:p.t,y2:H-p.b,stroke:'#d5defa','stroke-width':1,'stroke-dasharray':'4 5',opacity:.65,visibility:'hidden','pointer-events':'none'}),priceCrosshair=el('line',{x1:p.l,x2:W-p.r,stroke:'#d5defa','stroke-width':1,'stroke-dasharray':'4 5',opacity:.75,visibility:'hidden','pointer-events':'none'}),priceCrosshairBadge=el('rect',{x:W-p.r+3,y:p.t,width:p.r-6,height:20,rx:4,fill:'#607df4',visibility:'hidden','pointer-events':'none'}),priceCrosshairLabel=el('text',{x:W-p.r+8,y:p.t+14,fill:'#fff','font-size':11,'font-weight':700,visibility:'hidden','pointer-events':'none'}),tip=document.querySelector('#tooltip'),wrap=document.querySelector('.chart-wrap'),sampleTimes=datasets.last_price.map(q=>q.t);
 function nearestIndex(t){let lo=0,hi=sampleTimes.length;while(lo<hi){const m=(lo+hi)>>1;if(sampleTimes[m]<t)lo=m+1;else hi=m}if(lo===0)return 0;if(lo>=sampleTimes.length)return sampleTimes.length-1;return t-sampleTimes[lo-1]<=sampleTimes[lo]-t?lo-1:lo}
-function setViewForTrade(start,end){const span=fullXmax-fullXmin;if(end-start>=span*.05){viewMin=fullXmin;viewMax=fullXmax}else{const targetSpan=span*.05,center=(start+end)/2;viewMin=Math.max(fullXmin,Math.min(center-targetSpan/2,fullXmax-targetSpan));viewMax=viewMin+targetSpan}renderXAxis();renderSeries()}
-function showTradeInterval(row){const start=Number(row.dataset.entryTime),end=Number(row.dataset.exitTime);setViewForTrade(start,end);const x1=X(start),x2=X(end);tradeInterval.setAttribute('x',x1);tradeInterval.setAttribute('width',Math.max(2,x2-x1));tradeInterval.setAttribute('visibility','visible');tradeEntryLine.setAttribute('x1',x1);tradeEntryLine.setAttribute('x2',x1);tradeExitLine.setAttribute('x1',x2);tradeExitLine.setAttribute('x2',x2);tradeEntryLine.setAttribute('visibility','visible');tradeExitLine.setAttribute('visibility','visible')}
-function hideTradeInterval(){viewMin=fullXmin;viewMax=fullXmax;renderXAxis();renderSeries();tradeInterval.setAttribute('visibility','hidden');tradeEntryLine.setAttribute('visibility','hidden');tradeExitLine.setAttribute('visibility','hidden')}
-document.querySelectorAll('.trade-row').forEach(row=>{row.addEventListener('pointerenter',()=>showTradeInterval(row));row.addEventListener('pointerleave',hideTradeInterval);row.addEventListener('focus',()=>showTradeInterval(row));row.addEventListener('blur',hideTradeInterval)});
-svg.addEventListener('pointermove',event=>{const rect=svg.getBoundingClientRect(),viewX=(event.clientX-rect.left)/rect.width*W;if(viewX<p.l||viewX>W-p.r)return;const t=viewMin+(viewX-p.l)/(W-p.l-p.r)*(viewMax-viewMin),idx=nearestIndex(t),time=sampleTimes[idx],px=X(time);crosshair.setAttribute('x1',px);crosshair.setAttribute('x2',px);crosshair.setAttribute('visibility','visible');let markup=`<div class="tip-time">${new Date(time).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})} · Киев</div>`;for(const[key,arr]of Object.entries(datasets)){const q=arr[idx];markers[key].setAttribute('cx',X(q.t));markers[key].setAttribute('cy',Y(q.v));markers[key].setAttribute('visibility','visible');const name={bid_price:'Bid',ask_price:'Ask',last_price:'Last'}[key];markup+=`<div class="tip-row"><span style="color:${colors[key]}">${name}</span><b>${q.label}</b></div>`}tip.innerHTML=markup;tip.style.display='block';const wr=wrap.getBoundingClientRect(),left=event.clientX-wr.left+14;tip.style.left=`${Math.min(left,wr.width-tip.offsetWidth-4)}px`;tip.style.top=`${Math.max(4,Math.min(event.clientY-wr.top-20,wr.height-tip.offsetHeight-4))}px`});
-svg.addEventListener('pointerleave',()=>{tip.style.display='none';crosshair.setAttribute('visibility','hidden');for(const m of Object.values(markers))m.setAttribute('visibility','hidden')});
+function tradeViewBounds(start,end){const span=fullXmax-fullXmin,duration=Math.max(0,end-start),durationRatio=Math.min(1,duration/span);if(durationRatio>=1)return{min:fullXmin,max:fullXmax};const contextRatio=Math.max(.02,Math.min(.4,Math.sqrt(durationRatio)*1.4)),targetSpan=Math.min(span,Math.max(duration,span*contextRatio)),center=(start+end)/2,min=Math.max(fullXmin,Math.min(center-targetSpan/2,fullXmax-targetSpan));return{min,max:min+targetSpan}}
+let activeTradeRow=null,displayedTradeRow=null,hoveredTradeRow=null,focusedTradeRow=null,tradeDelayTimer=null,tradeHideTimer=null,tradeAnimationFrame=null,tradePriceLabelsVisible=false;
+function drawTradeInterval(row=displayedTradeRow){if(!row){tradeInterval.setAttribute('visibility','hidden');tradeEntryLine.setAttribute('visibility','hidden');tradeExitLine.setAttribute('visibility','hidden');tradeEntryArrow.setAttribute('visibility','hidden');tradeEntryPriceLabel.setAttribute('visibility','hidden');tradeExitPriceLabel.setAttribute('visibility','hidden');tradeExitBadge.setAttribute('visibility','hidden');return}const start=Number(row.dataset.entryTime),end=Number(row.dataset.exitTime),x1=X(start),x2=X(end),entryPrice=Number(row.dataset.entryPrice),exitPrice=Number(row.dataset.exitPrice),net=Number(row.dataset.net),isShort=row.dataset.isShort==='1';tradeInterval.setAttribute('x',x1);tradeInterval.setAttribute('width',Math.max(2,x2-x1));tradeInterval.setAttribute('visibility','visible');tradeEntryLine.setAttribute('x1',x1);tradeEntryLine.setAttribute('x2',x1);tradeExitLine.setAttribute('x1',x2);tradeExitLine.setAttribute('x2',x2);tradeEntryLine.setAttribute('visibility','visible');tradeExitLine.setAttribute('visibility','visible');tradeEntryArrow.textContent=isShort?'↓':'↑';tradeEntryArrow.setAttribute('x',x1);tradeEntryArrow.setAttribute('y',Math.max(p.t+10,Y(entryPrice)-40));tradeEntryArrow.setAttribute('fill',isShort?'#ff7188':'#42d6a4');tradeEntryArrow.setAttribute('visibility','visible');tradeEntryPriceLabel.textContent=row.dataset.entryPrice;tradeEntryPriceLabel.setAttribute('x',x1);tradeEntryPriceLabel.setAttribute('y',Math.min(H-p.b-5,Y(entryPrice)+30));tradeEntryPriceLabel.setAttribute('visibility',tradePriceLabelsVisible?'visible':'hidden');tradeExitPriceLabel.textContent=row.dataset.exitPrice;tradeExitPriceLabel.setAttribute('x',x2);tradeExitPriceLabel.setAttribute('y',Math.min(H-p.b-5,Y(exitPrice)+30));tradeExitPriceLabel.setAttribute('visibility',tradePriceLabelsVisible?'visible':'hidden');const outcomeColor=net>0?'#42d6a4':(net<0?'#ff7188':'#aab5cb');tradeExitBadge.setAttribute('transform',`translate(${x2} ${Math.max(p.t+10,Y(exitPrice)-40)})`);for(const facePart of [tradeExitBadgeCircle,tradeFaceLeftEye,tradeFaceRightEye,tradeFaceMouth])facePart.setAttribute('stroke',outcomeColor);tradeFaceLeftEye.setAttribute('fill',outcomeColor);tradeFaceRightEye.setAttribute('fill',outcomeColor);tradeFaceMouth.setAttribute('d',net>=0?'M -4 2 Q 0 6 4 2':'M -4 5 Q 0 1 4 5');tradeFaceMouth.setAttribute('stroke',outcomeColor);tradeExitBadgeTitle.textContent=`${net>0?'Прибыль':(net<0?'Убыток':'Без прибыли и убытка')}: ${row.dataset.net} USDT`;tradeExitBadge.setAttribute('visibility','visible')}
+function renderTradeView(){renderXAxis();renderTradingHours();renderSeries();drawTradeInterval()}
+function cancelTradeMotion(){if(tradeDelayTimer!==null){clearTimeout(tradeDelayTimer);tradeDelayTimer=null}if(tradeHideTimer!==null){clearTimeout(tradeHideTimer);tradeHideTimer=null}if(tradeAnimationFrame!==null){cancelAnimationFrame(tradeAnimationFrame);tradeAnimationFrame=null}}
+function animateTradeView(targetMin,targetMax,duration,done){if(tradeAnimationFrame!==null)cancelAnimationFrame(tradeAnimationFrame);const fromMin=viewMin,fromMax=viewMax,started=performance.now();function frame(now){const raw=Math.min(1,(now-started)/duration),progress=raw*raw*(3-2*raw);viewMin=fromMin+(targetMin-fromMin)*progress;viewMax=fromMax+(targetMax-fromMax)*progress;renderTradeView();if(raw<1)tradeAnimationFrame=requestAnimationFrame(frame);else{tradeAnimationFrame=null;done?.()}}tradeAnimationFrame=requestAnimationFrame(frame)}
+function tradeZoomDelay(row){const duration=Math.max(0,Number(row.dataset.exitTime)-Number(row.dataset.entryTime)),minimum=10*60*1000,maximum=24*60*60*1000;if(duration<=minimum)return 1000;const progress=Math.min(1,Math.log(duration/minimum)/Math.log(maximum/minimum));return Math.round((1+4*progress)*1000)}
+function scheduleTradeZoom(row){tradeDelayTimer=setTimeout(()=>{tradeDelayTimer=null;if(activeTradeRow!==row)return;const target=tradeViewBounds(Number(row.dataset.entryTime),Number(row.dataset.exitTime));animateTradeView(target.min,target.max,3000,()=>{if(activeTradeRow!==row)return;tradePriceLabelsVisible=true;drawTradeInterval()})},tradeZoomDelay(row))}
+function activateTradeRow(row){if(tradeHideTimer!==null){clearTimeout(tradeHideTimer);tradeHideTimer=null}if(activeTradeRow===row)return;cancelTradeMotion();activeTradeRow=row;displayedTradeRow=row;tradePriceLabelsVisible=false;viewMin=fullXmin;viewMax=fullXmax;renderTradeView();scheduleTradeZoom(row)}
+function scheduleTradeHide(){if(tradeHideTimer!==null)clearTimeout(tradeHideTimer);tradeHideTimer=setTimeout(()=>{tradeHideTimer=null;if(hoveredTradeRow||focusedTradeRow)return;cancelTradeMotion();activeTradeRow=null;tradePriceLabelsVisible=false;drawTradeInterval();animateTradeView(fullXmin,fullXmax,3000,()=>{if(hoveredTradeRow||focusedTradeRow)return;displayedTradeRow=null;drawTradeInterval()})},0)}
+let pinnedTradeRow=null;
+function toggleTradeRowFilter(row){pinnedTradeRow=pinnedTradeRow===row?null:row;for(const tradeRow of document.querySelectorAll('.trade-row')){const hidden=pinnedTradeRow!==null&&tradeRow!==pinnedTradeRow;tradeRow.hidden=hidden;tradeRow.classList.toggle('trade-row-selected',!hidden&&pinnedTradeRow===tradeRow)}if(pinnedTradeRow===row)row.focus()}
+document.querySelectorAll('.trade-row').forEach(row=>{row.addEventListener('pointerenter',()=>{hoveredTradeRow=row;activateTradeRow(row)});row.addEventListener('pointerleave',()=>{if(hoveredTradeRow===row)hoveredTradeRow=null;scheduleTradeHide()});row.addEventListener('focus',()=>{focusedTradeRow=row;activateTradeRow(row)});row.addEventListener('blur',()=>{if(focusedTradeRow===row)focusedTradeRow=null;scheduleTradeHide()});row.addEventListener('click',()=>toggleTradeRowFilter(row));row.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleTradeRowFilter(row)}})});
+svg.addEventListener('pointermove',event=>{const rect=svg.getBoundingClientRect(),viewX=(event.clientX-rect.left)/rect.width*W,viewY=(event.clientY-rect.top)/rect.height*H;if(viewY<p.t||viewY>H-p.b)return;const plotX=Math.max(p.l,Math.min(W-p.r,viewX)),t=viewMin+(plotX-p.l)/(W-p.l-p.r)*(viewMax-viewMin),idx=nearestIndex(t),time=sampleTimes[idx],px=X(time),price=ymin+(H-p.b-viewY)/(H-p.t-p.b)*(ymax-ymin),priceY=Math.max(p.t,Math.min(H-p.b,viewY)),badgeY=Math.max(p.t,Math.min(H-p.b-20,priceY-10));crosshair.setAttribute('x1',px);crosshair.setAttribute('x2',px);crosshair.setAttribute('visibility','visible');priceCrosshair.setAttribute('y1',priceY);priceCrosshair.setAttribute('y2',priceY);priceCrosshair.setAttribute('visibility','visible');priceCrosshairBadge.setAttribute('x',W-p.r+3);priceCrosshairBadge.setAttribute('y',badgeY);priceCrosshairBadge.setAttribute('width',p.r-6);priceCrosshairBadge.setAttribute('visibility','visible');priceCrosshairLabel.setAttribute('x',W-p.r+8);priceCrosshairLabel.setAttribute('y',badgeY+14);priceCrosshairLabel.textContent=Number(price).toPrecision(7).replace(/\.?0+$/,'');priceCrosshairLabel.setAttribute('visibility','visible');let markup=`<div class="tip-time">${new Date(time).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})} · Киев</div>`;for(const[key,arr]of Object.entries(datasets)){const q=arr[idx];markers[key].setAttribute('cx',X(q.t));markers[key].setAttribute('cy',Y(q.v));markers[key].setAttribute('fill',key==='last_price'?lastDayColors.get(lastDayKey(q.t)):colors[key]);markers[key].setAttribute('visibility','visible');const name={bid_price:'Bid',ask_price:'Ask',last_price:'Last'}[key];markup+=`<div class="tip-row"><span style="color:${key==='last_price'?lastDayColors.get(lastDayKey(q.t)):colors[key]}">${name}</span><b>${q.label}</b></div>`}tip.innerHTML=markup;tip.style.display='block';const wr=wrap.getBoundingClientRect(),left=event.clientX-wr.left+14;tip.style.left=`${Math.min(left,wr.width-tip.offsetWidth-4)}px`;tip.style.top=`${Math.max(4,Math.min(event.clientY-wr.top-20,wr.height-tip.offsetHeight-4))}px`});
+svg.addEventListener('pointerleave',()=>{tip.style.display='none';crosshair.setAttribute('visibility','hidden');priceCrosshair.setAttribute('visibility','hidden');priceCrosshairBadge.setAttribute('visibility','hidden');priceCrosshairLabel.setAttribute('visibility','hidden');for(const m of Object.values(markers))m.setAttribute('visibility','hidden')});
+window.addEventListener('resize',()=>{W=H*svg.clientWidth/Math.max(1,svg.clientHeight);svg.setAttribute('viewBox',`0 0 ${W} ${H}`);priceCrosshair.setAttribute('x2',W-p.r);priceCrosshairBadge.setAttribute('x',W-p.r+3);priceCrosshairBadge.setAttribute('width',p.r-6);priceCrosshairLabel.setAttribute('x',W-p.r+8);for(const line of yGrid)line.setAttribute('x2',W-p.r);clipRect.setAttribute('width',W-p.l-p.r);buildXAxis();renderXAxis();renderTradingHours();renderSeries()});
 </script><?php endif; ?>
 <script>
 const filtersForm = document.querySelector('.filters');
@@ -613,14 +882,42 @@ async function loadCachedTickerBestResults() {
     } catch (_) {}
 }
 const refreshSymbolsButton = document.querySelector('#refresh-symbols');
+const refreshTodaySnapshotButton = document.querySelector('#refresh-today-snapshot');
 const resetSymbolCacheButton = document.querySelector('#reset-symbol-cache');
+const stopCalculationQueueButton = document.querySelector('#stop-calculation-queue');
 const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel');
 const portfolioRankingContent = document.querySelector('#portfolio-ranking-content');
 const portfolioRankingStatus = document.querySelector('#portfolio-ranking-status');
+const portfolioRankingDiagnostics = document.querySelector('#portfolio-ranking-diagnostics');
 const calculationQueueCount = document.querySelector('#calculation-queue-count');
 const calculationQueueActive = document.querySelector('#calculation-queue-active');
 const calculationQueueWaiting = document.querySelector('#calculation-queue-waiting');
 const calculationQueueUpdated = document.querySelector('#calculation-queue-updated');
+const endDayInput = filtersForm.elements.namedItem('end_day');
+refreshTodaySnapshotButton?.addEventListener('click', async () => {
+    if (!filtersForm.checkValidity()) {
+        filtersForm.reportValidity();
+        return;
+    }
+    refreshTodaySnapshotButton.disabled = true;
+    refreshTodaySnapshotButton.textContent = '…';
+    try {
+        const response = await fetch('refresh-current-day-snapshot.php', {
+            method: 'POST',
+            body: new FormData(filtersForm),
+            headers: {Accept: 'application/json'},
+            cache: 'no-store',
+        });
+        const result = await response.json();
+        if (!response.ok || result.status !== 'ready') throw new Error(result.message || 'Не удалось обновить данные.');
+        document.querySelector('#symbol-sort-mode').value = 'profit';
+        filtersForm.requestSubmit();
+    } catch (error) {
+        window.alert(error.message || 'Не удалось обновить данные.');
+        refreshTodaySnapshotButton.disabled = false;
+        refreshTodaySnapshotButton.textContent = '↻';
+    }
+});
 function createElapsedTimer(element, label) {
     let currentLabel = label;
     let startedAt = null;
@@ -745,8 +1042,10 @@ function updateMartingaleInitialNotional() {
     const policy = policyMatch?.[1] || 'scaled';
     const exitId = selectedExit.replace(/:(scaled|fixed)$/, '');
     let stopLoss = null;
-    let match = exitId.match(/^fixed:\d+:(\d+)$/) || exitId.match(/^loss:(\d+)$/);
-    if (match) stopLoss = balance * Number(match[1]) / 1000;
+    let fixedMatch = exitId.match(/^fixed:\d+:(\d+)$/);
+    let lossMatch = exitId.match(/^loss:(\d+)$/);
+    if (fixedMatch) stopLoss = balance * Number(fixedMatch[1]) / 10000;
+    else if (lossMatch) stopLoss = balance * Number(lossMatch[1]) / 1000;
 
     if (!(balance > 0) || !(attempts >= 2) || !Number.isFinite(fee)) {
         martingaleInitialNotional.textContent = 'Проверьте баланс и комиссию';
@@ -756,7 +1055,10 @@ function updateMartingaleInitialNotional() {
     const previousScale = 2 ** (attempts - 2);
     let reservedLoss = 0;
     let requiredPerInitialDollar = finalScale;
-    if (stopLoss !== null) {
+    if (settings.martingale_mode.endsWith('_profit')) {
+        // Profit-triggered progressions are sized to fit the planned geometric
+        // sequence from the starting balance.
+    } else if (stopLoss !== null) {
         if (settings.martingale_mode === 'simple') {
             reservedLoss = stopLoss * (policy === 'scaled' ? previousScale : 1);
             requiredPerInitialDollar += fee * previousScale;
@@ -813,10 +1115,86 @@ document.querySelector('#apply-ranking-ranges').addEventListener('click', () => 
     document.querySelector('#select-top-ranked-result').value = '1';
     resetPortfolioRankingForRelevantFilterChange();
 });
+function reindexRangeEditor(editor) {
+    const rows = [...editor.querySelectorAll('.ranking-segment-row')];
+    rows.forEach((row, index) => {
+        row.querySelectorAll('input[data-field]').forEach(input => {
+            input.name = `${editor.dataset.rangeName}[${index}][${input.dataset.field}]`;
+        });
+        const remove = row.querySelector('.remove-range-segment');
+        remove.disabled = rows.length === 1;
+    });
+}
+function restoreRangeEditorDefaults(editor) {
+    const defaults = JSON.parse(editor.dataset.defaultSegments || '[]');
+    const precision = Number(editor.dataset.percentPrecision) || 0;
+    const scale = 10 ** precision;
+    editor.querySelectorAll('.ranking-segment-row').forEach(row => row.remove());
+    const addButton = editor.querySelector('.add-range-segment');
+    defaults.forEach((segment, index) => {
+        const row = document.createElement('div');
+        row.className = 'ranking-segment-row';
+        const label = document.createElement('span');
+        label.textContent = `Диапазон ${index + 1}`;
+        row.appendChild(label);
+        for (const [field, caption] of [['from', 'От'], ['to', 'До'], ['step', 'Шаг']]) {
+            const wrapper = document.createElement('label');
+            wrapper.append(caption);
+            const input = document.createElement('input');
+            input.className = 'ranking-range-input';
+            input.type = 'number';
+            input.min = precision ? (1 / scale).toFixed(precision) : '1';
+            input.step = input.min;
+            input.dataset.field = field;
+            input.dataset.defaultValue = precision ? (Number(segment[field]) / scale).toFixed(precision) : String(segment[field]);
+            input.value = input.dataset.defaultValue;
+            input.required = true;
+            wrapper.appendChild(input);
+            row.appendChild(wrapper);
+        }
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'remove-range-segment';
+        remove.setAttribute('aria-label', 'Удалить диапазон');
+        remove.textContent = '−';
+        row.appendChild(remove);
+        editor.insertBefore(row, addButton);
+    });
+    reindexRangeEditor(editor);
+}
+document.querySelectorAll('.ranking-segment-editor').forEach(editor => {
+    reindexRangeEditor(editor);
+    editor.addEventListener('click', event => {
+        const button = event.target.closest('button');
+        if (!button) return;
+        if (button.classList.contains('remove-range-segment')) {
+            const rows = editor.querySelectorAll('.ranking-segment-row');
+            if (rows.length > 1) button.closest('.ranking-segment-row').remove();
+            reindexRangeEditor(editor);
+        } else if (button.classList.contains('add-range-segment')) {
+            const rows = [...editor.querySelectorAll('.ranking-segment-row')];
+            const previous = rows.at(-1);
+            const values = Object.fromEntries([...previous.querySelectorAll('input[data-field]')].map(input => [input.dataset.field, Number(input.value)]));
+            const precision = Number(editor.dataset.percentPrecision) || 0;
+            const step = values.step || (precision ? 1 / (10 ** precision) : 1);
+            const from = values.to + step;
+            const row = previous.cloneNode(true);
+            const label = row.querySelector('span');
+            label.textContent = `Диапазон ${rows.length + 1}`;
+            const inputs = Object.fromEntries([...row.querySelectorAll('input[data-field]')].map(input => [input.dataset.field, input]));
+            inputs.from.value = precision ? from.toFixed(precision) : String(Math.round(from));
+            inputs.to.value = inputs.from.value;
+            inputs.step.value = precision ? step.toFixed(precision) : String(Math.round(step));
+            row.querySelectorAll('input').forEach(input => { input.dataset.defaultValue = ''; });
+            editor.insertBefore(row, editor.querySelector('.add-range-segment'));
+            reindexRangeEditor(editor);
+        }
+    });
+});
 document.querySelectorAll('.ranking-mode-input').forEach(control => {
     const update = () => {
         const custom = document.querySelector('#' + control.dataset.range + '-custom');
-        const enabled = control.value === 'range';
+        const enabled = control.value === 'range' || control.value === 'custom';
         custom.hidden = !enabled;
         custom.querySelectorAll('input').forEach(input => { input.disabled = !enabled; });
     };
@@ -824,6 +1202,7 @@ document.querySelectorAll('.ranking-mode-input').forEach(control => {
     update();
 });
 document.querySelector('#reset-ranking-parameters').addEventListener('click', () => {
+    document.querySelectorAll('.ranking-segment-editor').forEach(restoreRangeEditorDefaults);
     document.querySelectorAll('.ranking-range-input').forEach(input => {
         input.value = input.dataset.defaultValue;
     });
@@ -837,7 +1216,7 @@ document.querySelector('#reset-ranking-parameters').addEventListener('click', ()
 });
 saveModeToggle.addEventListener('change', () => {
     saveModeValue.value = saveModeToggle.checked ? '1' : '0';
-    document.querySelector('#save-mode-detail').textContent = saveModeToggle.checked ? 'минимум 2 сделки' : 'от 1 сделки';
+    document.querySelector('#save-mode-detail').textContent = saveModeToggle.checked ? 'минимум 3 сделки' : 'от 1 сделки';
     resetPortfolioRankingForRelevantFilterChange();
     filtersForm.requestSubmit();
 });
@@ -876,7 +1255,7 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
         }
         if (control.id === 'entry-config') {
             updateMartingaleInitialNotional();
-            refreshStrategyResults();
+            refreshAfterExitRanking = true;
             const selectedExit = exitConfigSelect.value;
             exitRankingRequestVersion++;
             exitConfigSelect.replaceChildren();
@@ -892,6 +1271,9 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
             updateMartingaleInitialNotional();
             refreshStrategyResults();
             return;
+        }
+        if (control.id === 'symbol-select') {
+            selectTopRankedResultInput.value = '1';
         }
         clearTimeout(filterSubmitTimer);
         if (control.name === 'start_day' || control.name === 'end_day') {
@@ -930,6 +1312,7 @@ function renderEntryOptions(entries, selected) {
     }
 }
 let exitRankingRequestVersion = 0;
+let refreshAfterExitRanking = false;
 let isResettingSymbolCache = false;
 async function handleMartingaleSettingsChange() {
     const nextSettings = readAppliedMartingaleSettings();
@@ -954,6 +1337,7 @@ async function handleMartingaleSettingsChange() {
     martingaleControls.forEach(control => { control.disabled = true; });
     martingaleApplyButton.disabled = true;
     resetSymbolCacheButton.disabled = true;
+    stopCalculationQueueButton.disabled = true;
     martingaleCacheStatus.hidden = false;
     martingaleCacheStatus.textContent = 'Останавливаю старые расчёты и обновляю рейтинг мартингейла…';
     let resetSucceeded = false;
@@ -982,6 +1366,7 @@ async function handleMartingaleSettingsChange() {
         exitConfigSelect.disabled = false;
         martingaleControls.forEach(control => { control.disabled = false; });
         resetSymbolCacheButton.disabled = false;
+        stopCalculationQueueButton.disabled = false;
         updateMartingaleDraftState();
     }
     if (resetSucceeded) filtersForm.requestSubmit();
@@ -993,6 +1378,7 @@ martingaleApplyButton.addEventListener('click', () => {
 async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (isResettingSymbolCache) return;
     const params = new URLSearchParams(new FormData(filtersForm));
+    if (!isPoll) params.set('retry_cancelled', '1');
     if (!isPoll) {
         strategyRankingTimer.reset();
         strategyRankingTimer.setLabel('Ожидание ответа · всего прошло');
@@ -1021,7 +1407,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         if (ranking.status === 'insufficient_data') {
             entryConfigSelect.replaceChildren();
             const entryMessage = document.createElement('option');
-            entryMessage.textContent = ranking.message || 'Для рейтинга нужно минимум две сделки';
+            entryMessage.textContent = ranking.message || 'Для рейтинга нужно минимум три сделки';
             entryMessage.disabled = true;
             entryMessage.selected = true;
             entryConfigSelect.appendChild(entryMessage);
@@ -1031,6 +1417,10 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             exitMessage.disabled = true;
             exitMessage.selected = true;
             exitConfigSelect.appendChild(exitMessage);
+            if (refreshAfterExitRanking) {
+                refreshAfterExitRanking = false;
+                void refreshStrategyResults();
+            }
             return;
         }
         renderEntryOptions(ranking.entries, params.get('entry_config'));
@@ -1041,6 +1431,10 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
                 return;
             }
             if (entryConfigSelect.value && entryConfigSelect.value !== params.get('entry_config')) filtersForm.requestSubmit();
+            else if (refreshAfterExitRanking) {
+                refreshAfterExitRanking = false;
+                void refreshStrategyResults();
+            }
             return;
         }
         if (ranking.status === 'pending') {
@@ -1054,6 +1448,10 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         }
         if (ranking.status !== 'ready') {
             exitConfigSelect.options[0].textContent = ranking.message || 'Рейтинг временно недоступен';
+            if (refreshAfterExitRanking) {
+                refreshAfterExitRanking = false;
+                void refreshStrategyResults();
+            }
             return;
         }
         if (selectTopRankedResult && ranking.entries?.[0] && params.get('entry_config') !== ranking.entries[0].id) {
@@ -1081,9 +1479,10 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             const fallback = exitConfigSelect.options[0];
             if (fallback) {
                 fallback.selected = true;
-                if (selected && fallback.value !== selected) filtersForm.requestSubmit();
+                if (selected && fallback.value !== selected && !refreshAfterExitRanking) filtersForm.requestSubmit();
             }
         }
+        const appliedAutomaticSelection = selectTopRankedResult;
         if (selectTopRankedResult) {
             selectTopRankedResult = false;
             selectTopRankedResultInput.value = '0';
@@ -1092,29 +1491,48 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             history.replaceState(null, '', location.pathname + '?' + finalParams.toString());
         }
         updateMartingaleInitialNotional();
+        if (appliedAutomaticSelection || refreshAfterExitRanking) {
+            refreshAfterExitRanking = false;
+            void refreshStrategyResults();
+        }
         void loadCachedTickerBestResults();
     } catch (_) {
         if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
         strategyRankingTimer.finish('Общее время до ошибки', {persist: false});
         exitConfigSelect.options[0].textContent = 'Не удалось загрузить рейтинг';
+        if (refreshAfterExitRanking) {
+            refreshAfterExitRanking = false;
+            void refreshStrategyResults();
+        }
     }
 }
 resetSymbolCacheButton.addEventListener('click', async () => {
     if (isResettingSymbolCache) return;
     isResettingSymbolCache = true;
     let resetSucceeded = false;
-    let stoppedProcesses = 0;
     let resetError = '';
+    let broomStoppedProcesses = 0;
+    let broomCancelledJobs = 0;
     exitRankingRequestVersion++;
     portfolioRankingRequestVersion++;
-    strategyRankingTimer.finish('Остановлено кнопкой сброса', {persist: false});
-    portfolioRankingTimer.finish('Остановлено кнопкой сброса');
+    strategyRankingTimer.finish('Остановлено метлой', {persist: false});
+    portfolioRankingTimer.finish('Остановлено метлой');
     refreshSymbolsButton.disabled = true;
-    portfolioRankingStatus.textContent = 'Останавливаю все фоновые расчёты…';
+    portfolioRankingStatus.textContent = 'Останавливаю расчёты, очищаю очередь и сбрасываю кэш рейтингов…';
     resetSymbolCacheButton.disabled = true;
+    stopCalculationQueueButton.disabled = true;
     resetSymbolCacheButton.textContent = '…';
     resetSymbolCacheButton.title = 'Сбрасываю кэш рейтингов…';
     try {
+        const stopResponse = await fetch('stop-ranking-jobs.php', {
+            method: 'POST',
+            headers: {Accept: 'application/json'},
+            cache: 'no-store',
+        });
+        const stopped = await stopResponse.json();
+        if (!stopResponse.ok || stopped.status !== 'ready') throw new Error(stopped.message || 'Не удалось остановить расчёты и очистить очередь');
+        broomStoppedProcesses = Number(stopped.stopped_processes) || 0;
+        broomCancelledJobs = Number(stopped.cancelled_jobs) || 0;
         const response = await fetch('reset-strategy-ranking-cache.php', {
             method: 'POST',
             headers: {Accept: 'application/json'},
@@ -1124,7 +1542,6 @@ resetSymbolCacheButton.addEventListener('click', async () => {
         if (!response.ok || result.status !== 'ready') throw new Error(result.message || 'Не удалось сбросить кэш рейтингов');
         rankingGenerationInput.value = result.generation;
         resetSucceeded = true;
-        stoppedProcesses = Number(result.stopped_processes) || 0;
         symbolSortMode.value = '';
         const params = new URLSearchParams(new FormData(filtersForm));
         history.replaceState(null, '', location.pathname + '?' + params.toString());
@@ -1133,11 +1550,52 @@ resetSymbolCacheButton.addEventListener('click', async () => {
     } finally {
         isResettingSymbolCache = false;
         resetSymbolCacheButton.disabled = false;
-        resetRefreshButton(resetSucceeded ? 'Очередь расчётов очищена кнопкой 🧹' : 'Расчёты не удалось остановить');
+        stopCalculationQueueButton.disabled = false;
+        resetRefreshButton(resetSucceeded ? 'Расчёты остановлены, очередь очищена, кэш рейтингов сброшен.' : 'Не удалось остановить расчёты и сбросить кэш');
         resetSymbolCacheButton.textContent = '🧹';
         resetSymbolCacheButton.title = resetSucceeded
-            ? `Очередь очищена. Остановлено процессов: ${stoppedProcesses}. Для нового расчёта нажмите кнопку рейтинга.`
-            : resetError || 'Остановить все расчёты и очистить очередь рейтингов';
+            ? `Расчёты остановлены: ${broomStoppedProcesses}; удалено из очереди: ${broomCancelledJobs}. Кэш сброшен.`
+            : resetError || 'Остановить расчёты, очистить очередь и сбросить кэш рейтингов';
+    }
+});
+stopCalculationQueueButton.addEventListener('click', async () => {
+    if (isResettingSymbolCache) return;
+    isResettingSymbolCache = true;
+    let stoppedProcesses = 0;
+    let cancelledJobs = 0;
+    let stopError = '';
+    exitRankingRequestVersion++;
+    portfolioRankingRequestVersion++;
+    strategyRankingTimer.finish('Остановлено кнопкой очереди', {persist: false});
+    portfolioRankingTimer.finish('Остановлено кнопкой очереди');
+    refreshSymbolsButton.disabled = true;
+    portfolioRankingStatus.textContent = 'Останавливаю расчёты и очищаю очередь…';
+    resetSymbolCacheButton.disabled = true;
+    stopCalculationQueueButton.disabled = true;
+    stopCalculationQueueButton.textContent = '…';
+    stopCalculationQueueButton.title = 'Останавливаю расчёты и очищаю очередь…';
+    try {
+        const response = await fetch('stop-ranking-jobs.php', {
+            method: 'POST',
+            headers: {Accept: 'application/json'},
+            cache: 'no-store',
+        });
+        const result = await response.json();
+        if (!response.ok || result.status !== 'ready') {
+            throw new Error(result.message || 'Не удалось остановить расчёты и очистить очередь');
+        }
+        stoppedProcesses = Number(result.stopped_processes) || 0;
+        cancelledJobs = Number(result.cancelled_jobs) || 0;
+    } catch (error) {
+        stopError = error.message || 'Не удалось остановить расчёты и очистить очередь';
+    } finally {
+        isResettingSymbolCache = false;
+        resetSymbolCacheButton.disabled = false;
+        stopCalculationQueueButton.disabled = false;
+        stopCalculationQueueButton.textContent = '↻';
+        stopCalculationQueueButton.title = stopError || `Остановлено расчётов: ${stoppedProcesses}; удалено из очереди: ${cancelledJobs}. Кэш сохранён.`;
+        resetRefreshButton(stopError || 'Расчёты остановлены; очередь очищена. Кэш сохранён.');
+        void refreshCalculationQueue();
     }
 });
 const wait = ms => new Promise(resolve => window.setTimeout(resolve, ms));
@@ -1178,7 +1636,7 @@ async function sortSymbolsByProfit() {
             if (!option) continue;
             if (item.best_pnl === null || item.best_pnl === undefined) {
                 option.textContent = `${item.symbol} · нет надежного рейтинга`;
-                option.title = params.get('save_mode') === '0' ? 'Нет варианта выхода хотя бы с одной сделкой' : 'Ни один вариант не дал минимум две сделки';
+                option.title = params.get('save_mode') === '0' ? 'Нет варианта выхода хотя бы с одной сделкой' : 'Ни один вариант не дал минимум три сделки';
             } else {
                 rankedCount++;
                 const pnl = Number(item.best_pnl);
@@ -1305,29 +1763,95 @@ function portfolioCombinationDetailLink(params, item) {
         exit: {text: item.exit_label || '—', href: 'portfolio-combination.php?' + detailParams.toString()},
     };
 }
-async function loadPortfolioRanking() {
+function portfolioRankingDiagnosticsText(ranking) {
+    const number = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString('ru-RU') : '0';
+    const duration = seconds => {
+        const total = Math.max(0, Math.floor(Number(seconds) || 0));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const remainder = total % 60;
+        return hours ? `${hours} ч ${minutes} мин` : `${minutes} мин ${remainder} с`;
+    };
+    const lines = [];
+    if (ranking.result_cache_hit) {
+        const cachedAt = ranking.result_cached_at ? new Date(ranking.result_cached_at).toLocaleString('ru-RU', {timeZone:'Europe/Kyiv'}) : null;
+        lines.push(`Готовый общий рейтинг взят из точного кэша${cachedAt ? ` · сохранен ${cachedAt}` : ''}; новый перебор не выполнялся.`);
+    } else if (ranking.status === 'pending' && !ranking.queued) {
+        lines.push('Готового общего рейтинга с этими датами и фильтрами нет. Идет новый проход: worker использует подходящие дневные состояния и результаты симуляций, если их версия котировок и параметры совпадают; остальное рассчитывает заново.');
+    }
+    if (ranking.start_day || ranking.end_day) lines.push(`Диапазон котировок: ${ranking.start_day || '—'} — ${ranking.end_day || '—'}; тикеров: ${number(ranking.universe_size)}.`);
+    if (ranking.total_candidates !== undefined) {
+        const profileRatio = Number(ranking.total_entry_profiles) > 0
+            ? (Number(ranking.completed_entry_profiles) || 0) / Number(ranking.total_entry_profiles) : 0;
+        const completedCandidates = ranking.completed_candidates !== undefined
+            ? Number(ranking.completed_candidates) : Math.floor(Number(ranking.total_candidates) * profileRatio);
+        const estimateLabel = ranking.completed_candidates === undefined ? 'примерно ' : '';
+        lines.push(`Комбинаций входа/выхода обработано ${estimateLabel}${number(completedCandidates)} из ${number(ranking.total_candidates)}; порогов входа ${ranking.completed_entry_profiles || 0} из ${ranking.total_entry_profiles || 0}${ranking.entry_profile ? ` · сейчас ${ranking.entry_profile}` : ''}.`);
+    }
+    if (ranking.total_ticker_evaluations !== undefined) {
+        const profileRatio = Number(ranking.total_entry_profiles) > 0
+            ? (Number(ranking.completed_entry_profiles) || 0) / Number(ranking.total_entry_profiles) : 0;
+        const completedEvaluations = ranking.completed_ticker_evaluations !== undefined
+            ? Number(ranking.completed_ticker_evaluations) : Math.floor(Number(ranking.total_ticker_evaluations) * profileRatio);
+        const estimateLabel = ranking.completed_ticker_evaluations === undefined ? 'примерно ' : '';
+        lines.push(`Объем прохода по тикерам: ${estimateLabel}${number(completedEvaluations)} из ${number(ranking.total_ticker_evaluations)} проверок «тикер × порог × выход».`);
+    }
+    const checkpointDates = ranking.checkpoint_days_reused && typeof ranking.checkpoint_days_reused === 'object'
+        ? Object.entries(ranking.checkpoint_days_reused).sort(([a], [b]) => a.localeCompare(b)) : [];
+    const checkpointCount = Number(ranking.checkpoint_result_reuses) || 0;
+    lines.push(`Дневные состояния использованы для ${number(checkpointCount)} результатов${checkpointDates.length ? `; даты контрольных точек: ${checkpointDates.map(([day, count]) => `${day} (${number(count)} связок тикер/порог)`).join(', ')}` : '; подтвержденные даты контрольных точек пока не записаны'}.`);
+    const hits = Number(ranking.pair_cache_hits) || 0;
+    const misses = Number(ranking.pair_cache_misses) || 0;
+    if (hits + misses > 0 || ranking.pair_cache_hits !== undefined) {
+        const percent = hits + misses ? Math.round(hits * 100 / (hits + misses)) : 0;
+        lines.push(`Кэш результатов: найдено ${number(hits)} (${percent}%), рассчитано заново ${number(misses)}; сохранены дневные точки для ${number(ranking.checkpoint_writes)} связок тикер/порог${Number(ranking.checkpoint_skips_low_disk) ? `, не сохранены из-за свободного места для ${number(ranking.checkpoint_skips_low_disk)} связок` : ''}.`);
+    } else if (ranking.status === 'pending' && !ranking.queued) lines.push('Счетчики попаданий/промахов кэша появятся в новых расчетах; этот уже запущенный процесс их не записывает.');
+    if (ranking.queued) lines.push('Задача пока ждет свободного обработчика; статистика появится после запуска.');
+    else if (ranking.elapsed_seconds !== undefined) lines.push(`Прошло: ${duration(ranking.elapsed_seconds)}.`);
+    if (checkpointDates.length || checkpointCount) lines.push('Контрольные точки хранят состояние на конец дня. Если последняя подходящая точка раньше конца периода, хвост котировок пересчитывается; если точки на нужный день нет или проверка версии котировок не прошла, расчет идет с более ранней точки.');
+    if (checkpointCount > 0 && checkpointDates.length === 0) lines.push('Этот расчет запущен до добавления отчета с датами контрольных точек; новые запуски покажут даты, которые действительно загрузили.');
+    if (ranking.min_trades !== undefined) lines.push(`SAVE MODE = минимум ${ranking.min_trades} сделки: он отсекает неподходящие результаты после расчета и сам по себе не уменьшает число проверяемых TP/SL.`);
+    if (ranking.status === 'ready' && Array.isArray(ranking.global_top)) {
+        const topOutcomeCounts = new Map();
+        for (const item of ranking.global_top) {
+            const key = [Number(item.average_pnl).toFixed(6), item.eligible_symbols, item.profitable_symbols].join('|');
+            topOutcomeCounts.set(key, (topOutcomeCounts.get(key) || 0) + 1);
+        }
+        const repeatedTopRows = [...topOutcomeCounts.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0);
+        if (repeatedTopRows) lines.push(`В сохраненном топ-5 есть ${repeatedTopRows} дополнительная комбинация с тем же средним итогом и покрытием — близкие варианты выхода могут давать одинаковый результат на этих котировках.`);
+        lines.push('В кэше рейтинга сохраняются топ-5 и лучший вариант каждого тикера, а не таблица всех кандидатов. Этого достаточно для показа победителей, но мало для надежного решения, какие диапазоны можно убрать.');
+    }
+    portfolioRankingDiagnostics.hidden = lines.length === 0;
+    portfolioRankingDiagnostics.textContent = lines.join('\n');
+}
+async function loadPortfolioRanking({cachedOnly = false} = {}) {
     const requestVersion = ++portfolioRankingRequestVersion;
     portfolioRankingTimer.reset();
-    portfolioRankingTimer.start();
     portfolioRankingPanel.hidden = false;
-    portfolioRankingContent.hidden = false;
-    portfolioRankingStatus.textContent = 'Подготавливаю общий рейтинг…';
-    setRefreshProgress(0, 'Подготавливаю общий рейтинг…');
+    portfolioRankingContent.hidden = cachedOnly;
+    if (!cachedOnly) {
+        portfolioRankingTimer.start();
+        portfolioRankingStatus.textContent = 'Подготавливаю общий рейтинг…';
+        setRefreshProgress(0, 'Подготавливаю общий рейтинг…');
+    }
     let buttonTitle = 'Рассчитать рейтинг еще раз';
     try {
         const params = new URLSearchParams(new FormData(filtersForm));
-        let retryCancelled = true;
-        history.replaceState(null, '', location.pathname + '?' + params.toString());
+        let retryCancelled = !cachedOnly;
+        if (!cachedOnly) history.replaceState(null, '', location.pathname + '?' + params.toString());
         let ranking;
         do {
             if (requestVersion !== portfolioRankingRequestVersion) return;
             const requestParams = new URLSearchParams(params);
+            if (cachedOnly) requestParams.set('cached_only', '1');
             if (retryCancelled) requestParams.set('retry_cancelled', '1');
             retryCancelled = false;
             const response = await fetch('portfolio-ranking.php?' + requestParams.toString(), {headers:{Accept:'application/json'}});
             ranking = await response.json();
             if (requestVersion !== portfolioRankingRequestVersion) return;
             if (!response.ok || ranking.status === 'error') throw new Error(ranking.message || 'Не удалось рассчитать общий рейтинг');
+            if (cachedOnly && ranking.status === 'missing') return;
+            portfolioRankingDiagnosticsText(ranking);
             if (ranking.status === 'pending') {
                 const completedProfiles = Number(ranking.completed_entry_profiles);
                 const totalProfiles = Number(ranking.total_entry_profiles);
@@ -1350,6 +1874,7 @@ async function loadPortfolioRanking() {
             return;
         }
         if (ranking.status !== 'ready') throw new Error(ranking.message || 'Общий рейтинг пока недоступен');
+        portfolioRankingContent.hidden = false;
         const globalRows = (ranking.global_top || []).map(item => {
             const detailLink = portfolioCombinationDetailLink(params, item);
             return [
@@ -1388,6 +1913,7 @@ async function loadPortfolioRanking() {
         portfolioRankingStatus.textContent = 'Средний итог рассчитан по ' + ranking.universe_size
             + ' тикерам с данными за период; пары без подходящей выборки учитываются как 0. SAVE MODE требует минимум '
             + ranking.min_trades + (ranking.min_trades === 1 ? ' сделку.' : ' сделки.');
+        portfolioRankingDiagnosticsText(ranking);
         const tickerResults = (ranking.ticker_leaders || []).map(item => ({
             symbol: item.symbol,
             pnl: item.pnl,
@@ -1399,14 +1925,18 @@ async function loadPortfolioRanking() {
         const rankedCount = tickerResults.filter(item => item.pnl !== null && item.pnl !== undefined).length;
         buttonTitle = 'Пары отсортированы по их лучшему результату: надежных рейтингов ' + rankedCount + ' из ' + symbolSelect.options.length + '.';
     } catch (error) {
-        if (requestVersion === portfolioRankingRequestVersion) {
+        if (!cachedOnly && requestVersion === portfolioRankingRequestVersion) {
             portfolioRankingStatus.textContent = error.message || 'Не удалось рассчитать общий рейтинг';
             buttonTitle = error.message || 'Не удалось рассчитать общий рейтинг';
         }
     } finally {
         if (requestVersion === portfolioRankingRequestVersion) {
-            portfolioRankingTimer.finish();
-            resetRefreshButton(buttonTitle);
+            if (cachedOnly) {
+                portfolioRankingTimer.reset();
+            } else {
+                portfolioRankingTimer.finish();
+                resetRefreshButton(buttonTitle);
+            }
         }
     }
 }
@@ -1479,6 +2009,8 @@ window.setInterval(refreshCalculationQueue, 5000);
 updateMartingaleInitialNotional();
 if (symbolSortMode.value === 'profit') {
     loadPortfolioRanking();
+} else {
+    loadPortfolioRanking({cachedOnly: true});
 }
 loadCachedTickerBestResults();
 loadExitRanking();

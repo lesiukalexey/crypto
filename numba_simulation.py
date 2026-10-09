@@ -435,14 +435,19 @@ def simulate_martingale_numba(
             else:
                 net = total_quantity * exit_quote - entry_cost - entry_fees - total_quantity * exit_quote * fee_rate
 
-            if first_take >= 0 and first_take == exit_index:
+            transition_on_profit = mode >= 2
+            trigger_transition = (
+                (transition_on_profit and first_take >= 0 and first_take == exit_index)
+                or (not transition_on_profit and first_stop >= 0 and first_stop == exit_index)
+            )
+            if first_take >= 0 and first_take == exit_index and not trigger_transition:
                 balance += net
                 closed_orders += leg_count
                 leg_count = 0
                 signal_cursor = _upper_bound(signal_indexes, signal_cursor, exit_index)
                 break
 
-            if first_stop >= 0 and first_stop == exit_index and stage < attempts:
+            if trigger_transition and stage < attempts:
                 signal_cursor = _upper_bound(signal_indexes, signal_cursor, exit_index)
                 if mode == 0:
                     next_index = exit_index
@@ -490,6 +495,35 @@ def simulate_martingale_numba(
                             stage += 1
                             entry_index = next_index
                             continue
+                elif mode == 2:
+                    balance += net
+                    closed_orders += leg_count
+                    leg_count = 0
+                    requested = position_notional * 2.0
+                    next_index = exit_index
+                    if timing == 1:
+                        next_index = count
+                        while signal_cursor < len(signal_indexes):
+                            candidate_index = signal_indexes[signal_cursor]
+                            candidate_short = signal_shorts[signal_cursor]
+                            signal_cursor += 1
+                            if candidate_index > exit_index and candidate_short == is_short:
+                                next_index = candidate_index
+                                break
+                    available = max(0.0, balance)
+                    next_notional = min(requested, available / (1.0 + fee_rate))
+                    if next_index < count and next_notional > 0.0:
+                        next_price = bids[next_index] if is_short else asks[next_index]
+                        if next_price > 0.0:
+                            entry_index = next_index
+                            position_notional = next_notional
+                            leg_prices[0] = next_price
+                            leg_quantities[0] = next_notional / next_price
+                            leg_fees[0] = next_notional * fee_rate
+                            leg_count = 1
+                            stage += 1
+                            continue
+                    break
                 else:
                     balance += net
                     closed_orders += 1

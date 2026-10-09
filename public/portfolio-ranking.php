@@ -25,13 +25,13 @@ try {
     $endValue = (string) ($_GET['end_day'] ?? $today->format('Y-m-d'));
     $entryConfig = (string) ($_GET['entry_config'] ?? 'entry:10:1');
     $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
-    $minTrades = $saveMode ? 2 : 1;
+    $minTrades = $saveMode ? 3 : 1;
     $balance = (string) ($_GET['balance'] ?? '10');
     $fee = (string) ($_GET['fee'] ?? '0.06');
     $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
     $martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');
     $martingaleAttempts = (int) ($_GET['martingale_attempts'] ?? 3);
-    if (!in_array($martingaleMode, ['none', 'simple', 'reverse'], true)
+    if (!in_array($martingaleMode, ['none', 'simple', 'reverse', 'simple_profit', 'reverse_profit'], true)
         || !in_array($martingaleTiming, ['immediate', 'rules'], true)
         || $martingaleAttempts < 2 || $martingaleAttempts > 10) {
         respond(['status' => 'error', 'message' => 'Некорректные параметры мартингейла.'], 400);
@@ -92,17 +92,55 @@ try {
     // snapshot per date range and generation, even across browser tabs.
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
-    $key = hash('sha256', json_encode([
-        'portfolio-ranking-v15-short-targets', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
+    $entryProfileCount = count($ranking['immediate_directions']);
+    foreach ($ranking['entry_profiles'] as $entryProfile) {
+        $entryProfileCount += count($entryProfile['thresholds_tenths_percent']) * count($entryProfile['windows']);
+    }
+    $fixedTpCount = count(rankingValues($ranking['exit_profiles']['fixed_tp']));
+    $fixedSlCount = count(rankingValues($ranking['exit_profiles']['fixed_sl']));
+    $profitCount = count(rankingValues($ranking['exit_profiles']['profit']));
+    $lossCount = count(rankingValues($ranking['exit_profiles']['loss']));
+    $baseExitCount = $fixedTpCount * $fixedSlCount + $profitCount + $lossCount;
+    $exitCount = $baseExitCount;
+    if ($martingaleMode !== 'none') {
+        $exitCount += $fixedTpCount * $fixedSlCount + $lossCount;
+    }
+    $requestDiagnostics = [
+        'start_day' => $startValue,
+        'end_day' => $endValue,
+        'universe_size' => count($maxIds),
+        'min_trades' => $minTrades,
+        'total_entry_profiles' => $entryProfileCount,
+        'total_candidates' => $entryProfileCount * $exitCount,
+        'total_ticker_evaluations' => $entryProfileCount * $exitCount * count($maxIds),
+    ];
+    $keyParts = [
+        'portfolio-ranking-v16-canonical-ledger', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
         $minTrades, $entryConfig, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts,
-    ], JSON_THROW_ON_ERROR));
+    ];
+    if ($martingaleMode !== 'none') $keyParts[] = 'martingale-negative-stop-v1';
+    $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration);
+    if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
+    $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';
     $statusPath = $cacheDir . '/portfolio-' . $key . '.status.json';
     if (is_file($resultPath)) {
         $result = json_decode((string) file_get_contents($resultPath), true);
         if (is_array($result) && ($result['status'] ?? '') === 'ready') {
-            respond($result + ['progress' => 100]);
+            $finishedStatus = is_file($statusPath)
+                ? json_decode((string) file_get_contents($statusPath), true)
+                : null;
+            $diagnostics = is_array($finishedStatus) ? $finishedStatus : [];
+            respond(array_merge($result, $requestDiagnostics, $diagnostics, [
+                'status' => 'ready', 'progress' => 100,
+                'result_cache_hit' => true,
+                'result_cached_at' => gmdate(DATE_ATOM, (int) filemtime($resultPath)),
+            ]));
         }
+    }
+
+    if ((string) ($_GET['cached_only'] ?? '') === '1') {
+        respond(['status' => 'missing']);
     }
 
     $status = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
@@ -149,7 +187,7 @@ try {
         } elseif ($lock !== false) fclose($lock);
         $status = ['status' => 'pending', 'progress' => 0];
     }
-    respond(is_array($status) ? $status : ['status' => 'pending', 'progress' => 0]);
+    respond(array_merge($requestDiagnostics, is_array($status) ? $status : ['status' => 'pending', 'progress' => 0], ['result_cache_hit' => false]));
 } catch (InvalidArgumentException $error) {
     respond(['status' => 'error', 'message' => $error->getMessage()], 400);
 } catch (Throwable $error) {

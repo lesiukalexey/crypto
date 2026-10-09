@@ -11,6 +11,7 @@ import sys
 import time
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,9 @@ import pymysql
 
 from app import load_config
 from database import connect_mysql
-from strategy_ranking import PriceTree, ProgressReporter, QuoteArrays, make_signals, martingale_target_policies, resolve_entry_config, simulate, exit_values
+import portfolio_ranking as portfolio_engine
+from portfolio_ranking import exit_specs
+from strategy_ranking import PriceTree, ProgressReporter, QuoteArrays, build_entry_specs, make_signals, martingale_target_policies, resolve_entry_config, simulate, exit_values
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -37,12 +40,12 @@ def main() -> int:
     parser.add_argument("--end-day", required=True)
     parser.add_argument("--balance", required=True, type=float)
     parser.add_argument("--fee-percent", required=True, type=float)
-    parser.add_argument("--min-trades", required=True, type=int, choices=(1, 2))
+    parser.add_argument("--min-trades", required=True, type=int, choices=(1, 2, 3))
     parser.add_argument("--entry-config", required=True)
     parser.add_argument("--max-ids", required=True)
     parser.add_argument("--cache-dir", required=True, type=Path)
     parser.add_argument("--ranking-params", required=True)
-    parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse"), default="none")
+    parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse", "simple_profit", "reverse_profit"), default="none")
     parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
     args = parser.parse_args()
@@ -86,20 +89,30 @@ def main() -> int:
     try:
         max_ids = {str(symbol): int(max_id) for symbol, max_id in json.loads(args.max_ids).items()}
         config = load_config(Path(__file__).with_name("config.json"))
-        start_local = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV)
         end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
-        start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+        start_utc = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV).astimezone(timezone.utc).replace(tzinfo=None)
+        snapshot_filter = " OR ".join("(symbol = %s AND id <= %s)" for _ in max_ids)
+        quote_parameters: list[Any] = [config["category"], end_utc]
+        if args.martingale_mode == "none":
+            for snapshot_symbol, snapshot_max_id in sorted(max_ids.items()):
+                quote_parameters.extend((snapshot_symbol, snapshot_max_id))
+            quote_query = (
+                "SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price "
+                "FROM quote_snapshots WHERE category = %s AND received_at_utc < %s AND ("
+                + snapshot_filter + ") ORDER BY symbol, received_at_utc, id"
+            )
+        else:
+            quote_query = (
+                "SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price "
+                "FROM quote_snapshots WHERE category = %s AND received_at_utc >= %s AND received_at_utc < %s "
+                "ORDER BY symbol, received_at_utc, id"
+            )
+            quote_parameters = [config["category"], start_utc, end_utc]
         connection = connect_mysql(config["mysql"])
         try:
             with connection.cursor(pymysql.cursors.DictCursor) as cursor:
-                cursor.execute(
-                    """SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price
-                       FROM quote_snapshots
-                       WHERE category = %s AND received_at_utc >= %s AND received_at_utc < %s
-                       ORDER BY symbol, received_at_utc, id""",
-                    (config["category"], start_utc, end_utc),
-                )
+                cursor.execute(quote_query, quote_parameters)
                 raw_rows = cursor.fetchall()
         finally:
             connection.close()
@@ -120,6 +133,9 @@ def main() -> int:
         threshold = None if is_immediate else entry_selection["threshold_tenths_percent"] / 10
         entry_direction = "both" if is_immediate else entry_selection["family"]
         immediate_short = entry_selection["direction"] == "short" if is_immediate else None
+        selected_entry_spec = next((spec for spec in build_entry_specs(ranking) if spec[0] == args.entry_config), None)
+        if selected_entry_spec is None:
+            raise ValueError("Unknown entry profile")
 
         exit_counts = {
             "fixed": len(exit_values("fixed_tp", exit_profiles)) * len(exit_values("fixed_sl", exit_profiles)),
@@ -130,18 +146,79 @@ def main() -> int:
             count * (2 if args.martingale_mode != "none" else 1)
             for count in (exit_counts["fixed"], exit_counts["loss"])
         )
+        checkpoint_exit_options = [
+            (
+                f"{base_exit_id}:{policy}" if policy_label else base_exit_id,
+                label + (f" · {policy_label}" if policy_label else ""),
+                target, loss, policy,
+            )
+            for base_exit_id, label, target, loss in exit_specs(exit_profiles)
+            for policy, policy_label in martingale_target_policies("none", loss)
+        ]
+        quotes_by_symbol = {
+            symbol: QuoteArrays.from_rows(rows)
+            for symbol, rows in rows_by_symbol.items() if rows
+        }
+        checkpoint_args = SimpleNamespace(
+            start_day=args.start_day, end_day=args.end_day, balance=args.balance,
+            fee_percent=args.fee_percent, min_trades=args.min_trades,
+            ranking_params=ranking, martingale_mode="none",
+            martingale_timing=args.martingale_timing,
+            martingale_attempts=args.martingale_attempts, entry_config=args.entry_config,
+        )
+        pair_cache_root = args.cache_dir / "symbol-pair-results" / args.cache_key
+        signals_by_symbol: dict[str, dict[tuple[int, str, int], tuple[np.ndarray, np.ndarray]]] = {}
+        if not is_immediate:
+            signal_key = (int(lookback), entry_direction, int(entry_selection["threshold_tenths_percent"]))
+            for symbol, quotes in quotes_by_symbol.items():
+                signals_by_symbol[symbol] = {
+                    signal_key: make_signals(quotes, float(threshold), int(lookback), entry_direction),
+                }
+        portfolio_engine._PORTFOLIO_WORKER_STATE = {
+            "quotes_by_symbol": quotes_by_symbol,
+            "signals_by_symbol": signals_by_symbol,
+            "pair_cache_scopes": {symbol: pair_cache_root / symbol for symbol in quotes_by_symbol},
+            "checkpoint_root": args.cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-state-v1",
+            "category": config["category"],
+            "exit_options": checkpoint_exit_options,
+            "args": checkpoint_args,
+            "fee_rate": args.fee_percent / 100,
+        }
         started = time.monotonic()
         progress_reporter = ProgressReporter()
         results: list[dict[str, Any]] = []
 
         for symbol_index, symbol in enumerate(sorted(max_ids)):
             rows = rows_by_symbol[symbol]
-            quotes = QuoteArrays.from_rows(rows) if rows else QuoteArrays([], [], [], [])
+            quotes = quotes_by_symbol.get(symbol, QuoteArrays([], [], [], []))
             del rows_by_symbol[symbol]
             best_pnl = -math.inf
             best_label = ""
             symbol_completed = 0
             if len(quotes) >= 2:
+                if args.martingale_mode == "none":
+                    simulation = portfolio_engine.simulate_symbol_entry(
+                        (symbol, selected_entry_spec, True),
+                    )
+                    pair_results = simulation[1]
+                    if pair_results is not None:
+                        eligible = pair_results["trade_count"] >= args.min_trades
+                        if np.any(eligible):
+                            best_index = int(np.argmax(np.where(eligible, pair_results["pnl"], -np.inf)))
+                            best_pnl = float(pair_results["pnl"][best_index])
+                            best_label = checkpoint_exit_options[best_index][1]
+                            symbol_completed = variants_per_symbol
+                    progress = int((symbol_index + 1) * 100 / max(1, len(max_ids)))
+                    progress_reporter.update(status_path, {
+                        "status": "pending", "progress": min(99, progress),
+                        "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol,
+                    })
+                    results.append({
+                        "symbol": symbol,
+                        "best_pnl": best_pnl if math.isfinite(best_pnl) else None,
+                        "best_exit": best_label if math.isfinite(best_pnl) else None,
+                    })
+                    continue
                 if immediate_short is not None:
                     signals, shorts = np.array([0], dtype=np.int64), np.array([immediate_short], dtype=np.bool_)
                 else:
@@ -169,9 +246,9 @@ def main() -> int:
                                 progress = int((symbol_index + symbol_completed / variants_per_symbol) * 100 / max(1, len(max_ids)))
                                 progress_reporter.update(status_path, {"status": "pending", "progress": min(99, progress), "elapsed_seconds": int(time.monotonic() - started), "symbol": symbol})
 
-                    for take_tenths_percent in exit_values("fixed_tp", exit_profiles):
-                        for loss_tenths_percent in exit_values("fixed_sl", exit_profiles):
-                            consider(float(take_tenths_percent), float(loss_tenths_percent), f"TP {take_tenths_percent / 10:.1f}% / SL {loss_tenths_percent / 10:.1f}% от стартового баланса")
+                    for take_basis_points in exit_values("fixed_tp", exit_profiles):
+                        for loss_basis_points in exit_values("fixed_sl", exit_profiles):
+                            consider(take_basis_points / 10.0, loss_basis_points / 10.0, f"TP {take_basis_points / 100:.2f}% / SL {loss_basis_points / 100:.2f}% от стартового баланса")
                     for loss_tenths_percent in exit_values("loss", exit_profiles):
                         consider(None, float(loss_tenths_percent), f"SL {loss_tenths_percent / 10:.1f}% от стартового баланса")
                     for take_tenths_percent in exit_values("profit", exit_profiles):

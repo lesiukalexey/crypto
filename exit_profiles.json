@@ -1,5 +1,16 @@
 {
-  "fixed": {"min_tenths_percent": 1, "max_tenths_percent": 500, "step_tenths_percent": 1},
+  "fixed": {
+    "min_basis_points": 10,
+    "max_basis_points": 5000,
+    "segments_basis_points": [
+      {"from": 10, "to": 100, "step": 10},
+      {"from": 100, "to": 200, "step": 20},
+      {"from": 200, "to": 300, "step": 25},
+      {"from": 300, "to": 1000, "step": 50},
+      {"from": 1000, "to": 2000, "step": 100},
+      {"from": 2000, "to": 5000, "step": 250}
+    ]
+  },
   "loss": {"min_tenths_percent": 1, "max_tenths_percent": 300, "step_tenths_percent": 1},
   "profit": {"min_tenths_percent": 1, "max_tenths_percent": 300, "step_tenths_percent": 1}
 }

@@ -15,16 +15,16 @@ def martingale_base_notional(
     target_policy: str = "scaled",
 ) -> float:
     """Size the first order so the full geometric progression fits at 1x."""
-    if mode not in ("simple", "reverse") or not 2 <= attempts <= 10:
+    if mode not in ("simple", "reverse", "simple_profit", "reverse_profit") or not 2 <= attempts <= 10:
         raise ValueError("Invalid martingale options")
     if target_policy not in ("scaled", "fixed"):
         raise ValueError("Invalid martingale exit target policy")
     final_scale = 2 ** (attempts - 1)
-    if stop_loss is None:
+    if mode.endswith("_profit") or stop_loss is None:
         return start_balance / final_scale
 
     risk = abs(stop_loss)
-    if mode == "simple":
+    if mode in ("simple", "simple_profit"):
         previous_scale = 2 ** (attempts - 2)
         reserved_loss = risk * (previous_scale if target_policy == "scaled" else 1)
         required_balance_per_base = final_scale + fee_rate * previous_scale
@@ -50,7 +50,7 @@ def simulate_martingale(
     target_policy: str = "scaled",
 ) -> tuple[float, int]:
     """Replay capped, 1x martingale exposure. Each opened order counts as a trade."""
-    if mode not in ("simple", "reverse") or timing not in ("immediate", "rules") or not 2 <= attempts <= 10:
+    if mode not in ("simple", "reverse", "simple_profit", "reverse_profit") or timing not in ("immediate", "rules") or not 2 <= attempts <= 10:
         raise ValueError("Invalid martingale options")
     balance = start_balance
     signal_cursor = 0
@@ -112,14 +112,19 @@ def simulate_martingale(
 
             net = net_at(exit_index)
 
-            if first_take is not None and first_take == exit_index:
+            transition_on_profit = mode.endswith("_profit")
+            trigger_transition = (
+                (transition_on_profit and first_take is not None and first_take == exit_index)
+                or (not transition_on_profit and first_stop is not None and first_stop == exit_index)
+            )
+            if first_take is not None and first_take == exit_index and not trigger_transition:
                 balance += net
                 closed_orders += len(legs)
                 legs.clear()
                 signal_cursor = bisect.bisect_right(signal_indexes, exit_index, lo=signal_cursor)
                 break
 
-            if first_stop is not None and first_stop == exit_index and stage < attempts:
+            if trigger_transition and stage < attempts:
                 signal_cursor = bisect.bisect_right(signal_indexes, exit_index, lo=signal_cursor)
                 if mode == "simple":
                     next_index = exit_index
@@ -157,6 +162,31 @@ def simulate_martingale(
                             stage += 1
                             entry_index = next_index
                             continue
+                elif mode == "simple_profit":
+                    balance += net
+                    closed_orders += len(legs)
+                    legs.clear()
+                    requested = position_notional * 2
+                    next_index = exit_index
+                    if timing == "rules":
+                        next_index = count
+                        while signal_cursor < len(signal_indexes):
+                            candidate_index = signal_indexes[signal_cursor]
+                            candidate_short = signal_shorts[signal_cursor]
+                            signal_cursor += 1
+                            if candidate_index > exit_index and candidate_short == is_short:
+                                next_index = candidate_index
+                                break
+                    add_notional = min(requested, max(0.0, balance) / (1 + fee_rate))
+                    if next_index < count and add_notional > 0:
+                        add_price = quotes.bids[next_index] if is_short else quotes.asks[next_index]
+                        if add_price > 0:
+                            position_notional = add_notional
+                            entry_index = next_index
+                            legs.append((add_price, add_notional / add_price, add_notional * fee_rate))
+                            stage += 1
+                            continue
+                    break
                 else:
                     balance += net
                     closed_orders += 1
