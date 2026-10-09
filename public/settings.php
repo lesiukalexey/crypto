@@ -45,7 +45,7 @@ $enabledLookup = array_fill_keys(enabledTickerSymbols($config), true);
 </head>
 <body><main class="wrap">
 <nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php" aria-current="page">Настройки</a></nav>
-<h1>Настройки</h1><p class="intro">Выключенные тикеры исключаются из выбора на страницах, хеджирования и рейтингов. История котировок и сохранённые избранные записи остаются на месте.</p>
+<h1>Настройки</h1><p class="intro">Выключенные тикеры продолжают собираться и сохраняться в MySQL, но скрыты на других страницах и исключены из расчётов. История котировок и избранное остаются на месте.</p>
 <section class="panel" aria-label="Доступность тикеров">
 <?php foreach ($configuredSymbols as $symbol): $isEnabled = isset($enabledLookup[$symbol]); ?>
 <div class="ticker-row"><div><div class="ticker-name"><?= settingsH($symbol) ?></div><div class="ticker-state" data-state-for="<?= settingsH($symbol) ?>"><?= $isEnabled ? 'Включён' : 'Выключен' ?></div></div><label class="switch"><input type="checkbox" role="switch" data-symbol="<?= settingsH($symbol) ?>" aria-label="Участвует тикер <?= settingsH($symbol) ?>" <?= $isEnabled ? 'checked' : '' ?>><span class="switch-track"></span></label></div>
