@@ -5,6 +5,7 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-snapshot.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -90,6 +91,7 @@ try {
         respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
     }
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
+    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
     $keyParts = ['symbol-ranking-v15-canonical-ledger', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
     if ($martingaleMode !== 'none') {
         $keyParts[] = 'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1';

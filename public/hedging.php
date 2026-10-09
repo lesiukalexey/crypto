@@ -4,6 +4,7 @@ declare(strict_types=1);
 date_default_timezone_set('Europe/Kyiv');
 $root = dirname(__DIR__);
 $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
+require_once __DIR__ . '/ticker-settings-lib.php';
 $favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
 $favoriteView = false;
 $favorite = null;
@@ -23,8 +24,7 @@ if ($favoriteId !== '' && is_file($favoritesPath)) {
         }
     }
 }
-$symbols = array_values(array_unique(array_map('strval', $config['symbols'])));
-sort($symbols, SORT_STRING);
+$symbols = enabledTickerSymbols($config);
 $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Kyiv'));
 $startDay = (string) ($_GET['start_day'] ?? '2026-10-06');
 $endDay = (string) ($_GET['end_day'] ?? $today->format('Y-m-d'));
@@ -32,6 +32,10 @@ $balance = (string) ($_GET['balance'] ?? '10');
 $fee = (string) ($_GET['fee'] ?? '0.06');
 $longSymbol = strtoupper((string) ($_GET['long_symbol'] ?? ($symbols[0] ?? '')));
 $shortSymbol = strtoupper((string) ($_GET['short_symbol'] ?? ($symbols[1] ?? '')));
+$favoriteSymbolsDisabled = $favoriteView && (
+    !in_array(strtoupper((string) ($favorite['params']['long_symbol'] ?? '')), $symbols, true)
+    || !in_array(strtoupper((string) ($favorite['params']['short_symbol'] ?? '')), $symbols, true)
+);
 $pairWasRequested = isset($_GET['pair']) || isset($_GET['long_symbol']) || isset($_GET['short_symbol']);
 if (!in_array($longSymbol, $symbols, true)) $longSymbol = $symbols[0] ?? '';
 if (!in_array($shortSymbol, $symbols, true) || $shortSymbol === $longSymbol) {
@@ -65,8 +69,9 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 </head>
 <body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= $h($config['category']) ?></div><span class="count">Симуляция по сохранённым котировкам</span></header>
-<nav class="view-nav" aria-label="Разделы"><a href="<?= $h($basicUrl) ?>">Базовые проверки</a><a href="<?= $h($hedgeUrl) ?>" aria-current="page">Хеджирование</a><a href="favorites.php">Избранное</a></nav>
+<nav class="view-nav" aria-label="Разделы"><a href="<?= $h($basicUrl) ?>">Базовые проверки</a><a href="<?= $h($hedgeUrl) ?>" aria-current="page">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a></nav>
 <?php if ($favoriteView): ?><p class="small-note">Просмотр сохранённой пары «Лонг <?= $h($longSymbol) ?> / шорт <?= $h($shortSymbol) ?>». Параметры доступны только для чтения. <a href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
+<?php if ($favoriteSymbolsDisabled): ?><p class="status error">Один из тикеров этой сохранённой пары выключен в настройках и не участвует в расчётах.</p><?php endif; ?>
 <h1>Хеджирование между тикерами</h1>
 <section class="panel"><form class="filters" id="hedge-filters">
 <label class="field pair-field">Пара: лонг / шорт<select name="pair" id="hedge-pair" required><?php foreach ($symbols as $long): foreach ($symbols as $short): if ($long === $short) continue; $value = $long . '|' . $short; ?><option value="<?= $h($value) ?>" <?= $long === $longSymbol && $short === $shortSymbol ? 'selected' : '' ?>>Лонг <?= $h($long) ?> / шорт <?= $h($short) ?></option><?php endforeach; endforeach; ?></select><span class="small-note" id="pair-ranking-status" aria-live="polite">При открытии страницы рассчитываю доходность пар…</span></label>
@@ -82,7 +87,7 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 </main>
 <script>
 const form=document.querySelector('#hedge-filters'),pairSelect=document.querySelector('#hedge-pair'),statusNode=document.querySelector('#hedge-status'),summaryNode=document.querySelector('#hedge-summary'),chart=document.querySelector('#hedge-chart'),pointCount=document.querySelector('#hedge-point-count'),tooltip=document.querySelector('#tooltip'),ns='http://www.w3.org/2000/svg';
-const favoriteView=<?= $favoriteView ? 'true' : 'false' ?>,favoriteId=<?= json_encode($favoriteId, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>,favoriteSavedParams=<?= json_encode($favorite['params'] ?? new stdClass(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+const favoriteView=<?= $favoriteView ? 'true' : 'false' ?>,favoriteSymbolsDisabled=<?= $favoriteSymbolsDisabled ? 'true' : 'false' ?>,favoriteId=<?= json_encode($favoriteId, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>,favoriteSavedParams=<?= json_encode($favorite['params'] ?? new stdClass(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
 if(favoriteView)form.querySelectorAll('select,input,button').forEach(control=>control.disabled=true);
 const palette={long_index:'#42d6a4',short_index:'#ff7188',equity_index:'#86a8ff'};
 const fmt=(n,d=4)=>Number(n).toLocaleString('ru-RU',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -107,6 +112,6 @@ for(const key of series){const path=points.map((point,index)=>`${index?'L':'M'}$
 const cursor=el('line',{y1:pad.t,y2:height-pad.b,stroke:'#d5defa','stroke-dasharray':'4 5',visibility:'hidden'}),hit=el('rect',{x:pad.l,y:pad.t,width:width-pad.l-pad.r,height:height-pad.t-pad.b,fill:'transparent'});hit.addEventListener('pointermove',event=>{const rect=chart.getBoundingClientRect(),ratio=(event.clientX-rect.left)/rect.width,index=Math.max(0,Math.min(points.length-1,Math.round(ratio*(points.length-1)))),point=points[index],x=X(Number(point.t));cursor.setAttribute('x1',x);cursor.setAttribute('x2',x);cursor.setAttribute('visibility','visible');tooltip.innerHTML=`<strong>${new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев</strong><br>Лонг: ${fmt(point.long_index,3)}<br>Шорт: ${fmt(point.short_index,3)}<br>Баланс: ${fmt(point.equity_index,3)}<br>Итог: ${money(point.net_pnl)}`;tooltip.style.display='block';tooltip.style.left=`${Math.min(event.clientX-rect.left+12,rect.width-tooltip.offsetWidth-4)}px`;tooltip.style.top=`${Math.max(2,event.clientY-rect.top-tooltip.offsetHeight-10)}px`});hit.addEventListener('pointerleave',()=>{cursor.setAttribute('visibility','hidden');tooltip.style.display='none'});
 const s=data.summary,stat=(label,value,cls='')=>`<div class="stat"><span>${label}</span><strong class="${cls}">${value}</strong></div>`;summaryNode.innerHTML=stat('Стартовый баланс',fmt(data.starting_balance,2)+' USDT')+stat('Лонг '+data.long_symbol,money(s.long_pnl),Number(s.long_pnl)>=0?'gain':'loss')+stat('Шорт '+data.short_symbol,money(s.short_pnl),Number(s.short_pnl)>=0?'gain':'loss')+stat('Общий итог',money(s.net_pnl),Number(s.net_pnl)>=0?'gain':'loss')+stat('Баланс после закрытия',fmt(s.ending_balance,4)+' USDT')+stat('Размеры позиций',fmt(s.long_notional,2)+' / '+fmt(s.short_notional,2)+' USDT');summaryNode.hidden=false;statusNode.textContent=`Вход ${new Date(s.entry_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · последний общий снимок ${new Date(s.last_aligned_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · комиссия входа ${fmt(s.entry_fees,4)} USDT`;pointCount.textContent=`${data.raw_aligned_points} синхронизированных точек`;
 }
-async function loadData(){const [longSymbol,shortSymbol]=pairSelect.value.split('|'),params=new URLSearchParams(new FormData(form));if(favoriteView)for(const[key,value]of Object.entries(favoriteSavedParams))params.set(key,String(value));params.delete('pair');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);const url=new URL('hedge-data.php',location.href);url.search=params.toString();statusNode.textContent='Загружаю и сопоставляю снимки…';statusNode.classList.remove('error');chart.replaceChildren();try{const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'}),data=await response.json();if(!response.ok||data.status==='error')throw new Error(data.message||'Не удалось загрузить данные пары');if(data.status!=='ready'){render(data);return}render(data);const next=new URL(location.href);for(const[key,value]of params)next.searchParams.set(key,value);next.searchParams.set('pair',pairSelect.value);if(favoriteView)next.searchParams.set('favorite_id',favoriteId);history.replaceState(null,'',next);const basicParams=new URLSearchParams(location.search);for(const key of ['long_symbol','short_symbol','pair','favorite_id'])basicParams.delete(key);for(const key of ['start_day','end_day','balance','fee'])basicParams.set(key,params.get(key));document.querySelector('.view-nav a[href^="./?"]').href='./?'+basicParams.toString()}catch(error){summaryNode.hidden=true;statusNode.textContent=error.message;statusNode.classList.add('error')}}
+async function loadData(){if(favoriteSymbolsDisabled){statusNode.textContent='Этот тикер выключен в настройках.';statusNode.classList.add('error');return}const [longSymbol,shortSymbol]=pairSelect.value.split('|'),params=new URLSearchParams(new FormData(form));if(favoriteView)for(const[key,value]of Object.entries(favoriteSavedParams))params.set(key,String(value));params.delete('pair');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);const url=new URL('hedge-data.php',location.href);url.search=params.toString();statusNode.textContent='Загружаю и сопоставляю снимки…';statusNode.classList.remove('error');chart.replaceChildren();try{const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'}),data=await response.json();if(!response.ok||data.status==='error')throw new Error(data.message||'Не удалось загрузить данные пары');if(data.status!=='ready'){render(data);return}render(data);const next=new URL(location.href);for(const[key,value]of params)next.searchParams.set(key,value);next.searchParams.set('pair',pairSelect.value);if(favoriteView)next.searchParams.set('favorite_id',favoriteId);history.replaceState(null,'',next);const basicParams=new URLSearchParams(location.search);for(const key of ['long_symbol','short_symbol','pair','favorite_id'])basicParams.delete(key);for(const key of ['start_day','end_day','balance','fee'])basicParams.set(key,params.get(key));document.querySelector('.view-nav a[href^="./?"]').href='./?'+basicParams.toString()}catch(error){summaryNode.hidden=true;statusNode.textContent=error.message;statusNode.classList.add('error')}}
 form.addEventListener('submit',event=>{event.preventDefault();loadPairRanking();loadData()});form.addEventListener('change',event=>{if(event.target===pairSelect){loadData();return}loadPairRanking();loadData()});window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});if(!favoriteView)loadPairRanking();loadData();
 </script></body></html>

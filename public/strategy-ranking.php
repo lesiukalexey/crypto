@@ -6,6 +6,7 @@ header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-worker-state.php';
 require_once __DIR__ . '/ranking-snapshot.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -24,6 +25,9 @@ try {
     $timezone = new DateTimeZone('Europe/Kyiv');
     $today = new DateTimeImmutable('today', $timezone);
     $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
+    if ($symbol === '' || !in_array($symbol, enabledTickerSymbols($config), true)) {
+        respond(['status' => 'error', 'message' => 'Этот тикер выключен в настройках или не настроен.'], 400);
+    }
     $startValue = (string) ($_GET['start_day'] ?? $today->format('Y-m-d'));
     $endValue = (string) ($_GET['end_day'] ?? $startValue);
     $entryConfig = (string) ($_GET['entry_config'] ?? 'entry:10:1');
@@ -96,6 +100,7 @@ try {
         respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
     }
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
+    $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
     $maxId = (int) ($snapshotIds[$symbol] ?? 0);
     $keyParts = ['ranking-v28-deduplicated-exits', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
     array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));

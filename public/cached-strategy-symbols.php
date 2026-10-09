@@ -5,6 +5,7 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-snapshot.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 
 function respondCachedSymbols(array $payload, int $status = 200): never
 {
@@ -72,6 +73,7 @@ try {
     $snapshotIds = rankingSnapshotIds(
         $pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation,
     );
+    $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
     $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
     $minTrades = $saveMode ? 3 : 1;
     $symbols = [];

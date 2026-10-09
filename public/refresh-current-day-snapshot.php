@@ -4,6 +4,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-snapshot.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 
 function respondTodaySnapshot(array $payload, int $status = 200): never
 {
@@ -61,6 +62,7 @@ try {
     $startUtc = $startDay->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
     $endUtc = $endDay->modify('+1 day')->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation, true);
+    $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
     respondTodaySnapshot(['status' => 'ready', 'symbols' => count($snapshotIds), 'revision' => rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $generation)]);
 } catch (Throwable $error) {
     respondTodaySnapshot(['status' => 'error', 'message' => 'Не удалось обновить сегодняшний срез котировок.'], 503);

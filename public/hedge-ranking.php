@@ -4,6 +4,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store, no-cache, must-revalidate');
 require_once dirname(__DIR__) . '/hedge_simulation.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 
 function hedge_ranking_respond(array $payload, int $status = 200): never
 {
@@ -15,8 +16,7 @@ function hedge_ranking_respond(array $payload, int $status = 200): never
 try {
     $root = dirname(__DIR__);
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
-    $symbols = array_values(array_unique(array_map('strval', $config['symbols'] ?? [])));
-    sort($symbols, SORT_STRING);
+    $symbols = enabledTickerSymbols($config);
     if (count($symbols) < 2) {
         hedge_ranking_respond(['status' => 'error', 'message' => 'Для рейтинга нужны минимум два тикера.'], 400);
     }

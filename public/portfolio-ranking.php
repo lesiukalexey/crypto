@@ -5,6 +5,7 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-snapshot.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -92,6 +93,7 @@ try {
     // Ignore legacy URL snapshot_ids: all ranking types share one frozen
     // snapshot per date range and generation, even across browser tabs.
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
+    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $entryProfileCount = count($ranking['immediate_directions']);
     foreach ($ranking['entry_profiles'] as $entryProfile) {

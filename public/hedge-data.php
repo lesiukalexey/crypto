@@ -4,6 +4,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once dirname(__DIR__) . '/hedge_simulation.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 
 function hedge_respond(array $payload, int $status = 200): never
 {
@@ -17,7 +18,8 @@ try {
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $longSymbol = strtoupper(trim((string) ($_GET['long_symbol'] ?? '')));
     $shortSymbol = strtoupper(trim((string) ($_GET['short_symbol'] ?? '')));
-    if (!in_array($longSymbol, $config['symbols'], true) || !in_array($shortSymbol, $config['symbols'], true) || $longSymbol === $shortSymbol) {
+    $enabledSymbols = enabledTickerSymbols($config);
+    if (!in_array($longSymbol, $enabledSymbols, true) || !in_array($shortSymbol, $enabledSymbols, true) || $longSymbol === $shortSymbol) {
         hedge_respond(['status' => 'error', 'message' => 'Выберите два разных тикера из списка настроенных инструментов.'], 400);
     }
 

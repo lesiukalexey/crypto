@@ -4,7 +4,9 @@ declare(strict_types=1);
 date_default_timezone_set('Europe/Kyiv');
 require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-snapshot.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
+$enabledSymbols = enabledTickerSymbols($config);
 $favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
 $favoriteView = false;
 $favorite = null;
@@ -158,6 +160,7 @@ $formatTargetPercent = static function (?string $amount, string $startingBalance
 $selectedExitConfig = $exitConfig . ($martingaleMode !== 'none' ? ':' . $martingaleTargetPolicy : '');
 $favoriteEntryLabel = $favoriteView ? trim((string) ($favorite['entry_label'] ?? $entryConfig)) : '';
 $favoriteExitLabel = $favoriteView ? trim((string) ($favorite['exit_label'] ?? $selectedExitConfig)) : '';
+$favoriteSymbolDisabled = $favoriteView && !in_array(strtoupper((string) ($favorite['params']['symbol'] ?? '')), $enabledSymbols, true);
 
 try {
     $password = getenv($db['password_env']) ?: '';
@@ -172,9 +175,11 @@ try {
     );
     $stmt = $pdo->prepare('SELECT DISTINCT symbol FROM quote_snapshots WHERE category = ? ORDER BY symbol');
     $stmt->execute([$config['category']]);
-    $symbols = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    $symbols = array_values(array_intersect($stmt->fetchAll(PDO::FETCH_COLUMN), $enabledSymbols));
 
-    if ($symbols !== []) {
+    if ($favoriteSymbolDisabled) {
+        $error = 'Этот тикер выключен в настройках и не участвует в расчётах.';
+    } elseif ($symbols !== []) {
         if (!in_array($symbol, $symbols, true)) {
             $symbol = $symbols[0];
         }
@@ -202,6 +207,7 @@ try {
             $pdo, $rankingCacheDir, $config['category'], $startDayInput, $endDayInput,
             $startUtc, $endUtc, $rankingGeneration,
         );
+        $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
         $snapshotNeedsRefresh = rankingSnapshotNeedsRefresh($pdo, $config['category'], $startUtc, $endUtc, $snapshotIds);
         $maxQuoteId = (int) ($snapshotIds[$symbol] ?? 0);
         if ($martingaleMode === 'none') {
@@ -862,7 +868,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
-<nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a></nav>
+<nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a></nav>
 <?php if ($favoriteView): ?><p class="favorite-readonly-note">Просмотр сохранённой стратегии «<?= h((string) ($favorite['name'] ?? $favoriteId)) ?>». Параметры доступны только для чтения. <a class="strategy-link" href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
 <?php if ($combinationDetail): ?>
 <section class="panel combination-detail" aria-labelledby="combination-detail-heading">
@@ -893,7 +899,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
 <input type="hidden" name="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>">
 <input type="hidden" name="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>">
-<div class="symbol-select-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></div><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов" title="Сбросить кэш рейтингов">🧹</button></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
+<div class="symbol-select-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><select name="symbol" id="symbol-select" required><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></div><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов" title="Сбросить кэш рейтингов">🧹</button></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <div class="symbol-select-row date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="refresh-symbols refresh-today-snapshot" type="button" id="refresh-today-snapshot" aria-label="Обновить данные до выбранной даты" title="Подтянуть новые данные до выбранной даты в график и расчёты" <?= $snapshotNeedsRefresh ? '' : 'hidden' ?>>↻</button></div>
 

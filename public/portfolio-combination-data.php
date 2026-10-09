@@ -5,6 +5,7 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-snapshot.php';
+require_once __DIR__ . '/ticker-settings-lib.php';
 
 function respond(array $payload, int $status = 200): never
 {
@@ -105,6 +106,7 @@ try {
         respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
     }
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation);
+    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $keyParts = [
         'portfolio-combination-details-v7-canonical-ledger', $generation, hash('sha256', $snapshotJson), $config['category'],
