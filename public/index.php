@@ -867,10 +867,11 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <div class="symbol-select-row date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="refresh-symbols refresh-today-snapshot" type="button" id="refresh-today-snapshot" aria-label="Обновить данные до выбранной даты" title="Подтянуть новые данные до выбранной даты в график и расчёты" <?= $snapshotNeedsRefresh ? '' : 'hidden' ?>>↻</button></div>
 
-<label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
-<p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию на первом снимке, где порог пересечён относительно любого из последних X снимков.</p>
-<label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения (как сейчас)</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
-<label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
+<input type="hidden" name="entry_signal_mode" id="entry-signal-mode" value="<?= h($entrySignalMode) ?>">
+<input type="hidden" name="entry_direction_mode" id="entry-direction-mode" value="<?= h($entryDirectionMode) ?>">
+<input type="hidden" name="entry_config" id="entry-config-value" value="<?= h($entryConfig) ?>">
+<label class="field">Стратегия входа<select id="entry-config"><option value="">Загружаю рейтинг входов…</option></select></label>
+<p class="small-note">«Назад» сравнивает цену ровно с X снимками до текущего; «внутри» ловит первое пересечение относительно любого из последних X снимков. Направление можно выбрать по движению или против него.</p>
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL только (как сейчас)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с проверкой по снимкам</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP по снимкам, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL по снимкам</option></select></label>
 <label class="field">Проверить через снимков<select name="exit_confirmation_snapshots" id="exit-confirmation-snapshots"><?php foreach ([1, 2, 3, 5, 10, 20, 30, 40, 60, 80] as $snapshotCount): ?><option value="<?= $snapshotCount ?>" <?= $exitConfirmationSnapshots === $snapshotCount ? 'selected' : '' ?>><?= $snapshotCount ?></option><?php endforeach; ?></select></label>
@@ -1372,14 +1373,6 @@ saveModeToggle.addEventListener('change', () => {
 });
 let filterSubmitTimer;
 let replayRequest;
-document.querySelector('#entry-signal-mode')?.addEventListener('change', () => {
-    document.querySelector('#select-top-ranked-result').value = '1';
-    filtersForm.requestSubmit();
-});
-document.querySelector('#entry-direction-mode')?.addEventListener('change', () => {
-    document.querySelector('#select-top-ranked-result').value = '1';
-    filtersForm.requestSubmit();
-});
 document.querySelector('#exit-confirmation-mode')?.addEventListener('change', () => filtersForm.requestSubmit());
 document.querySelector('#exit-confirmation-snapshots')?.addEventListener('change', () => filtersForm.requestSubmit());
 async function refreshStrategyResults() {
@@ -1414,17 +1407,13 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
             return;
         }
         if (control.id === 'entry-config') {
-            updateMartingaleInitialNotional();
-            refreshAfterExitRanking = true;
-            const selectedExit = exitConfigSelect.value;
-            exitRankingRequestVersion++;
-            exitConfigSelect.replaceChildren();
-            const loadingOption = document.createElement('option');
-            loadingOption.value = selectedExit;
-            loadingOption.textContent = 'Пересчитываю TakeProfit & StopLoss для порога…';
-            loadingOption.selected = true;
-            exitConfigSelect.appendChild(loadingOption);
-            loadExitRanking(selectedExit);
+            const selection = entrySelectionFromValue(control.value);
+            if (!selection) return;
+            entryConfigValueInput.value = selection.entry_config;
+            entrySignalModeInput.value = selection.entry_signal_mode;
+            entryDirectionModeInput.value = selection.entry_direction_mode;
+            selectTopRankedResultInput.value = '0';
+            filtersForm.requestSubmit();
             return;
         }
         if (control.id === 'exit-config') {
@@ -1461,17 +1450,73 @@ const exitConfigSelect = document.querySelector('#exit-config');
 const entryConfigSelect = document.querySelector('#entry-config');
 const selectTopRankedResultInput = document.querySelector('#select-top-ranked-result');
 let selectTopRankedResult = selectTopRankedResultInput.value === '1';
+const entrySignalModeInput = document.querySelector('#entry-signal-mode');
+const entryDirectionModeInput = document.querySelector('#entry-direction-mode');
+const entryConfigValueInput = document.querySelector('#entry-config-value');
+function encodeEntrySelection(entryConfig, signalMode, directionMode) {
+    return JSON.stringify({entry_config: entryConfig, entry_signal_mode: signalMode, entry_direction_mode: directionMode});
+}
+function entryBaseId(entryId) {
+    if (entryId.startsWith('immediate:')) return entryId;
+    return entryId.replace(/:(?:within|reverse)/g, '');
+}
+function entryVariantId(baseId, signalMode, directionMode) {
+    if (baseId.startsWith('immediate:')) return baseId;
+    return baseId + (signalMode === 'within' ? ':within' : '') + (directionMode === 'reverse' ? ':reverse' : '');
+}
+function entrySelectionFromValue(value) {
+    try {
+        const selection = JSON.parse(value);
+        if (selection && typeof selection.entry_config === 'string'
+            && ['exact', 'within'].includes(selection.entry_signal_mode)
+            && ['follow', 'reverse'].includes(selection.entry_direction_mode)) return selection;
+    } catch (error) {}
+    return null;
+}
 function renderEntryOptions(entries, selected) {
     if (!Array.isArray(entries) || entries.length === 0) return;
     entryConfigSelect.replaceChildren();
-    for (const item of entries) {
-        const option = document.createElement('option');
-        option.value = item.id;
-        option.textContent = item.label;
-        if (item.id === selected) option.selected = true;
-        entryConfigSelect.appendChild(option);
+    const choices = [
+        {signalMode: 'exact', directionMode: 'follow', label: 'За X снимков назад · по движению', optionPrefix: 'Назад · по движению'},
+        {signalMode: 'exact', directionMode: 'reverse', label: 'За X снимков назад · против движения', optionPrefix: 'Назад · против движения'},
+        {signalMode: 'within', directionMode: 'follow', label: 'За X снимков внутри · по движению', optionPrefix: 'Внутри · по движению'},
+        {signalMode: 'within', directionMode: 'reverse', label: 'За X снимков внутри · против движения', optionPrefix: 'Внутри · против движения'},
+    ];
+    const selectedEntry = selected.entry_config;
+    for (const choice of choices) {
+        const group = document.createElement('optgroup');
+        group.label = choice.label;
+        for (const item of entries.filter(entry => !entry.id.startsWith('immediate:'))) {
+            const option = document.createElement('option');
+            const baseId = entryBaseId(item.id);
+            option.value = encodeEntrySelection(entryVariantId(baseId, choice.signalMode, choice.directionMode), choice.signalMode, choice.directionMode);
+            let label = item.label
+                .replace(/ · лучший результат [+-]?\d+(?:\.\d+)? USDT$/, '')
+                .replace(' · в пределах окна', '')
+                .replace(' · против движения', '');
+            const isRankedCombination = choice.signalMode === selected.entry_signal_mode
+                && choice.directionMode === selected.entry_direction_mode;
+            const rankingSuffix = isRankedCombination ? item.label.match(/ · лучший результат [+-]?\d+(?:\.\d+)? USDT$/)?.[0] : '';
+            option.textContent = choice.optionPrefix + ' · ' + label + (rankingSuffix || '');
+            if (item.id === selectedEntry && isRankedCombination) option.selected = true;
+            group.appendChild(option);
+        }
+        entryConfigSelect.appendChild(group);
     }
-    if (![...entryConfigSelect.options].some(option => option.value === selected)) {
+    const immediateEntries = entries.filter(entry => entry.id.startsWith('immediate:'));
+    if (immediateEntries.length) {
+        const group = document.createElement('optgroup');
+        group.label = 'Одна заявка без порога';
+        for (const item of immediateEntries) {
+            const option = document.createElement('option');
+            option.value = encodeEntrySelection(item.id, selected.entry_signal_mode, selected.entry_direction_mode);
+            option.textContent = item.label;
+            if (item.id === selectedEntry) option.selected = true;
+            group.appendChild(option);
+        }
+        entryConfigSelect.appendChild(group);
+    }
+    if (![...entryConfigSelect.options].some(option => option.selected)) {
         entryConfigSelect.options[0].selected = true;
     }
 }
@@ -1587,14 +1632,21 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             }
             return;
         }
-        renderEntryOptions(ranking.entries, params.get('entry_config'));
+        const selectedEntry = {
+            entry_config: params.get('entry_config'),
+            entry_signal_mode: params.get('entry_signal_mode') || 'exact',
+            entry_direction_mode: params.get('entry_direction_mode') || 'follow',
+        };
+        renderEntryOptions(ranking.entries, selectedEntry);
         if (ranking.status === 'entry_unavailable') {
             if (selectTopRankedResult && ranking.entries?.[0]) {
-                entryConfigSelect.value = ranking.entries[0].id;
+                entryConfigSelect.value = encodeEntrySelection(ranking.entries[0].id, selectedEntry.entry_signal_mode, selectedEntry.entry_direction_mode);
+                entryConfigValueInput.value = ranking.entries[0].id;
                 loadExitRanking(null, true);
                 return;
             }
-            if (entryConfigSelect.value && entryConfigSelect.value !== params.get('entry_config')) filtersForm.requestSubmit();
+            const visibleSelection = entrySelectionFromValue(entryConfigSelect.value);
+            if (visibleSelection && visibleSelection.entry_config !== params.get('entry_config')) filtersForm.requestSubmit();
             else if (refreshAfterExitRanking) {
                 refreshAfterExitRanking = false;
                 void refreshStrategyResults();
@@ -1619,7 +1671,8 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             return;
         }
         if (selectTopRankedResult && ranking.entries?.[0] && params.get('entry_config') !== ranking.entries[0].id) {
-            entryConfigSelect.value = ranking.entries[0].id;
+            entryConfigSelect.value = encodeEntrySelection(ranking.entries[0].id, selectedEntry.entry_signal_mode, selectedEntry.entry_direction_mode);
+            entryConfigValueInput.value = ranking.entries[0].id;
             loadExitRanking(null, true);
             return;
         }
