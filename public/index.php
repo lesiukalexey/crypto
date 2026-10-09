@@ -815,6 +815,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .refresh-today-snapshot[hidden]{display:none}.refresh-today-snapshot:disabled{cursor:progress;opacity:.65}
 .page-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.page-heading .eyebrow{white-space:nowrap}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}.collector-status{margin:0;white-space:nowrap}.save-mode-toggle{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.save-mode-toggle input{position:absolute;opacity:0;width:1px;height:1px;min-width:0}.save-mode-switch{position:relative;width:38px;height:22px;border:1px solid #52617d;border-radius:999px;background:#263149;transition:.2s}.save-mode-switch:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#b7c1d5;transition:.2s}.save-mode-toggle input:checked+.save-mode-switch{background:#176647;border-color:#42d6a4}.save-mode-toggle input:checked+.save-mode-switch:after{transform:translateX(16px);background:#42d6a4}.save-mode-toggle input:focus-visible+.save-mode-switch{outline:2px solid #8ea5ff;outline-offset:2px}.save-mode-detail{color:var(--muted);font-weight:400}@media(max-width:700px){.page-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.header-actions{justify-content:flex-start}}
 .wrap{max-width:none;padding-left:20px;padding-right:20px}.chart-wrap{container-type:inline-size}#chart{height:27.1cqw}@media(max-width:600px){#chart{height:69cqw}}
+.entry-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.entry-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.entry-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.entry-strategy-fields>.field{flex:1 1 190px;min-width:150px}.entry-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.entry-strategy-fields>.field{flex-basis:100%;width:100%}}
 .ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}
 .combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
@@ -867,11 +868,12 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <div class="symbol-select-row date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="refresh-symbols refresh-today-snapshot" type="button" id="refresh-today-snapshot" aria-label="Обновить данные до выбранной даты" title="Подтянуть новые данные до выбранной даты в график и расчёты" <?= $snapshotNeedsRefresh ? '' : 'hidden' ?>>↻</button></div>
 
-<input type="hidden" name="entry_signal_mode" id="entry-signal-mode" value="<?= h($entrySignalMode) ?>">
-<input type="hidden" name="entry_direction_mode" id="entry-direction-mode" value="<?= h($entryDirectionMode) ?>">
-<input type="hidden" name="entry_config" id="entry-config-value" value="<?= h($entryConfig) ?>">
-<label class="field">Стратегия входа<select id="entry-config"><option value="">Загружаю рейтинг входов…</option></select></label>
-<p class="small-note">«Назад» сравнивает цену ровно с X снимками до текущего; «внутри» ловит первое пересечение относительно любого из последних X снимков. Направление можно выбрать по движению или против него.</p>
+<section class="entry-strategy-group" aria-labelledby="entry-strategy-heading"><h2 class="entry-strategy-heading" id="entry-strategy-heading">Стратегия входа</h2><div class="entry-strategy-fields">
+<label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
+<label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения (как сейчас)</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
+<label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>">Загружаю рейтинг порогов…</option></select></label>
+<p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию при первом пересечении порога относительно любого из последних X снимков.</p>
+</div></section>
 <label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю рейтинг вариантов…</option></select></label>
 <label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL только (как сейчас)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с проверкой по снимкам</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP по снимкам, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL по снимкам</option></select></label>
 <label class="field">Проверить через снимков<select name="exit_confirmation_snapshots" id="exit-confirmation-snapshots"><?php foreach ([1, 2, 3, 5, 10, 20, 30, 40, 60, 80] as $snapshotCount): ?><option value="<?= $snapshotCount ?>" <?= $exitConfirmationSnapshots === $snapshotCount ? 'selected' : '' ?>><?= $snapshotCount ?></option><?php endforeach; ?></select></label>
@@ -1407,14 +1409,21 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
             return;
         }
         if (control.id === 'entry-config') {
-            const selection = entrySelectionFromValue(control.value);
-            if (!selection) return;
-            entryConfigValueInput.value = selection.entry_config;
-            entrySignalModeInput.value = selection.entry_signal_mode;
-            entryDirectionModeInput.value = selection.entry_direction_mode;
-            selectTopRankedResultInput.value = '0';
-            filtersForm.requestSubmit();
+            updateMartingaleInitialNotional();
+            refreshAfterExitRanking = true;
+            const selectedExit = exitConfigSelect.value;
+            exitRankingRequestVersion++;
+            exitConfigSelect.replaceChildren();
+            const loadingOption = document.createElement('option');
+            loadingOption.value = selectedExit;
+            loadingOption.textContent = 'Пересчитываю TakeProfit & StopLoss для порога…';
+            loadingOption.selected = true;
+            exitConfigSelect.appendChild(loadingOption);
+            loadExitRanking(selectedExit);
             return;
+        }
+        if (control.id === 'entry-signal-mode' || control.id === 'entry-direction-mode') {
+            selectTopRankedResultInput.value = '1';
         }
         if (control.id === 'exit-config') {
             updateMartingaleInitialNotional();
@@ -1450,73 +1459,17 @@ const exitConfigSelect = document.querySelector('#exit-config');
 const entryConfigSelect = document.querySelector('#entry-config');
 const selectTopRankedResultInput = document.querySelector('#select-top-ranked-result');
 let selectTopRankedResult = selectTopRankedResultInput.value === '1';
-const entrySignalModeInput = document.querySelector('#entry-signal-mode');
-const entryDirectionModeInput = document.querySelector('#entry-direction-mode');
-const entryConfigValueInput = document.querySelector('#entry-config-value');
-function encodeEntrySelection(entryConfig, signalMode, directionMode) {
-    return JSON.stringify({entry_config: entryConfig, entry_signal_mode: signalMode, entry_direction_mode: directionMode});
-}
-function entryBaseId(entryId) {
-    if (entryId.startsWith('immediate:')) return entryId;
-    return entryId.replace(/:(?:within|reverse)/g, '');
-}
-function entryVariantId(baseId, signalMode, directionMode) {
-    if (baseId.startsWith('immediate:')) return baseId;
-    return baseId + (signalMode === 'within' ? ':within' : '') + (directionMode === 'reverse' ? ':reverse' : '');
-}
-function entrySelectionFromValue(value) {
-    try {
-        const selection = JSON.parse(value);
-        if (selection && typeof selection.entry_config === 'string'
-            && ['exact', 'within'].includes(selection.entry_signal_mode)
-            && ['follow', 'reverse'].includes(selection.entry_direction_mode)) return selection;
-    } catch (error) {}
-    return null;
-}
 function renderEntryOptions(entries, selected) {
     if (!Array.isArray(entries) || entries.length === 0) return;
     entryConfigSelect.replaceChildren();
-    const choices = [
-        {signalMode: 'exact', directionMode: 'follow', label: 'За X снимков назад · по движению', optionPrefix: 'Назад · по движению'},
-        {signalMode: 'exact', directionMode: 'reverse', label: 'За X снимков назад · против движения', optionPrefix: 'Назад · против движения'},
-        {signalMode: 'within', directionMode: 'follow', label: 'За X снимков внутри · по движению', optionPrefix: 'Внутри · по движению'},
-        {signalMode: 'within', directionMode: 'reverse', label: 'За X снимков внутри · против движения', optionPrefix: 'Внутри · против движения'},
-    ];
-    const selectedEntry = selected.entry_config;
-    for (const choice of choices) {
-        const group = document.createElement('optgroup');
-        group.label = choice.label;
-        for (const item of entries.filter(entry => !entry.id.startsWith('immediate:'))) {
-            const option = document.createElement('option');
-            const baseId = entryBaseId(item.id);
-            option.value = encodeEntrySelection(entryVariantId(baseId, choice.signalMode, choice.directionMode), choice.signalMode, choice.directionMode);
-            let label = item.label
-                .replace(/ · лучший результат [+-]?\d+(?:\.\d+)? USDT$/, '')
-                .replace(' · в пределах окна', '')
-                .replace(' · против движения', '');
-            const isRankedCombination = choice.signalMode === selected.entry_signal_mode
-                && choice.directionMode === selected.entry_direction_mode;
-            const rankingSuffix = isRankedCombination ? item.label.match(/ · лучший результат [+-]?\d+(?:\.\d+)? USDT$/)?.[0] : '';
-            option.textContent = choice.optionPrefix + ' · ' + label + (rankingSuffix || '');
-            if (item.id === selectedEntry && isRankedCombination) option.selected = true;
-            group.appendChild(option);
-        }
-        entryConfigSelect.appendChild(group);
+    for (const item of entries) {
+        const option = document.createElement('option');
+        option.value = item.id;
+        option.textContent = item.label;
+        if (item.id === selected) option.selected = true;
+        entryConfigSelect.appendChild(option);
     }
-    const immediateEntries = entries.filter(entry => entry.id.startsWith('immediate:'));
-    if (immediateEntries.length) {
-        const group = document.createElement('optgroup');
-        group.label = 'Одна заявка без порога';
-        for (const item of immediateEntries) {
-            const option = document.createElement('option');
-            option.value = encodeEntrySelection(item.id, selected.entry_signal_mode, selected.entry_direction_mode);
-            option.textContent = item.label;
-            if (item.id === selectedEntry) option.selected = true;
-            group.appendChild(option);
-        }
-        entryConfigSelect.appendChild(group);
-    }
-    if (![...entryConfigSelect.options].some(option => option.selected)) {
+    if (![...entryConfigSelect.options].some(option => option.value === selected)) {
         entryConfigSelect.options[0].selected = true;
     }
 }
@@ -1632,21 +1585,14 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             }
             return;
         }
-        const selectedEntry = {
-            entry_config: params.get('entry_config'),
-            entry_signal_mode: params.get('entry_signal_mode') || 'exact',
-            entry_direction_mode: params.get('entry_direction_mode') || 'follow',
-        };
-        renderEntryOptions(ranking.entries, selectedEntry);
+        renderEntryOptions(ranking.entries, params.get('entry_config'));
         if (ranking.status === 'entry_unavailable') {
             if (selectTopRankedResult && ranking.entries?.[0]) {
-                entryConfigSelect.value = encodeEntrySelection(ranking.entries[0].id, selectedEntry.entry_signal_mode, selectedEntry.entry_direction_mode);
-                entryConfigValueInput.value = ranking.entries[0].id;
+                entryConfigSelect.value = ranking.entries[0].id;
                 loadExitRanking(null, true);
                 return;
             }
-            const visibleSelection = entrySelectionFromValue(entryConfigSelect.value);
-            if (visibleSelection && visibleSelection.entry_config !== params.get('entry_config')) filtersForm.requestSubmit();
+            if (entryConfigSelect.value !== params.get('entry_config')) filtersForm.requestSubmit();
             else if (refreshAfterExitRanking) {
                 refreshAfterExitRanking = false;
                 void refreshStrategyResults();
@@ -1671,8 +1617,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             return;
         }
         if (selectTopRankedResult && ranking.entries?.[0] && params.get('entry_config') !== ranking.entries[0].id) {
-            entryConfigSelect.value = encodeEntrySelection(ranking.entries[0].id, selectedEntry.entry_signal_mode, selectedEntry.entry_direction_mode);
-            entryConfigValueInput.value = ranking.entries[0].id;
+            entryConfigSelect.value = ranking.entries[0].id;
             loadExitRanking(null, true);
             return;
         }
