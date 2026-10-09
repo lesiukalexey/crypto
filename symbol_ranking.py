@@ -22,7 +22,7 @@ from app import load_config
 from database import connect_mysql
 import portfolio_ranking as portfolio_engine
 from portfolio_ranking import exit_specs
-from strategy_ranking import PriceTree, ProgressReporter, QuoteArrays, build_entry_specs, make_signals, martingale_target_policies, resolve_entry_config, simulate, exit_values
+from strategy_ranking import PriceTree, ProgressReporter, QuoteArrays, build_entry_specs, make_signals, martingale_exit_candidates, martingale_target_policies, resolve_entry_config, simulate, simulate_martingale_batch, exit_values
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -48,9 +48,15 @@ def main() -> int:
     parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse", "simple_profit", "reverse_profit"), default="none")
     parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
+    parser.add_argument("--martingale-max-chain-loss", type=float, default=0.0)
+    parser.add_argument("--martingale-max-day-loss", type=float, default=0.0)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
+    martingale_candidates = (
+        martingale_exit_candidates(exit_profiles, args.martingale_mode)
+        if args.martingale_mode != "none" else []
+    )
 
     status_path = args.cache_dir / f"symbols-{args.cache_key}.status.json"
     result_path = args.cache_dir / f"symbols-{args.cache_key}.json"
@@ -229,18 +235,41 @@ def main() -> int:
                     bid_tree = PriceTree(quotes.bids)
                     ask_tree = PriceTree(quotes.asks)
                     fee_rate = args.fee_percent / 100
+                    martingale_batch_results = {}
+                    if args.martingale_mode != "none":
+                        martingale_batch_results = simulate_martingale_batch(
+                            quotes, signals, shorts, bid_tree, ask_tree,
+                            args.balance, fee_rate, args.martingale_mode,
+                            args.martingale_timing, args.martingale_attempts,
+                            args.martingale_max_chain_loss, args.martingale_max_day_loss,
+                            martingale_candidates,
+                        )
 
                     def consider(target: float | None, loss: float | None, label: str) -> None:
                         nonlocal best_pnl, best_label, symbol_completed
                         for target_policy, policy_label in martingale_target_policies(args.martingale_mode, loss):
-                            pnl, trade_count = simulate(
-                                quotes, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
-                                target, loss, args.martingale_mode, args.martingale_timing,
-                                args.martingale_attempts, target_policy,
-                            )
-                            if trade_count >= args.min_trades and pnl > best_pnl:
+                            if args.martingale_mode != "none":
+                                if target is not None and loss is None:
+                                    identifier = f"profit:{int(round(target * 10))}"
+                                elif target is None:
+                                    identifier = f"loss:{int(round(loss))}"
+                                else:
+                                    identifier = f"fixed:{int(round(target * 10))}:{int(round(loss))}"
+                                pnl, trade_count, chain_count = martingale_batch_results[(identifier, target_policy)]
+                            else:
+                                pnl, trade_count = simulate(
+                                    quotes, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
+                                    target, loss, args.martingale_mode, args.martingale_timing,
+                                    args.martingale_attempts, target_policy,
+                                    args.martingale_max_chain_loss, args.martingale_max_day_loss,
+                                )
+                                chain_count = trade_count
+                            independent_count = chain_count if args.martingale_mode != "none" else trade_count
+                            if independent_count >= args.min_trades and pnl > best_pnl:
                                 best_pnl = pnl
                                 best_label = label + (f" · {policy_label}" if policy_label else "")
+                                if args.martingale_mode != "none":
+                                    best_label += f" · {chain_count} независимых цепочек / {trade_count} ордеров"
                             symbol_completed += 1
                             if symbol_completed % 1000 == 0:
                                 progress = int((symbol_index + symbol_completed / variants_per_symbol) * 100 / max(1, len(max_ids)))

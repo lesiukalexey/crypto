@@ -363,24 +363,39 @@ def simulate_martingale_numba(
     timing: int,
     attempts: int,
     target_policy: int,
-) -> tuple[float, int]:
+    max_chain_loss: float,
+    max_day_loss: float,
+    day_ids: np.ndarray,
+) -> tuple[float, int, int]:
     balance = start_balance
     signal_cursor = 0
     closed_orders = 0
+    chains_started = 0
+    daily_day = -1
+    daily_pnl = 0.0
     count = len(bids)
     has_take = not np.isnan(take_profit)
     has_stop = not np.isnan(stop_loss)
     if base_notional <= 0.0:
-        return 0.0, 0
+        return 0.0, 0, 0
 
     while balance > 0.0 and signal_cursor < len(signal_indexes):
         entry_index = signal_indexes[signal_cursor]
         is_short = signal_shorts[signal_cursor]
         signal_cursor += 1
+        entry_day = day_ids[entry_index]
+        if entry_day != daily_day:
+            daily_day = entry_day
+            daily_pnl = 0.0
+        if not np.isnan(max_day_loss) and max_day_loss > 0.0 and daily_pnl <= -max_day_loss:
+            continue
         price = bids[entry_index] if is_short else asks[entry_index]
         if price <= 0.0:
             continue
-        notional = base_notional
+        # Keep the planned initial stake tied to the starting balance, but do
+        # not open a new chain larger than the currently available balance
+        # after losses on earlier chains.
+        notional = min(base_notional, balance / (1.0 + fee_rate))
         if notional <= 0.0:
             break
 
@@ -391,8 +406,10 @@ def simulate_martingale_numba(
         leg_quantities[0] = notional / price
         leg_fees[0] = notional * fee_rate
         leg_count = 1
+        chains_started += 1
         position_notional = notional
         chain_base_notional = notional
+        chain_realized_pnl = 0.0
         stage = 1
 
         while leg_count > 0:
@@ -420,6 +437,17 @@ def simulate_martingale_numba(
                 first_stop = _first_le(bid_minimum, tree_size, tree_length, entry_index + 1, stop_price) if has_stop else -1
 
             has_crossing = first_take >= 0 or first_stop >= 0
+            first_risk = -1
+            if not np.isnan(max_chain_loss) and max_chain_loss > 0.0:
+                remaining_chain_risk = max_chain_loss + chain_realized_pnl
+                if remaining_chain_risk <= 0.0:
+                    first_risk = entry_index + 1
+                elif is_short:
+                    risk_price = (entry_cost - entry_fees + remaining_chain_risk) / (total_quantity * (1.0 + fee_rate))
+                    first_risk = _first_ge(ask_maximum, tree_size, tree_length, entry_index + 1, risk_price)
+                else:
+                    risk_price = (entry_cost + entry_fees - remaining_chain_risk) / (total_quantity * (1.0 - fee_rate))
+                    first_risk = _first_le(bid_minimum, tree_size, tree_length, entry_index + 1, risk_price)
             if first_take >= 0 and first_stop >= 0:
                 exit_index = min(first_take, first_stop)
             elif first_take >= 0:
@@ -428,6 +456,33 @@ def simulate_martingale_numba(
                 exit_index = first_stop
             else:
                 exit_index = count - 1
+            if first_risk >= 0 and first_risk <= exit_index:
+                exit_index = first_risk
+            first_day_risk = -1
+            if not np.isnan(max_day_loss) and max_day_loss > 0.0:
+                day_start = entry_index + 1
+                while day_start < count and day_start <= exit_index:
+                    segment_day = day_ids[day_start]
+                    segment_end = _upper_bound(day_ids, day_start, segment_day) - 1
+                    if segment_end > exit_index:
+                        segment_end = exit_index
+                    realized_for_day = daily_pnl if segment_day == daily_day else 0.0
+                    remaining_day_risk = max_day_loss + realized_for_day + chain_realized_pnl
+                    if remaining_day_risk <= 0.0:
+                        first_day_risk = day_start
+                        break
+                    if is_short:
+                        day_risk_price = (entry_cost - entry_fees + remaining_day_risk) / (total_quantity * (1.0 + fee_rate))
+                        candidate_day_risk = _first_ge(ask_maximum, tree_size, tree_length, day_start, day_risk_price)
+                    else:
+                        day_risk_price = (entry_cost + entry_fees - remaining_day_risk) / (total_quantity * (1.0 - fee_rate))
+                        candidate_day_risk = _first_le(bid_minimum, tree_size, tree_length, day_start, day_risk_price)
+                    if candidate_day_risk >= day_start and candidate_day_risk <= segment_end:
+                        first_day_risk = candidate_day_risk
+                        break
+                    day_start = segment_end + 1
+            if first_day_risk >= 0 and first_day_risk <= exit_index:
+                exit_index = first_day_risk
 
             exit_quote = asks[exit_index] if is_short else bids[exit_index]
             if is_short:
@@ -440,8 +495,25 @@ def simulate_martingale_numba(
                 (transition_on_profit and first_take >= 0 and first_take == exit_index)
                 or (not transition_on_profit and first_stop >= 0 and first_stop == exit_index)
             )
+            risk_trigger = (first_risk >= 0 and first_risk == exit_index) or (first_day_risk >= 0 and first_day_risk == exit_index)
+            exit_day = day_ids[exit_index]
+            if exit_day != daily_day:
+                daily_day = exit_day
+                daily_pnl = 0.0
+            if risk_trigger or (
+                not np.isnan(max_day_loss)
+                and max_day_loss > 0.0
+                and daily_pnl + chain_realized_pnl + net <= -max_day_loss
+            ):
+                balance += net
+                daily_pnl += chain_realized_pnl + net
+                closed_orders += leg_count
+                leg_count = 0
+                signal_cursor = _upper_bound(signal_indexes, signal_cursor, exit_index)
+                break
             if first_take >= 0 and first_take == exit_index and not trigger_transition:
                 balance += net
+                daily_pnl += chain_realized_pnl + net
                 closed_orders += leg_count
                 leg_count = 0
                 signal_cursor = _upper_bound(signal_indexes, signal_cursor, exit_index)
@@ -474,6 +546,18 @@ def simulate_martingale_numba(
                                 break
                             signal_cursor += 1
                         if not found_signal:
+                            if first_take >= 0:
+                                end_quote = asks[first_take] if is_short else bids[first_take]
+                                if is_short:
+                                    take_net = entry_cost - total_quantity * end_quote - entry_fees - total_quantity * end_quote * fee_rate
+                                else:
+                                    take_net = total_quantity * end_quote - entry_cost - entry_fees - total_quantity * end_quote * fee_rate
+                                balance += take_net
+                                daily_pnl += chain_realized_pnl + take_net
+                                closed_orders += leg_count
+                                leg_count = 0
+                                signal_cursor = _upper_bound(signal_indexes, 0, first_take)
+                                break
                             end_quote = asks[count - 1] if is_short else bids[count - 1]
                             if is_short:
                                 end_net = entry_cost - total_quantity * end_quote - entry_fees - total_quantity * end_quote * fee_rate
@@ -483,6 +567,18 @@ def simulate_martingale_numba(
                             closed_orders += leg_count
                             leg_count = 0
                             signal_cursor = len(signal_indexes)
+                            break
+                        if first_take >= 0 and first_take < next_index:
+                            take_quote = asks[first_take] if is_short else bids[first_take]
+                            if is_short:
+                                take_net = entry_cost - total_quantity * take_quote - entry_fees - total_quantity * take_quote * fee_rate
+                            else:
+                                take_net = total_quantity * take_quote - entry_cost - entry_fees - total_quantity * take_quote * fee_rate
+                            balance += take_net
+                            daily_pnl += chain_realized_pnl + take_net
+                            closed_orders += leg_count
+                            leg_count = 0
+                            signal_cursor = _upper_bound(signal_indexes, 0, first_take)
                             break
                     if add_notional > 0.0 and next_index < count:
                         add_price = bids[next_index] if next_short else asks[next_index]
@@ -497,6 +593,7 @@ def simulate_martingale_numba(
                             continue
                 elif mode == 2:
                     balance += net
+                    chain_realized_pnl += net
                     closed_orders += leg_count
                     leg_count = 0
                     requested = position_notional * 2.0
@@ -526,8 +623,16 @@ def simulate_martingale_numba(
                     break
                 else:
                     balance += net
+                    chain_realized_pnl += net
                     closed_orders += 1
                     leg_count = 0
+                    if (
+                        (not np.isnan(max_chain_loss) and max_chain_loss > 0.0 and chain_realized_pnl <= -max_chain_loss)
+                        or (not np.isnan(max_day_loss) and max_day_loss > 0.0 and daily_pnl + chain_realized_pnl <= -max_day_loss)
+                    ):
+                        daily_pnl += chain_realized_pnl
+                        signal_cursor = _upper_bound(signal_indexes, signal_cursor, exit_index)
+                        break
                     wanted = position_notional * 2.0
                     reverse_short = not is_short
                     next_index = exit_index
@@ -559,9 +664,53 @@ def simulate_martingale_numba(
 
             if leg_count > 0:
                 balance += net
+                daily_pnl += chain_realized_pnl + net
                 closed_orders += leg_count
                 leg_count = 0
                 signal_cursor = _upper_bound(signal_indexes, signal_cursor, exit_index)
                 break
 
-    return balance - start_balance, closed_orders
+    return balance - start_balance, closed_orders, chains_started
+
+
+@njit(cache=True)
+def simulate_martingale_batch_numba(
+    bids: np.ndarray,
+    asks: np.ndarray,
+    bid_maximum: np.ndarray,
+    bid_minimum: np.ndarray,
+    ask_maximum: np.ndarray,
+    ask_minimum: np.ndarray,
+    tree_size: int,
+    tree_length: int,
+    signal_indexes: np.ndarray,
+    signal_shorts: np.ndarray,
+    start_balance: float,
+    fee_rate: float,
+    take_profits: np.ndarray,
+    stop_losses: np.ndarray,
+    base_notionals: np.ndarray,
+    mode: int,
+    timing: int,
+    attempts: int,
+    target_policies: np.ndarray,
+    max_chain_loss: float,
+    max_day_loss: float,
+    day_ids: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Evaluate an exit grid in one compiled call using the exact scalar kernel."""
+    pnls = np.empty(len(take_profits), dtype=np.float64)
+    closed_orders = np.empty(len(take_profits), dtype=np.int64)
+    chains = np.empty(len(take_profits), dtype=np.int64)
+    for index in range(len(take_profits)):
+        pnl, order_count, chain_count = simulate_martingale_numba(
+            bids, asks, bid_maximum, bid_minimum, ask_maximum, ask_minimum,
+            tree_size, tree_length, signal_indexes, signal_shorts,
+            start_balance, fee_rate, take_profits[index], stop_losses[index],
+            base_notionals[index], mode, timing, attempts,
+            target_policies[index], max_chain_loss, max_day_loss, day_ids,
+        )
+        pnls[index] = pnl
+        closed_orders[index] = order_count
+        chains[index] = chain_count
+    return pnls, closed_orders, chains

@@ -15,9 +15,11 @@ $defaultRankingRanges = rankingParameters([], $entryProfileConfig, $exitProfileC
 $rankingError = null;
 try {
     $rankingParameters = rankingParameters($_GET, $entryProfileConfig, $exitProfileConfig);
+    $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
 } catch (InvalidArgumentException $exception) {
     $rankingError = $exception->getMessage();
     $rankingParameters = rankingParameters([], $entryProfileConfig, $exitProfileConfig);
+    $martingaleRiskLimits = ['max_chain_loss' => '0', 'max_day_loss' => '0'];
 }
 $rankingRanges = $rankingParameters['ranges'];
 $rankingModes = $rankingParameters['modes'];
@@ -408,6 +410,7 @@ if ($cachedStandardTradeEvents !== null) {
         $availableForStakes = bcsub($startingBalance, $reservedLoss, 24);
         $baseStake = bccomp($availableForStakes, '0', 24) > 0 ? bcdiv($availableForStakes, $requiredPerBase, 24) : '0';
     }
+    $dailyRealizedByDay = [];
     $chainAttempt = 0;
     while (bccomp($balance, '0', 24) > 0 && $chainAttempt < 100000) {
         $signal = $isImmediateEntry
@@ -415,11 +418,19 @@ if ($cachedStandardTradeEvents !== null) {
             : $findMomentumEntry($tradeEntryIndex);
         if ($signal === null) break;
         [$tradeEntryIndex, $tradeIsShort] = $signal;
+        $entryDay = (new DateTimeImmutable($rows[$tradeEntryIndex]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
+        if ((float) $martingaleRiskLimits['max_day_loss'] > 0
+            && isset($dailyRealizedByDay[$entryDay])
+            && bccomp($dailyRealizedByDay[$entryDay], bcsub('0', $martingaleRiskLimits['max_day_loss'], 24), 24) <= 0) {
+            $tradeEntryIndex++;
+            continue;
+        }
         $entryPrice = $tradeIsShort ? $rows[$tradeEntryIndex]['bid_price'] : $rows[$tradeEntryIndex]['ask_price'];
         if (bccomp($entryPrice, '0', 24) <= 0) { $tradeEntryIndex++; continue; }
-        $availableInitialStake = bcdiv($startingBalance, bcadd('1', $feeRate, 24), 24);
+        $availableInitialStake = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
         $stake = bccomp($baseStake, $availableInitialStake, 24) < 0 ? $baseStake : $availableInitialStake;
         $chainBaseStake = $stake;
+        $chainRealizedPnl = '0';
         $legs = [];
         $positionNotional = '0';
         $stage = 1;
@@ -443,6 +454,7 @@ if ($cachedStandardTradeEvents !== null) {
             $stageTarget = $profitTarget === null ? null : bcmul($profitTarget, $targetScale, 24);
             $stageLoss = $lossThreshold === null ? null : bcmul($lossThreshold, $targetScale, 24);
             $foundStop = false;
+            $hitRiskLimit = false;
             for ($i = $tradeEntryIndex + 1; $i < $rowCount; $i++) {
                 $exitQuote = $tradeIsShort ? $rows[$i]['ask_price'] : $rows[$i]['bid_price'];
                 $grossNow = '0'; $entryFeesNow = '0'; $totalQty = '0';
@@ -454,6 +466,23 @@ if ($cachedStandardTradeEvents !== null) {
                 }
                 $exitFeeNow = bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24);
                 $netNow = bcsub(bcsub($grossNow, $entryFeesNow, 24), $exitFeeNow, 24);
+                $quoteDay = (new DateTimeImmutable($rows[$i]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
+                $projectedChainPnl = bcadd($chainRealizedPnl, $netNow, 24);
+                $projectedDayPnl = bcadd((string) ($dailyRealizedByDay[$quoteDay] ?? '0'), $projectedChainPnl, 24);
+                if ((float) $martingaleRiskLimits['max_chain_loss'] > 0
+                    && bccomp($projectedChainPnl, bcsub('0', $martingaleRiskLimits['max_chain_loss'], 24), 24) <= 0) {
+                    $exitIndex = $i;
+                    $exitReason = 'Мартингейл · лимит убытка цепочки';
+                    $hitRiskLimit = true;
+                    break;
+                }
+                if ((float) $martingaleRiskLimits['max_day_loss'] > 0
+                    && bccomp($projectedDayPnl, bcsub('0', $martingaleRiskLimits['max_day_loss'], 24), 24) <= 0) {
+                    $exitIndex = $i;
+                    $exitReason = 'Мартингейл · дневной лимит убытка';
+                    $hitRiskLimit = true;
+                    break;
+                }
                 if ($stageTarget !== null && bccomp($netNow, $stageTarget, 24) >= 0) {
                     $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $formatTargetPercent($stageTarget, $startingBalance) . ' от стартового баланса';
                     $foundStop = str_ends_with($martingaleMode, '_profit');
@@ -465,8 +494,16 @@ if ($cachedStandardTradeEvents !== null) {
                     break;
                 }
             }
-            if (!$foundStop || $stage >= $martingaleAttempts) {
+            if ($hitRiskLimit || !$foundStop || $stage >= $martingaleAttempts) {
+                $balanceBeforeClose = $balance;
                 $appendLegTrades($legs, $exitIndex, $exitReason, $balance);
+                $closedNet = bcsub($balance, $balanceBeforeClose, 24);
+                $exitDay = (new DateTimeImmutable($rows[$exitIndex]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
+                $dailyRealizedByDay[$exitDay] = bcadd(
+                    (string) ($dailyRealizedByDay[$exitDay] ?? '0'),
+                    bcadd($chainRealizedPnl, $closedNet, 24),
+                    24,
+                );
                 $legs = [];
                 $tradeEntryIndex = $exitIndex + 1;
                 break;
@@ -508,11 +545,39 @@ if ($cachedStandardTradeEvents !== null) {
                 $addNotional = bccomp($maxAffordable, $positionNotional, 24) < 0 ? $maxAffordable : $positionNotional;
                 if ($martingaleTiming === 'rules') {
                     $nextSignal = $findCompatibleEntry($exitIndex + 1, $tradeIsShort);
+                    $nextIndex = $nextSignal === null ? $rowCount : $nextSignal[0];
+                    $takeBeforeSignal = null;
+                    if ($stageTarget !== null) {
+                        for ($i = $exitIndex + 1; $i < min($nextIndex, $rowCount); $i++) {
+                            $waitQuote = $tradeIsShort ? $rows[$i]['ask_price'] : $rows[$i]['bid_price'];
+                            $waitGross = '0'; $waitEntryFees = '0'; $waitQuantity = '0';
+                            foreach ($legs as $leg) {
+                                $waitMove = $tradeIsShort ? bcsub($leg['entry_price'], $waitQuote, 24) : bcsub($waitQuote, $leg['entry_price'], 24);
+                                $waitGross = bcadd($waitGross, bcmul($leg['quantity'], $waitMove, 24), 24);
+                                $waitEntryFees = bcadd($waitEntryFees, $leg['entry_fee'], 24);
+                                $waitQuantity = bcadd($waitQuantity, $leg['quantity'], 24);
+                            }
+                            $waitNet = bcsub(
+                                bcsub($waitGross, $waitEntryFees, 24),
+                                bcmul(bcmul($waitQuantity, $waitQuote, 24), $feeRate, 24),
+                                24,
+                            );
+                            if (bccomp($waitNet, $stageTarget, 24) >= 0) {
+                                $takeBeforeSignal = $i;
+                                break;
+                            }
+                        }
+                    }
+                    if ($takeBeforeSignal !== null) {
+                        $appendLegTrades($legs, $takeBeforeSignal, 'Мартингейл · цель прибыли при ожидании сигнала', $balance);
+                        $legs = [];
+                        $tradeEntryIndex = $takeBeforeSignal + 1;
+                        break;
+                    }
                     if ($nextSignal === null) {
                         $appendLegTrades($legs, $rowCount - 1, $isCurrentDay ? 'Мартингейл · ожидание сигнала · последний снимок' : 'Мартингейл · ожидание сигнала · конец периода', $balance);
                         $legs = []; $tradeEntryIndex = $rowCount; break;
                     }
-                    [$nextIndex] = $nextSignal;
                     $signalQuote = $tradeIsShort ? $rows[$nextIndex]['ask_price'] : $rows[$nextIndex]['bid_price'];
                     $signalGross = '0'; $signalFees = '0'; $signalQty = '0';
                     foreach ($legs as $leg) {
@@ -702,7 +767,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
-.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid #273149;border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:#e9eefb}.view-nav a[aria-current=page]{background:#263968;color:#fff}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
+.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
@@ -734,6 +799,8 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="martingale_mode" value="<?= h($martingaleMode) ?>">
 <input type="hidden" name="martingale_timing" value="<?= h($martingaleTiming) ?>">
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
+<input type="hidden" name="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>">
+<input type="hidden" name="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>">
 <div class="symbol-select-row"><label class="field">Торговая пара<select name="symbol" id="symbol-select" required><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></label><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов" title="Сбросить кэш рейтингов">🧹</button></div>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <div class="symbol-select-row date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="refresh-symbols refresh-today-snapshot" type="button" id="refresh-today-snapshot" aria-label="Обновить данные до выбранной даты" title="Подтянуть новые данные до выбранной даты в график и расчёты" <?= $snapshotNeedsRefresh ? '' : 'hidden' ?>>↻</button></div>
@@ -743,7 +810,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. Новый номинал шага удваивается, с ограничением доступного баланса. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
+<details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><label class="field">Макс. убыток цепочки (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>"></label><label class="field">Макс. убыток за день (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>"></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Ноль отключает лимит. Лимит цепочки закрывает её на первом снимке, где чистый убыток достигает суммы. Дневной лимит учитывает результат закрытых цепочек по дате закрытия и запрещает новые цепочки до следующего дня; лимит цепочки ограничивает текущую позицию.</p><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php
@@ -1023,7 +1090,7 @@ const martingaleDraftStatus = document.querySelector('#martingale-draft-status')
 const martingaleInitialNotional = document.querySelector('#martingale-initial-notional');
 const martingaleApplyButton = document.querySelector('#apply-martingale-settings');
 const martingaleControls = [...filtersForm.querySelectorAll('[data-martingale-setting]')];
-const martingaleAppliedControls = ['martingale_mode', 'martingale_timing', 'martingale_attempts']
+const martingaleAppliedControls = ['martingale_mode', 'martingale_timing', 'martingale_attempts', 'martingale_max_chain_loss', 'martingale_max_day_loss']
     .map(name => filtersForm.elements.namedItem(name));
 function readMartingaleSettings() {
     return Object.fromEntries(martingaleControls.map(control => [control.dataset.martingaleSetting, control.value]));
@@ -1299,6 +1366,10 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
     if (control.type === 'number' && !control.classList.contains('ranking-range-input')) {
         control.addEventListener('input', () => {
             updateMartingaleInitialNotional();
+            if (martingaleControls.includes(control)) {
+                updateMartingaleDraftState();
+                return;
+            }
             clearTimeout(filterSubmitTimer);
             filterSubmitTimer = setTimeout(() => {
                 if (control.value !== '' && control.checkValidity()) {
@@ -1911,7 +1982,7 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
                     item.symbol, entryCell, exitCell,
                     pnlText(item.pnl), pnlText(item.market_average_pnl),
                     item.market_eligible_symbols === undefined ? '—' : item.market_eligible_symbols + ' из ' + ranking.universe_size,
-                    item.trade_count ? String(item.trade_count) : 'нет надежных данных',
+                    item.trade_count ? (!params.get('martingale_mode') || params.get('martingale_mode') === 'none' ? String(item.trade_count) : `${item.trade_count} · ${item.chain_count ?? 0}`) : 'нет надежных данных',
                 ],
                 sortValues: {
                     tickerPnl: item.pnl === null || item.pnl === undefined ? null : Number(item.pnl),
@@ -1923,7 +1994,7 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
         rankingTable(document.querySelector('#portfolio-ticker-table'), [
             {label:'Тикер'}, {label:'Лучший порог входа'}, {label:'Лучший TakeProfit & StopLoss'},
             {label:'Итог тикера',numeric:true,sortKey:'tickerPnl',defaultDirection:'desc'}, {label:'Средний итог этой пары на рынке',numeric:true,sortKey:'marketAverage',defaultDirection:'desc'},
-            {label:'Поддержка',numeric:true}, {label:'Сделок',numeric:true},
+            {label:'Поддержка',numeric:true}, {label:params.get('martingale_mode') && params.get('martingale_mode') !== 'none' ? 'Ордеров · цепочек' : 'Сделок',numeric:true},
         ], tickerRows, {initialKey:'tickerPnl',initialDirection:'desc'});
         portfolioRankingStatus.textContent = 'Средний итог рассчитан по ' + ranking.universe_size
             + ' тикерам с данными за период; пары без подходящей выборки учитываются как 0. SAVE MODE требует минимум '

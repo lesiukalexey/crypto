@@ -47,6 +47,7 @@ from strategy_ranking import (
     make_signal_profiles,
     martingale_target_policies,
     simulate,
+    simulate_martingale_batch,
     simulate_standard_checkpoint,
     simulate_standard_checkpoint_days,
     standard_range_results,
@@ -54,7 +55,7 @@ from strategy_ranking import (
 )
 
 KYIV = ZoneInfo("Europe/Kyiv")
-PORTFOLIO_RESULT_DTYPE = np.dtype([("pnl", "<f8"), ("trade_count", "<u4")])
+PORTFOLIO_RESULT_DTYPE = np.dtype([("pnl", "<f8"), ("trade_count", "<u4"), ("chain_count", "<u4")])
 
 
 def durable_result_path(
@@ -67,10 +68,11 @@ def durable_result_path(
         for symbol in sorted(max_ids)
     ]
     key = hashlib.sha256(json.dumps([
-        "portfolio-durable-result-v6-canonical-ledger" if args.martingale_mode == "none" else "portfolio-durable-result-v7-negative-stop", category, args.start_day, args.end_day,
+        "portfolio-durable-result-v6-canonical-ledger" if args.martingale_mode == "none" else "portfolio-durable-result-v10-independent-chains", category, args.start_day, args.end_day,
         args.balance, args.fee_percent, args.min_trades, args.entry_config,
         args.ranking_params, args.martingale_mode, args.martingale_timing,
-        args.martingale_attempts, quote_versions,
+        args.martingale_attempts, args.martingale_max_chain_loss,
+        args.martingale_max_day_loss, quote_versions,
     ], separators=(",", ":")).encode("utf-8")).hexdigest()
     return cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-results-v1" / key[:2] / f"{key}.json"
 
@@ -107,6 +109,8 @@ def pair_result_cache_paths(
     martingale_mode: str,
     martingale_timing: str,
     martingale_attempts: int,
+    martingale_max_chain_loss: float | None,
+    martingale_max_day_loss: float | None,
 ) -> tuple[Path, dict[str, Path]]:
     cache_root = cache_dir / "portfolio-pair-results"
     cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -119,7 +123,7 @@ def pair_result_cache_paths(
 
     scope_keys = {
         symbol: hashlib.sha256(json.dumps([
-            "portfolio-pair-simulation-v7-canonical-ledger" if martingale_mode == "none" else "portfolio-pair-simulation-v8-negative-stop",
+            "portfolio-pair-simulation-v7-canonical-ledger" if martingale_mode == "none" else "portfolio-pair-simulation-v11-independent-chains",
             category,
             symbol,
             max_ids[symbol],
@@ -131,6 +135,8 @@ def pair_result_cache_paths(
             martingale_mode,
             martingale_timing,
             martingale_attempts,
+            martingale_max_chain_loss,
+            martingale_max_day_loss,
         ], separators=(",", ":")).encode("utf-8")).hexdigest()
         for symbol in max_ids
     }
@@ -144,31 +150,32 @@ def pair_result_cache_paths(
     }
 
 
-def load_pair_result_cache(path: Path) -> dict[str, tuple[float, int]]:
+def load_pair_result_cache(path: Path) -> dict[str, tuple[float, int, int]]:
     try:
         payload = json.loads(zlib.decompress(path.read_bytes()))
     except (OSError, UnicodeDecodeError, zlib.error, json.JSONDecodeError):
         return {}
     if not isinstance(payload, dict):
         return {}
-    results: dict[str, tuple[float, int]] = {}
+    results: dict[str, tuple[float, int, int]] = {}
     for exit_id, result in payload.items():
-        if not isinstance(exit_id, str) or not isinstance(result, list) or len(result) != 2:
+        if not isinstance(exit_id, str) or not isinstance(result, list) or len(result) not in (2, 3):
             continue
         try:
             pnl = float(result[0])
             trade_count = int(result[1])
+            chain_count = int(result[2]) if len(result) == 3 else trade_count
         except (TypeError, ValueError, OverflowError):
             continue
-        if math.isfinite(pnl) and trade_count >= 0:
-            results[exit_id] = (pnl, trade_count)
+        if math.isfinite(pnl) and trade_count >= 0 and chain_count >= 0:
+            results[exit_id] = (pnl, trade_count, chain_count)
     return results
 
 
-def write_pair_result_cache(path: Path, results: dict[str, tuple[float, int]]) -> None:
+def write_pair_result_cache(path: Path, results: dict[str, tuple[float, int, int]]) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = json.dumps(
-        {exit_id: [pnl, trade_count] for exit_id, (pnl, trade_count) in results.items()},
+        {exit_id: [pnl, trade_count, chain_count] for exit_id, (pnl, trade_count, chain_count) in results.items()},
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
@@ -247,6 +254,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
         results = np.empty(len(result_pnls), dtype=PORTFOLIO_RESULT_DTYPE)
         results["pnl"] = result_pnls
         results["trade_count"] = result_trades
+        results["chain_count"] = result_trades
         # The durable checkpoint already contains the full simulation state;
         # no per-exit kernel call or broom-reset pair-result file is needed.
         reused_days = tuple(day for day, loaded in (
@@ -271,6 +279,21 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
         price_trees = (PriceTree(quotes.bids), PriceTree(quotes.asks))
         _PORTFOLIO_WORKER_PRICE_TREES[symbol] = price_trees
     cached_results = load_pair_result_cache(cache_path)
+    batch_results: dict[tuple[str, str], tuple[float, int, int]] = {}
+    if args.martingale_mode != "none":
+        uncached = [
+            (exit_id, take_profit, stop_loss, target_policy)
+            for exit_id, _, take_profit, stop_loss, target_policy in state["exit_options"]
+            if exit_id not in cached_results
+        ]
+        if uncached:
+            batch_results = simulate_martingale_batch(
+                quotes, signals, shorts, price_trees[0], price_trees[1],
+                args.balance, state["fee_rate"], args.martingale_mode,
+                args.martingale_timing, args.martingale_attempts,
+                args.martingale_max_chain_loss, args.martingale_max_day_loss,
+                uncached,
+            )
     cache_updated = False
     checkpoint_updated = bool(boundaries_to_capture)
     hits = 0
@@ -321,26 +344,34 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                     trade_count -= int(start_state[2])
                 checkpoint_updated = True
             else:
-                pnl, trade_count = simulate(
-                    quotes,
-                    signals,
-                    shorts,
-                    price_trees[0],
-                    price_trees[1],
-                    args.balance,
-                    state["fee_rate"],
-                    take_profit,
-                    stop_loss,
-                    args.martingale_mode,
-                    args.martingale_timing,
-                    args.martingale_attempts,
-                    target_policy,
-                )
-            cached_results[exit_id] = (pnl, trade_count)
+                if args.martingale_mode != "none":
+                    pnl, trade_count, chain_count = batch_results[(exit_id, target_policy)]
+                else:
+                    pnl, trade_count = simulate(
+                        quotes,
+                        signals,
+                        shorts,
+                        price_trees[0],
+                        price_trees[1],
+                        args.balance,
+                        state["fee_rate"],
+                        take_profit,
+                        stop_loss,
+                        args.martingale_mode,
+                        args.martingale_timing,
+                        args.martingale_attempts,
+                        target_policy,
+                        args.martingale_max_chain_loss,
+                        args.martingale_max_day_loss,
+                    )
+                    chain_count = trade_count
+                if use_checkpoint:
+                    chain_count = trade_count
+            cached_results[exit_id] = (pnl, trade_count, chain_count)
             cache_updated = True
             misses += 1
         else:
-            pnl, trade_count = cached_result
+            pnl, trade_count, chain_count = cached_result
             if use_checkpoint and previous_states is not None:
                 previous_state = previous_states[exit_index]
                 next_states.append(previous_state)
@@ -351,7 +382,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                         state_counts_by_day[day] += 1
             hits += 1
         if results is not None:
-            results[exit_index] = (pnl, trade_count)
+            results[exit_index] = (pnl, trade_count, chain_count)
 
     if cache_updated:
         write_pair_result_cache(cache_path, cached_results)
@@ -387,6 +418,8 @@ def main() -> int:
     parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse", "simple_profit", "reverse_profit"), default="none")
     parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
+    parser.add_argument("--martingale-max-chain-loss", type=float, default=0.0)
+    parser.add_argument("--martingale-max-day-loss", type=float, default=0.0)
     parser.add_argument("--workers", type=int, choices=range(1, 5), default=4)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
@@ -485,6 +518,8 @@ def main() -> int:
             args.martingale_mode,
             args.martingale_timing,
             args.martingale_attempts,
+            args.martingale_max_chain_loss,
+            args.martingale_max_day_loss,
         )
         saved_result_path = durable_result_path(
             args.cache_dir, args, config["category"], max_ids, quotes_by_symbol,
@@ -596,12 +631,18 @@ def main() -> int:
                         (cached_results[option[0]][1] for option in exit_options),
                         dtype=np.uint32, count=len(exit_options),
                     )
+                    pair_results["chain_count"] = np.fromiter(
+                        (cached_results[option[0]][2] for option in exit_options),
+                        dtype=np.uint32, count=len(exit_options),
+                    )
                 ticker_results[symbol] = pair_results
 
             for symbol, pair_results in ticker_results.items():
                 pnls = pair_results["pnl"]
                 trade_counts = pair_results["trade_count"]
-                eligible = trade_counts >= args.min_trades
+                chain_counts = pair_results["chain_count"]
+                independent_counts = chain_counts if args.martingale_mode != "none" else trade_counts
+                eligible = independent_counts >= args.min_trades
                 batch_aggregate_pnls += np.where(eligible, pnls, 0.0)
                 batch_eligible_symbols += eligible
                 batch_profitable_symbols += eligible & (pnls > 0.0)
@@ -612,6 +653,7 @@ def main() -> int:
                 best_exit_index = int(tied_indexes[np.argmax(exit_lexical_ranks[tied_indexes])])
                 exit_id, exit_label = exit_options[best_exit_index][:2]
                 trade_count = int(trade_counts[best_exit_index])
+                chain_count = int(chain_counts[best_exit_index])
                 ticker_candidate = {
                     "symbol": symbol,
                     "entry_id": entry_id,
@@ -620,6 +662,7 @@ def main() -> int:
                     "exit_label": exit_label,
                     "pnl": best_pnl,
                     "trade_count": trade_count,
+                    "chain_count": chain_count,
                 }
                 previous = best_by_symbol.get(symbol)
                 if previous is None or (best_pnl, entry_id, exit_id) > (
@@ -736,6 +779,7 @@ def main() -> int:
                 "exit_label": None,
                 "pnl": None,
                 "trade_count": 0,
+                "chain_count": 0,
             }
             for symbol in sorted(max_ids)
             if symbol not in best_by_symbol

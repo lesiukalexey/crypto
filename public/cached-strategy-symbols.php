@@ -14,6 +14,7 @@ function respondCachedSymbols(array $payload, int $status = 200): never
 }
 
 try {
+    $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
     $root = dirname(__DIR__);
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $entryProfiles = json_decode((string) file_get_contents($root . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
@@ -80,7 +81,10 @@ try {
             $startValue, $endValue, $balance, $fee, $minTrades, $ranking,
             $martingaleMode, $martingaleTiming, $martingaleAttempts,
         ];
-        if ($martingaleMode !== 'none') $keyParts[] = 'martingale-negative-stop-v1';
+        if ($martingaleMode !== 'none') {
+        $keyParts[] = 'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1';
+        $keyParts[] = $martingaleRiskLimits;
+    }
         $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $generation);
         if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
         $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));

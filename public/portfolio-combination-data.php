@@ -14,6 +14,7 @@ function respond(array $payload, int $status = 200): never
 }
 
 try {
+    $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
     $root = dirname(__DIR__);
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $entryDefaults = json_decode((string) file_get_contents($root . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
@@ -110,7 +111,7 @@ try {
         $startValue, $endValue, $balance, $fee, $minTrades, $entryConfig, $originalExitConfig,
         $ranking['worker'], $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ];
-    if ($martingaleMode !== 'none') $keyParts[] = 'martingale-negative-stop-v1';
+    array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
     $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/combination-' . $key . '.json';
     $statusPath = $cacheDir . '/combination-' . $key . '.status.json';
@@ -149,6 +150,8 @@ try {
                 . ' --martingale-mode ' . escapeshellarg($martingaleMode)
                 . ' --martingale-timing ' . escapeshellarg($martingaleTiming)
                 . ' --martingale-attempts ' . escapeshellarg((string) $martingaleAttempts)
+                . ' --martingale-max-chain-loss ' . escapeshellarg($martingaleRiskLimits['max_chain_loss'])
+                . ' --martingale-max-day-loss ' . escapeshellarg($martingaleRiskLimits['max_day_loss'])
                 . ' >/dev/null 2>&1 &';
             exec($command);
         }

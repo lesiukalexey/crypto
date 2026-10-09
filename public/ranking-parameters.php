@@ -103,6 +103,35 @@ function rankingWindowSegments(array $query, string $name, array $defaults): arr
     return $segments;
 }
 
+function rankingMartingaleRiskLimits(array $query): array
+{
+    $limits = [];
+    foreach ([
+        'martingale_max_chain_loss' => 'max_chain_loss',
+        'martingale_max_day_loss' => 'max_day_loss',
+    ] as $queryName => $key) {
+        $value = $query[$queryName] ?? '0';
+        if (!is_string($value) && !is_int($value) && !is_float($value)) {
+            throw new InvalidArgumentException('Лимиты убытка мартингейла задаются числом в USDT.');
+        }
+        $value = trim((string) $value);
+        if (!preg_match('/^\d{1,12}(?:\.\d{1,6})?$/', $value) || (float) $value > 1000000000) {
+            throw new InvalidArgumentException('Лимит убытка должен быть от 0 до 1 000 000 000 USDT.');
+        }
+        $limits[$key] = $value;
+    }
+    return $limits;
+}
+
+function rankingMartingaleCacheIdentity(string $mode, array $riskLimits): array
+{
+    if ($mode === 'none') return [];
+    return [
+        'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1',
+        $riskLimits,
+    ];
+}
+
 function rankingValues(array $ranges): array
 {
     if (isset($ranges['values_basis_points']) && is_array($ranges['values_basis_points'])) {

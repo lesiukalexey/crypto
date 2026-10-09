@@ -42,6 +42,8 @@ def main() -> int:
     parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse", "simple_profit", "reverse_profit"), default="none")
     parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
+    parser.add_argument("--martingale-max-chain-loss", type=float, default=0.0)
+    parser.add_argument("--martingale-max-day-loss", type=float, default=0.0)
     args = parser.parse_args()
 
     result_path = args.cache_dir / f"combination-{args.cache_key}.json"
@@ -187,6 +189,7 @@ def main() -> int:
         for symbol in list(rows_by_symbol):
             pnl: float | None = None
             trade_count = 0
+            chain_count = 0
             if args.martingale_mode == "none":
                 simulation = portfolio_engine.simulate_symbol_entry(
                     (symbol, selected_entry, True),
@@ -195,6 +198,7 @@ def main() -> int:
                 if pair_results is not None and checkpoint_exit_index is not None:
                     pnl = float(pair_results[checkpoint_exit_index]["pnl"])
                     trade_count = int(pair_results[checkpoint_exit_index]["trade_count"])
+                    chain_count = int(pair_results[checkpoint_exit_index]["chain_count"])
                     if trade_count == 0:
                         pnl = None
             else:
@@ -206,7 +210,7 @@ def main() -> int:
                     else:
                         signals, shorts = make_signals(quotes, int(threshold) / 10, int(lookback), entry_family or "both")
                     if len(signals) > 0:
-                        pnl, trade_count = simulate(
+                        simulation_result = simulate(
                             quotes,
                             signals,
                             shorts,
@@ -220,10 +224,14 @@ def main() -> int:
                             args.martingale_timing,
                             args.martingale_attempts,
                             target_policy,
+                            args.martingale_max_chain_loss,
+                            args.martingale_max_day_loss,
                         )
+                        pnl, trade_count = simulation_result[:2]
+                        chain_count = int(simulation_result[2]) if len(simulation_result) > 2 else trade_count
                         if trade_count == 0:
                             pnl = None
-            tickers.append({"symbol": symbol, "pnl": pnl, "trade_count": trade_count})
+            tickers.append({"symbol": symbol, "pnl": pnl, "trade_count": trade_count, "chain_count": chain_count})
 
         write_json(result_path, {
             "status": "ready",

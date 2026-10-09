@@ -119,12 +119,21 @@ class QuoteArrays:
     asks: np.ndarray
     lasts: np.ndarray
     timestamps: np.ndarray
+    local_days: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.bids = np.asarray(self.bids, dtype=np.float64)
         self.asks = np.asarray(self.asks, dtype=np.float64)
         self.lasts = np.asarray(self.lasts, dtype=np.float64)
         self.timestamps = np.asarray(self.timestamps, dtype=np.float64)
+        if self.local_days is None:
+            self.local_days = np.fromiter(
+                (datetime.fromtimestamp(float(value), KYIV).date().toordinal() for value in self.timestamps),
+                dtype=np.int32,
+                count=len(self.timestamps),
+            )
+        else:
+            self.local_days = np.asarray(self.local_days, dtype=np.int32)
 
     @classmethod
     def from_rows(cls, rows: list[dict[str, Any]]) -> "QuoteArrays":
@@ -318,7 +327,9 @@ def simulate(
     martingale_timing: str = "immediate",
     martingale_attempts: int = 3,
     martingale_target_policy: str = "scaled",
-) -> tuple[float, int]:
+    martingale_max_chain_loss: float | None = None,
+    martingale_max_day_loss: float | None = None,
+) -> tuple[float, int] | tuple[float, int, int]:
     indexes = signal_indexes if isinstance(signal_indexes, np.ndarray) else np.asarray(signal_indexes, dtype=np.int64)
     shorts = signal_shorts if isinstance(signal_shorts, np.ndarray) else np.asarray(signal_shorts, dtype=np.bool_)
     # TP/SL candidates are tenths of one percent of the starting balance.
@@ -333,7 +344,7 @@ def simulate(
             raise ValueError("Invalid martingale options")
         if martingale_target_policy not in ("scaled", "fixed"):
             raise ValueError("Invalid martingale exit target policy")
-        return simulate_martingale_numba(
+        pnl, order_count, _ = simulate_martingale_numba(
             quotes.bids, quotes.asks,
             bid_tree.maximum, bid_tree.minimum, ask_tree.maximum, ask_tree.minimum,
             bid_tree.size, bid_tree.length, indexes, shorts,
@@ -347,7 +358,11 @@ def simulate(
             0 if martingale_timing == "immediate" else 1,
             martingale_attempts,
             0 if martingale_target_policy == "scaled" else 1,
+            np.nan if martingale_max_chain_loss is None else martingale_max_chain_loss,
+            np.nan if martingale_max_day_loss is None else martingale_max_day_loss,
+            quotes.local_days,
         )
+        return pnl, order_count
 
     from numba_simulation import simulate_numba
 
@@ -367,6 +382,80 @@ def simulate(
         np.nan if take_profit_amount is None else take_profit_amount,
         np.nan if stop_loss_amount is None else stop_loss_amount,
     )
+
+
+def simulate_martingale_batch(
+    quotes: QuoteArrays,
+    signal_indexes: np.ndarray,
+    signal_shorts: np.ndarray,
+    bid_tree: PriceTree,
+    ask_tree: PriceTree,
+    start_balance: float,
+    fee_rate: float,
+    mode: str,
+    timing: str,
+    attempts: int,
+    max_chain_loss: float | None,
+    max_day_loss: float | None,
+    candidates: list[tuple[str, float | None, float | None, str]],
+) -> dict[tuple[str, str], tuple[float, int, int]]:
+    """Run a complete martingale exit grid in one Python-to-Numba call."""
+    from martingale import martingale_base_notional
+    from numba_simulation import simulate_martingale_batch_numba
+
+    takes = np.fromiter(
+        (np.nan if target is None else start_balance * target / 1000.0 for _, target, _, _ in candidates),
+        dtype=np.float64, count=len(candidates),
+    )
+    stops = np.fromiter(
+        (np.nan if loss is None else -start_balance * abs(loss) / 1000.0 for _, _, loss, _ in candidates),
+        dtype=np.float64, count=len(candidates),
+    )
+    base_notionals = np.fromiter(
+        (martingale_base_notional(
+            start_balance, fee_rate,
+            None if loss is None else start_balance * abs(loss) / 1000.0,
+            mode, attempts, policy,
+        ) for _, _, loss, policy in candidates),
+        dtype=np.float64, count=len(candidates),
+    )
+    policies = np.fromiter((0 if policy == "scaled" else 1 for _, _, _, policy in candidates), dtype=np.int64, count=len(candidates))
+    mode_id = {"simple": 0, "reverse": 1, "simple_profit": 2, "reverse_profit": 3}[mode]
+    timing_id = 0 if timing == "immediate" else 1
+    pnls, order_counts, chain_counts = simulate_martingale_batch_numba(
+        quotes.bids, quotes.asks, bid_tree.maximum, bid_tree.minimum,
+        ask_tree.maximum, ask_tree.minimum, bid_tree.size, bid_tree.length,
+        signal_indexes, signal_shorts, start_balance, fee_rate, takes, stops,
+        base_notionals, mode_id, timing_id, attempts, policies,
+        np.nan if max_chain_loss is None else max_chain_loss,
+        np.nan if max_day_loss is None else max_day_loss,
+        quotes.local_days,
+    )
+    return {
+        (identifier, policy): (float(pnl), int(order_count), int(chain_count))
+        for (identifier, _, _, policy), pnl, order_count, chain_count in zip(candidates, pnls, order_counts, chain_counts)
+    }
+
+
+def martingale_exit_candidates(
+    exit_profiles: dict[str, Any], mode: str,
+) -> list[tuple[str, float | None, float | None, str]]:
+    """Build the complete exit grid in the same order as the ranking loops."""
+    candidates: list[tuple[str, float | None, float | None, str]] = []
+    for target_tenths in exit_values("fixed_tp", exit_profiles):
+        for loss_tenths in exit_values("fixed_sl", exit_profiles):
+            identifier = f"fixed:{target_tenths}:{loss_tenths}"
+            for policy, _ in martingale_target_policies(mode, float(loss_tenths)):
+                candidates.append((identifier, target_tenths / 10.0, loss_tenths / 10.0, policy))
+    for loss_tenths in exit_values("loss", exit_profiles):
+        identifier = f"loss:{loss_tenths}"
+        for policy, _ in martingale_target_policies(mode, float(loss_tenths)):
+            candidates.append((identifier, None, float(loss_tenths), policy))
+    for target_tenths in exit_values("profit", exit_profiles):
+        identifier = f"profit:{target_tenths}"
+        for policy, _ in martingale_target_policies(mode, None):
+            candidates.append((identifier, float(target_tenths), None, policy))
+    return candidates
 
 
 def simulate_standard_checkpoint(
@@ -615,6 +704,8 @@ def main() -> int:
     parser.add_argument("--martingale-mode", choices=("none", "simple", "reverse", "simple_profit", "reverse_profit"), default="none")
     parser.add_argument("--martingale-timing", choices=("immediate", "rules"), default="immediate")
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
+    parser.add_argument("--martingale-max-chain-loss", type=float, default=0.0)
+    parser.add_argument("--martingale-max-day-loss", type=float, default=0.0)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
@@ -709,6 +800,10 @@ def main() -> int:
             spec[2] * (2 if args.martingale_mode != "none" and spec[0] in ("fixed", "loss") else 1)
             for spec in groups_specs
         )
+        martingale_batch_candidates = (
+            martingale_exit_candidates(exit_profiles, args.martingale_mode)
+            if args.martingale_mode != "none" else []
+        )
         entry_specs_for_worker = build_entry_specs(ranking)
         checkpoint_state = {
             "args": args,
@@ -730,6 +825,7 @@ def main() -> int:
         started = time.monotonic()
         progress_reporter = ProgressReporter()
         entries: list[dict[str, Any]] = []
+        equivalent_signal_results: dict[tuple[bytes, bytes], tuple[str, float]] = {}
 
         if len(quotes) >= 2:
             bid_tree = PriceTree(quotes.bids)
@@ -759,6 +855,34 @@ def main() -> int:
                         "elapsed_seconds": int(time.monotonic() - started),
                     })
                     continue
+
+                signal_signature = (signals.tobytes(), shorts.tobytes())
+                if args.martingale_mode != "none" and signal_signature in equivalent_signal_results:
+                    source_entry_id, cached_best_pnl = equivalent_signal_results[signal_signature]
+                    cached_payload = json.loads((args.cache_dir / f"{args.cache_key}.{source_entry_id}.json").read_text(encoding="utf-8"))
+                    write_json(args.cache_dir / f"{args.cache_key}.{entry_id}.json", cached_payload)
+                    if math.isfinite(cached_best_pnl):
+                        entries.append({
+                            "id": entry_id,
+                            "best_pnl": cached_best_pnl,
+                            "label": f"{entry_label} · лучший результат {cached_best_pnl:+.4f} USDT",
+                        })
+                    completed += total_per_entry
+                    progress_reporter.update(status_path, {
+                        "status": "pending", "progress": min(99, int(completed * 100 / total)),
+                        "elapsed_seconds": int(time.monotonic() - started),
+                    })
+                    continue
+
+                martingale_batch_results: dict[tuple[str, str], tuple[float, int]] = {}
+                if args.martingale_mode != "none":
+                    martingale_batch_results = simulate_martingale_batch(
+                        quotes, signals, shorts, bid_tree, ask_tree,
+                        args.balance, fee_rate, args.martingale_mode,
+                        args.martingale_timing, args.martingale_attempts,
+                        args.martingale_max_chain_loss, args.martingale_max_day_loss,
+                        martingale_batch_candidates,
+                    )
 
                 checkpoint_path = None
                 previous_states = None
@@ -845,7 +969,7 @@ def main() -> int:
                         args.martingale_mode,
                         1.0 if family in ("fixed", "loss") else None,
                     )
-                    best_by_policy: dict[str, list[tuple[float, str, str, int]]] = {
+                    best_by_policy: dict[str, list[tuple[float, str, str, int, int]]] = {
                         policy: [] for policy, _ in family_policies
                     }
 
@@ -897,13 +1021,11 @@ def main() -> int:
                                         )
                                     pnl -= float(start_state[0]) - args.balance
                                     trade_count -= int(start_state[2])
+                                chain_count = trade_count
                             else:
-                                pnl, trade_count = simulate(
-                                    quotes, signals, shorts, bid_tree, ask_tree, args.balance, fee_rate,
-                                    target, loss, args.martingale_mode, args.martingale_timing,
-                                    args.martingale_attempts, target_policy,
-                                )
-                            if trade_count >= args.min_trades:
+                                pnl, trade_count, chain_count = martingale_batch_results[(identifier, target_policy)]
+                            independent_count = chain_count if args.martingale_mode != "none" else trade_count
+                            if independent_count >= args.min_trades:
                                 profile_best[0] = max(profile_best[0], pnl)
                                 ranked_id = f"{identifier}:{target_policy}" if policy_label else identifier
                                 best = best_by_policy[target_policy]
@@ -915,7 +1037,7 @@ def main() -> int:
                                         display = f"Stop Loss {loss_tenths_percent / 10:.1f}% от стартового баланса · без фиксации прибыли"
                                     else:
                                         display = f"Take Profit {target_tenths_percent / 10:.1f}% от стартового баланса · без фиксации убытка"
-                                    item = (pnl, ranked_id, display, trade_count)
+                                    item = (pnl, ranked_id, display, trade_count, chain_count)
                                     if len(best) < TOP_PER_GROUP:
                                         heapq.heappush(best, item)
                                     else:
@@ -940,14 +1062,21 @@ def main() -> int:
                         best.sort(key=lambda current: (-current[0], current[1]))
                         group_label = label + (f" · {policy_label}" if policy_label else "")
                         items = []
-                        for pnl, ranked_id, display, trade_count in best:
+                        for pnl, ranked_id, display, trade_count, chain_count in best:
                             ranked_label = display + (f" · {policy_label}" if policy_label else "")
-                            items.append({
+                            sample_label = (
+                                f"{trade_count} ордеров · {chain_count} независимых цепочек"
+                                if args.martingale_mode != "none" else f"{trade_count} сделок"
+                            )
+                            item_result = {
                                 "id": ranked_id,
-                                "label": f"{ranked_label} · {trade_count} сделок · итог {pnl:+.4f} USDT",
+                                "label": f"{ranked_label} · {sample_label} · итог {pnl:+.4f} USDT",
                                 "pnl": float(pnl),
                                 "trade_count": int(trade_count),
-                            })
+                            }
+                            if args.martingale_mode != "none":
+                                item_result["chain_count"] = int(chain_count)
+                            items.append(item_result)
                         groups.append({
                             "label": group_label + f" · топ {min(TOP_PER_GROUP, len(best))} из {candidate_count}",
                             "items": items,
@@ -956,7 +1085,10 @@ def main() -> int:
                 if args.martingale_mode == "none":
                     groups = deduplicate_ranked_groups(groups)
 
-                write_json(args.cache_dir / f"{args.cache_key}.{entry_id}.json", {"status": "ready", "groups": groups})
+                profile_payload = {"status": "ready", "groups": groups}
+                write_json(args.cache_dir / f"{args.cache_key}.{entry_id}.json", profile_payload)
+                if args.martingale_mode != "none":
+                    equivalent_signal_results[signal_signature] = (entry_id, profile_best[0])
                 if checkpoint_path is not None and len(next_states) == total_per_entry:
                     for day, day_states in states_by_day.items():
                         day_quote_count = next(count for current_day, count in boundaries_to_capture if current_day == day)
