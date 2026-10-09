@@ -1037,7 +1037,11 @@ document.querySelector('#add-favorite')?.addEventListener('click', () => {
     const params = new URLSearchParams(new FormData(filtersForm));
     params.set('favorite_type', 'strategy');
     params.set('favorite_entry_label', document.querySelector('#entry-config')?.selectedOptions[0]?.textContent || '');
-    params.set('favorite_exit_label', document.querySelector('#exit-config')?.selectedOptions[0]?.textContent || '');
+    const exitLabel = document.querySelector('#exit-config')?.selectedOptions[0]?.textContent || '';
+    params.set('favorite_exit_label', exitLabel);
+    const resultMatch = exitLabel.match(/итог\s+([+-]?\d+(?:[.,]\d+)?)\s*USDT/i);
+    if (resultMatch) params.set('favorite_result', resultMatch[1].replace(',', '.'));
+    params.set('favorite_result_label', 'Итог');
     params.set('favorite_name', symbolSelect.value + ' · текущая стратегия');
     postFavorite(params, document.querySelector('#add-favorite'), document.querySelector('#favorite-status'));
 });
@@ -2203,10 +2207,16 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
             const favoriteParams = new URLSearchParams(params);
             favoriteParams.set('favorite_type', type);
             favoriteParams.set('symbol', symbol || symbolSelect.value);
+            favoriteParams.set('favorite_ranking_entry_config', params.get('entry_config') || '');
             favoriteParams.set('entry_config', item.entry_id || '');
             favoriteParams.set('exit_config', item.exit_id || '');
             favoriteParams.set('favorite_entry_label', item.entry_label || '');
             favoriteParams.set('favorite_exit_label', item.exit_label || '');
+            const result = type === 'global_top' ? item.average_pnl : item.pnl;
+            if (result !== null && result !== undefined && Number.isFinite(Number(result))) {
+                favoriteParams.set('favorite_result', Number(result).toFixed(8));
+                favoriteParams.set('favorite_result_label', type === 'global_top' ? 'Средний итог на тикер' : 'Итог тикера');
+            }
             favoriteParams.set('favorite_name', `${type === 'global_top' ? 'Общий топ-5' : symbol} · ${item.entry_label || item.entry_id} · ${item.exit_label || item.exit_id}`);
             return favoriteParams;
         };

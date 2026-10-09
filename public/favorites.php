@@ -26,7 +26,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $entryLabel = trim((string) ($params['favorite_entry_label'] ?? ''));
     $exitLabel = trim((string) ($params['favorite_exit_label'] ?? ''));
     $favoriteName = trim((string) ($params['favorite_name'] ?? ''));
-    unset($params['favorite_type'], $params['favorite_entry_label'], $params['favorite_exit_label'], $params['favorite_name'], $params['favorite_action']);
+    $favoriteResult = trim((string) ($params['favorite_result'] ?? ''));
+    $favoriteResultLabel = trim((string) ($params['favorite_result_label'] ?? ''));
+    $rankingEntryConfig = trim((string) ($params['favorite_ranking_entry_config'] ?? ''));
+    unset($params['favorite_type'], $params['favorite_entry_label'], $params['favorite_exit_label'], $params['favorite_name'], $params['favorite_result'], $params['favorite_result_label'], $params['favorite_ranking_entry_config'], $params['favorite_action']);
     if (!in_array($type, ['strategy', 'global_top', 'ticker_leader', 'hedge'], true)) {
         favoriteJsonResponse(['status' => 'error', 'error' => 'Неизвестный тип избранного.'], 422);
     }
@@ -59,6 +62,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         'name' => $favoriteName !== '' ? $favoriteName : $defaultName,
         'entry_label' => $entryLabel,
         'exit_label' => $exitLabel,
+        'result' => preg_match('/^[+-]?\d+(?:\.\d+)?$/', $favoriteResult) ? $favoriteResult : null,
+        'result_label' => $favoriteResultLabel,
+        'ranking_entry_config' => $rankingEntryConfig,
         'created_at' => (new DateTimeImmutable())->format(DateTimeInterface::ATOM),
         'params' => $params,
     ];
@@ -77,6 +83,23 @@ function h(string $value): string
     return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
+function favoriteResultText(array $favorite): string
+{
+    $result = $favorite['result'] ?? null;
+    $label = trim((string) ($favorite['result_label'] ?? ''));
+    if (!is_numeric($result) && (string) ($favorite['type'] ?? 'strategy') === 'strategy') {
+        $exitLabel = (string) ($favorite['exit_label'] ?? '');
+        if (preg_match('/итог\s+([+-]?\d+(?:[.,]\d+)?)\s*USDT/iu', $exitLabel, $matches)) {
+            $result = str_replace(',', '.', $matches[1]);
+            $label = 'Итог';
+        }
+    }
+    if (!is_numeric($result)) return '—';
+    $value = (float) $result;
+    $formatted = ($value > 0 ? '+' : '') . number_format($value, 4, ',', ' ') . ' USDT';
+    return $label !== '' ? $formatted . '<span class="muted">' . h($label) . '</span>' : $formatted;
+}
+
 $favorites = array_reverse(readFavorites($storePath));
 ?><!doctype html>
 <html lang="ru">
@@ -87,7 +110,31 @@ $favorites = array_reverse(readFavorites($storePath));
 <nav class="nav"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php" aria-current="page">Избранное</a></nav>
 <section class="panel"><h1>Избранное</h1>
 <?php if ($favorites === []): ?><p class="empty">Сохранённых стратегий пока нет. Добавьте текущую стратегию кнопкой «Добавить в избранное».</p>
-<?php else: ?><table><thead><tr><th>Тикер / пара</th><th>Стратегия входа</th><th>Стратегия выхода</th><th>Баланс</th><th>Комиссия</th><th>Добавлено</th></tr></thead><tbody>
-<?php foreach ($favorites as $favorite): $params = is_array($favorite['params'] ?? null) ? $favorite['params'] : []; $type = (string) ($favorite['type'] ?? 'strategy'); $favoriteId = (string) ($favorite['id'] ?? ''); $route = $type === 'hedge' ? 'hedging.php?' : './?'; $href = $route . http_build_query(array_merge($params, ['favorite_id' => $favoriteId])); $tickerLabel = $type === 'hedge' ? 'Лонг ' . (string) ($params['long_symbol'] ?? '—') . ' / шорт ' . (string) ($params['short_symbol'] ?? '—') : (($type === 'global_top' ? 'Топ-5 · ' : '') . (string) ($params['symbol'] ?? '—')); $entryCell = $type === 'hedge' ? 'Совместный лонг / шорт' : (string) ($favorite['entry_label'] ?? $params['entry_config'] ?? '—'); $exitCell = $type === 'hedge' ? 'Закрытие по последнему снимку' : (string) ($favorite['exit_label'] ?? $params['exit_config'] ?? '—'); ?>
-<tr><td><a href="<?= h($href) ?>"><strong><?= h($tickerLabel) ?></strong></a><div class="muted"><?= h((string) ($favorite['name'] ?? '')) ?></div></td><td><?= h($entryCell) ?></td><td><?= h($exitCell) ?></td><td><?= h((string) ($params['balance'] ?? '—')) ?> USDT</td><td><?= h((string) ($params['fee'] ?? '—')) ?>%</td><td class="muted"><?= h((string) ($favorite['created_at'] ?? '')) ?></td></tr>
-<?php endforeach; ?></tbody></table><?php endif; ?></section></main></body></html>
+<?php else: ?><table><thead><tr><th>Тикер / пара</th><th>Стратегия входа</th><th>Стратегия выхода</th><th>Подсчитанный итог</th><th>Баланс</th><th>Комиссия</th><th>Добавлено</th></tr></thead><tbody>
+<?php foreach ($favorites as $favorite): $params = is_array($favorite['params'] ?? null) ? $favorite['params'] : []; $type = (string) ($favorite['type'] ?? 'strategy'); $favoriteId = (string) ($favorite['id'] ?? ''); $route = $type === 'hedge' ? 'hedging.php?' : './?'; $href = $route . http_build_query(array_merge($params, ['favorite_id' => $favoriteId])); $tickerLabel = $type === 'hedge' ? 'Лонг ' . (string) ($params['long_symbol'] ?? '—') . ' / шорт ' . (string) ($params['short_symbol'] ?? '—') : (($type === 'global_top' ? 'Топ-5 · ' : '') . (string) ($params['symbol'] ?? '—')); $entryCell = $type === 'hedge' ? 'Совместный лонг / шорт' : (string) ($favorite['entry_label'] ?? $params['entry_config'] ?? '—'); $exitCell = $type === 'hedge' ? 'Закрытие по последнему снимку' : (string) ($favorite['exit_label'] ?? $params['exit_config'] ?? '—'); $lookup = $params; if (isset($favorite['ranking_entry_config']) && $favorite['ranking_entry_config'] !== '') $lookup['entry_config'] = (string) $favorite['ranking_entry_config']; $lookupParams = $type === 'global_top' && !is_numeric($favorite['result'] ?? null) ? h(json_encode($lookup, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}') : ''; ?>
+<tr><td><a href="<?= h($href) ?>"><strong><?= h($tickerLabel) ?></strong></a><div class="muted"><?= h((string) ($favorite['name'] ?? '')) ?></div></td><td><?= h($entryCell) ?></td><td><?= h($exitCell) ?></td><td class="favorite-result" <?= $lookupParams !== '' ? 'data-cache-lookup="' . $lookupParams . '"' : '' ?>><?= favoriteResultText($favorite) ?></td><td><?= h((string) ($params['balance'] ?? '—')) ?> USDT</td><td><?= h((string) ($params['fee'] ?? '—')) ?>%</td><td class="muted"><?= h((string) ($favorite['created_at'] ?? '')) ?></td></tr>
+<?php endforeach; ?></tbody></table><?php endif; ?></section>
+<script>
+document.querySelectorAll('.favorite-result[data-cache-lookup]').forEach(async cell => {
+    try {
+        const params = new URLSearchParams(JSON.parse(cell.dataset.cacheLookup));
+        params.set('cached_only', '1');
+        const url = new URL('portfolio-ranking.php', location.href);
+        url.search = params.toString();
+        const response = await fetch(url, {headers: {Accept: 'application/json'}, cache: 'no-store'});
+        if (!response.ok) return;
+        const ranking = await response.json();
+        if (ranking.status !== 'ready') return;
+        const result = (ranking.global_top || []).find(item => item.entry_id === params.get('entry_config') && item.exit_id === params.get('exit_config'));
+        if (!result || result.average_pnl === null || result.average_pnl === undefined) return;
+        const value = Number(result.average_pnl);
+        cell.textContent = (value > 0 ? '+' : '') + new Intl.NumberFormat('ru-RU', {minimumFractionDigits: 4, maximumFractionDigits: 4}).format(value) + ' USDT';
+        const note = document.createElement('span');
+        note.className = 'muted';
+        note.textContent = 'Средний итог на тикер';
+        cell.appendChild(note);
+    } catch (error) {
+        // A cache miss leaves the result unavailable without starting a ranking pass.
+    }
+});
+</script></main></body></html>
