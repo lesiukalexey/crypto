@@ -74,6 +74,8 @@ $detailMarketAverage = is_numeric($_GET['detail_market_average'] ?? null) ? (flo
 $detailSupport = filter_var($_GET['detail_support'] ?? null, FILTER_VALIDATE_INT);
 $detailUniverseSize = filter_var($_GET['detail_universe_size'] ?? null, FILTER_VALIDATE_INT);
 $detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALIDATE_INT);
+$viewParams = ['symbol' => $symbol, 'start_day' => $startDayInput, 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent];
+$hedgingUrl = './hedging.php?' . http_build_query($viewParams);
 $isCurrentDay = false;
 $snapshotNeedsRefresh = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
@@ -700,9 +702,11 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
+.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid #273149;border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:#e9eefb}.view-nav a[aria-current=page]{background:#263968;color:#fff}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
+<nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a></nav>
 <?php if ($combinationDetail): ?>
 <section class="panel combination-detail" aria-labelledby="combination-detail-heading">
 <h1 id="combination-detail-heading">Детальный результат · <?= h($symbol !== '' ? $symbol : 'тикер') ?></h1>
@@ -835,6 +839,17 @@ window.addEventListener('resize',()=>{W=H*svg.clientWidth/Math.max(1,svg.clientH
 </script><?php endif; ?>
 <script>
 const filtersForm = document.querySelector('.filters');
+function syncViewNavigation() {
+    if (!filtersForm) return;
+    const values = new URLSearchParams(new FormData(filtersForm));
+    const basicLink = document.querySelector('.view-nav a[aria-current="page"]');
+    const hedgeLink = document.querySelector('.view-nav a[href*="hedging.php"]');
+    if (basicLink) basicLink.href = './?' + values.toString();
+    if (hedgeLink) hedgeLink.href = 'hedging.php?' + values.toString();
+}
+syncViewNavigation();
+filtersForm?.addEventListener('input', syncViewNavigation);
+filtersForm?.addEventListener('change', syncViewNavigation);
 const rankingGenerationInput = document.querySelector('#ranking-generation');
 const saveModeToggle = document.querySelector('#save-mode-toggle');
 const saveModeValue = document.querySelector('#save-mode-value');
