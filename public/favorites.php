@@ -25,6 +25,43 @@ function readFavorites(string $path): array
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $params = $_POST;
+    if (($params['favorite_action'] ?? '') === 'remove') {
+        $favoriteId = trim((string) ($params['favorite_id'] ?? ''));
+        if ($favoriteId === '') {
+            favoriteJsonResponse(['status' => 'error', 'error' => 'Не выбрана запись избранного.'], 422);
+        }
+        $handle = fopen($storePath, 'c+');
+        if ($handle === false || !flock($handle, LOCK_EX)) {
+            if (is_resource($handle)) fclose($handle);
+            favoriteJsonResponse(['status' => 'error', 'error' => 'Не удалось изменить избранное.'], 500);
+        }
+        rewind($handle);
+        $existing = json_decode((string) stream_get_contents($handle), true);
+        $favorites = is_array($existing) ? array_values(array_filter($existing, 'is_array')) : [];
+        $remaining = array_values(array_filter(
+            $favorites,
+            static fn (array $favorite): bool => (string) ($favorite['id'] ?? '') !== $favoriteId,
+        ));
+        if (count($remaining) === count($favorites)) {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            favoriteJsonResponse(['status' => 'error', 'error' => 'Запись избранного не найдена.'], 404);
+        }
+        if (!ftruncate($handle, 0)) {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            favoriteJsonResponse(['status' => 'error', 'error' => 'Не удалось сохранить избранное.'], 500);
+        }
+        rewind($handle);
+        $payload = json_encode($remaining, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+        $written = fwrite($handle, $payload);
+        $flushed = fflush($handle);
+        flock($handle, LOCK_UN);
+        fclose($handle);
+        favoriteJsonResponse($written !== strlen($payload) || !$flushed
+            ? ['status' => 'error', 'error' => 'Не удалось сохранить избранное.']
+            : ['status' => 'ok']);
+    }
     if (($params['favorite_action'] ?? '') === 'update_result') {
         $favoriteId = trim((string) ($params['favorite_id'] ?? ''));
         $result = trim((string) ($params['favorite_result'] ?? ''));
@@ -146,16 +183,38 @@ $favorites = array_reverse(readFavorites($storePath));
 <html lang="ru">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Избранное · Bitget</title>
 <style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--line:#273149;--text:#e9eefb;--muted:#8995ad}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1400px;margin:0 auto;padding:42px 24px}.nav{display:flex;gap:8px;margin-bottom:20px}.nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border:1px solid var(--line);border-radius:8px;background:#0c1222}.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px;overflow:auto}h1{margin-top:0}.empty{color:var(--muted)}table{width:100%;border-collapse:collapse;min-width:1100px}th,td{text-align:left;padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#aab5cb;font-size:12px;text-transform:uppercase}tbody tr:hover{background:#1a2540}a{color:#b9c7ff}.muted{color:var(--muted);font-size:13px}
+:root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--line:#273149;--text:#e9eefb;--muted:#8995ad}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1400px;margin:0 auto;padding:42px 24px}.nav{display:flex;gap:8px;margin-bottom:20px}.nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border:1px solid var(--line);border-radius:8px;background:#0c1222}.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px;overflow:auto}h1{margin-top:0}.empty{color:var(--muted)}table{width:100%;border-collapse:collapse;min-width:1100px}th,td{text-align:left;padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#aab5cb;font-size:12px;text-transform:uppercase}tbody tr:hover{background:#1a2540}a{color:#b9c7ff}.muted{color:var(--muted);font-size:13px}.remove-favorite{padding:7px 10px;border:1px solid #713844;border-radius:7px;background:#381c29;color:#ffd9df;white-space:nowrap;cursor:pointer}.remove-favorite:hover{background:#592632}.remove-favorite:disabled{opacity:.6;cursor:wait}.favorite-remove-status{display:block;min-width:120px;margin-top:4px;color:#ffb6c1;font-size:12px}
 </style></head><body><main class="wrap">
 <nav class="nav"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php" aria-current="page">Избранное</a><a href="settings.php">Настройки</a></nav>
 <section class="panel"><h1>Избранное</h1>
-<?php if ($favorites === []): ?><p class="empty">Сохранённых стратегий пока нет. Добавьте текущую стратегию кнопкой «Добавить в избранное».</p>
-<?php else: ?><table><thead><tr><th>Тикер / пара</th><th>Стратегия входа</th><th>Стратегия выхода</th><th>Итог тикера</th><th>Средний итог этой пары на рынке</th><th>Баланс</th><th>Комиссия</th><th>Добавлено</th></tr></thead><tbody>
+<?php if ($favorites === []): ?><p class="empty">В избранном пока пусто. Добавьте стратегию или пару из разделов приложения.</p>
+<?php else: ?><table><thead><tr><th>Тикер / пара</th><th>Стратегия входа</th><th>Стратегия выхода</th><th>Итог тикера</th><th>Средний итог этой пары на рынке</th><th>Баланс</th><th>Комиссия</th><th>Добавлено</th><th>Действие</th></tr></thead><tbody>
 <?php foreach ($favorites as $favorite): $params = is_array($favorite['params'] ?? null) ? $favorite['params'] : []; $type = (string) ($favorite['type'] ?? 'strategy'); $favoriteId = (string) ($favorite['id'] ?? ''); $route = $type === 'hedge' ? 'hedging.php?' : './?'; $favoriteSymbols = $type === 'hedge' ? [strtoupper((string) ($params['long_symbol'] ?? '')), strtoupper((string) ($params['short_symbol'] ?? ''))] : [strtoupper((string) ($params['symbol'] ?? ''))]; $favoriteTickerEnabled = !in_array('', $favoriteSymbols, true) && count(array_filter($favoriteSymbols, static fn (string $symbol): bool => isset($enabledTickerLookup[$symbol]))) === count($favoriteSymbols); $href = $favoriteTickerEnabled ? $route . http_build_query(array_merge($params, ['favorite_id' => $favoriteId])) : ''; $tickerLabel = $type === 'hedge' ? 'Лонг ' . (string) ($params['long_symbol'] ?? '—') . ' / шорт ' . (string) ($params['short_symbol'] ?? '—') : (($type === 'global_top' ? 'Топ-5 · ' : '') . (string) ($params['symbol'] ?? '—')); $entryCell = $type === 'hedge' ? 'Совместный лонг / шорт' : (string) ($favorite['entry_label'] ?? $params['entry_config'] ?? '—'); $exitCell = $type === 'hedge' ? 'Закрытие по последнему снимку' : (string) ($favorite['exit_label'] ?? $params['exit_config'] ?? '—'); $storedResult = $favorite['result'] ?? null; $resultLabel = trim((string) ($favorite['result_label'] ?? '')); $isGlobalResultReady = $type !== 'global_top' || ($resultLabel === 'Итог тикера' && is_numeric($storedResult)); if (!$isGlobalResultReady) $storedResult = null; $lookupParams = $favoriteTickerEnabled && $type === 'global_top' && !$isGlobalResultReady ? h(json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}') : ''; $rankingLookup = $params; if (isset($favorite['ranking_entry_config']) && $favorite['ranking_entry_config'] !== '') $rankingLookup['entry_config'] = (string) $favorite['ranking_entry_config']; $rankingLookupParams = $favoriteTickerEnabled && $type === 'ticker_leader' && !is_numeric($favorite['market_average'] ?? null) ? h(json_encode($rankingLookup, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}') : ''; $tickerResult = $storedResult; if (!is_numeric($tickerResult) && $type === 'strategy' && preg_match('/итог\s+([+-]?\d+(?:[.,]\d+)?)\s*USDT/iu', (string) ($favorite['exit_label'] ?? ''), $matches)) { $tickerResult = str_replace(',', '.', $matches[1]); $resultLabel = 'Итог'; } ?>
-<tr><td><?php if ($favoriteTickerEnabled): ?><a href="<?= h($href) ?>"><strong><?= h($tickerLabel) ?></strong></a><?php else: ?><strong><?= h($tickerLabel) ?></strong><div class="muted">Выключен в настройках</div><?php endif; ?><div class="muted"><?= h((string) ($favorite['name'] ?? '')) ?></div></td><td><?= h($entryCell) ?></td><td><?= h($exitCell) ?></td><td class="favorite-result" <?= !$favoriteTickerEnabled ? '' : ($lookupParams !== '' ? 'data-combination-lookup="' . $lookupParams . '" data-favorite-id="' . h($favoriteId) . '"' : '') ?>><?= $favoriteTickerEnabled ? favoriteResultText($tickerResult, $resultLabel) : '—' ?></td><td class="favorite-market-average" <?= !$favoriteTickerEnabled ? '' : ($rankingLookupParams !== '' ? 'data-ranking-lookup="' . $rankingLookupParams . '" data-favorite-id="' . h($favoriteId) . '"' : '') ?>><?= $favoriteTickerEnabled ? favoriteResultText($favorite['market_average'] ?? null, (string) ($favorite['market_average_label'] ?? '')) : '—' ?></td><td><?= h((string) ($params['balance'] ?? '—')) ?> USDT</td><td><?= h((string) ($params['fee'] ?? '—')) ?>%</td><td class="muted"><?= h((string) ($favorite['created_at'] ?? '')) ?></td></tr>
+<tr><td><?php if ($favoriteTickerEnabled): ?><a href="<?= h($href) ?>"><strong><?= h($tickerLabel) ?></strong></a><?php else: ?><strong><?= h($tickerLabel) ?></strong><div class="muted">Выключен в настройках</div><?php endif; ?><div class="muted"><?= h((string) ($favorite['name'] ?? '')) ?></div></td><td><?= h($entryCell) ?></td><td><?= h($exitCell) ?></td><td class="favorite-result" <?= !$favoriteTickerEnabled ? '' : ($lookupParams !== '' ? 'data-combination-lookup="' . $lookupParams . '" data-favorite-id="' . h($favoriteId) . '"' : '') ?>><?= $favoriteTickerEnabled ? favoriteResultText($tickerResult, $resultLabel) : '—' ?></td><td class="favorite-market-average" <?= !$favoriteTickerEnabled ? '' : ($rankingLookupParams !== '' ? 'data-ranking-lookup="' . $rankingLookupParams . '" data-favorite-id="' . h($favoriteId) . '"' : '') ?>><?= $favoriteTickerEnabled ? favoriteResultText($favorite['market_average'] ?? null, (string) ($favorite['market_average_label'] ?? '')) : '—' ?></td><td><?= h((string) ($params['balance'] ?? '—')) ?> USDT</td><td><?= h((string) ($params['fee'] ?? '—')) ?>%</td><td class="muted"><?= h((string) ($favorite['created_at'] ?? '')) ?></td><td><button type="button" class="remove-favorite" data-favorite-id="<?= h($favoriteId) ?>">Убрать</button><span class="favorite-remove-status" aria-live="polite"></span></td></tr>
 <?php endforeach; ?></tbody></table><?php endif; ?></section>
 <script>
+document.querySelectorAll('.remove-favorite').forEach(button => {
+    button.addEventListener('click', async () => {
+        if (!window.confirm('Убрать эту запись из избранного?')) return;
+        const status = button.parentElement.querySelector('.favorite-remove-status');
+        button.disabled = true;
+        button.textContent = 'Убираю…';
+        status.textContent = '';
+        try {
+            const body = new URLSearchParams({favorite_action: 'remove', favorite_id: button.dataset.favoriteId});
+            const response = await fetch('favorites.php', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'}, body});
+            const result = await response.json();
+            if (!response.ok || result.status !== 'ok') throw new Error(result.error || 'Не удалось убрать запись');
+            const row = button.closest('tr');
+            row.remove();
+            if (!document.querySelector('tbody tr')) location.reload();
+        } catch (error) {
+            button.disabled = false;
+            button.textContent = 'Убрать';
+            status.textContent = error.message || 'Не удалось убрать запись';
+        }
+    });
+});
 document.querySelectorAll('.favorite-result[data-combination-lookup]').forEach(async cell => {
     try {
         const params = new URLSearchParams(JSON.parse(cell.dataset.combinationLookup));
