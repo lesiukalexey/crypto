@@ -5,6 +5,23 @@ date_default_timezone_set('Europe/Kyiv');
 require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-snapshot.php';
 $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
+$favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
+$favoriteView = false;
+$favorite = null;
+$favoriteId = trim((string) ($_GET['favorite_id'] ?? ''));
+if ($favoriteId !== '' && is_file($favoritesPath)) {
+    $storedFavorites = json_decode((string) file_get_contents($favoritesPath), true);
+    if (is_array($storedFavorites)) {
+        foreach ($storedFavorites as $storedFavorite) {
+            if (is_array($storedFavorite) && (string) ($storedFavorite['id'] ?? '') === $favoriteId && is_array($storedFavorite['params'] ?? null)) {
+                $favorite = $storedFavorite;
+                $_GET = array_merge($_GET, $storedFavorite['params']);
+                $favoriteView = true;
+                break;
+            }
+        }
+    }
+}
 $rankingCacheDir = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-backtest-cache';
 $rankingGenerationPath = $rankingCacheDir . '/strategy-ranking-generation.txt';
 $rankingGeneration = is_file($rankingGenerationPath) ? trim((string) file_get_contents($rankingGenerationPath)) : 'initial';
@@ -137,6 +154,8 @@ $formatTargetPercent = static function (?string $amount, string $startingBalance
     return rtrim(rtrim(number_format((float) bcmul(bcdiv($amount, $startingBalance, 24), '100', 12), 4, '.', ''), '0'), '.') . '%';
 };
 $selectedExitConfig = $exitConfig . ($martingaleMode !== 'none' ? ':' . $martingaleTargetPolicy : '');
+$favoriteEntryLabel = $favoriteView ? trim((string) ($favorite['entry_label'] ?? $entryConfig)) : '';
+$favoriteExitLabel = $favoriteView ? trim((string) ($favorite['exit_label'] ?? $selectedExitConfig)) : '';
 
 try {
     $password = getenv($db['password_env']) ?: '';
@@ -837,11 +856,12 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
-.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
+.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .reset-symbol-cache,.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
-<nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a></nav>
+<nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a></nav>
+<?php if ($favoriteView): ?><p class="favorite-readonly-note">Просмотр сохранённой стратегии «<?= h((string) ($favorite['name'] ?? $favoriteId)) ?>». Параметры доступны только для чтения. <a class="strategy-link" href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
 <?php if ($combinationDetail): ?>
 <section class="panel combination-detail" aria-labelledby="combination-detail-heading">
 <h1 id="combination-detail-heading">Детальный результат · <?= h($symbol !== '' ? $symbol : 'тикер') ?></h1>
@@ -858,7 +878,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 </section>
 <?php endif; ?>
 <?php if ($error !== null): ?><section class="panel error"><?= h($error) ?></section><?php endif; ?>
-<section class="panel"><form class="filters" method="get">
+<section class="panel"><form class="filters<?= $favoriteView ? ' favorite-readonly' : '' ?>" method="get">
 <input type="hidden" name="ranking_generation" id="ranking-generation" value="<?= h($rankingGeneration) ?>">
 <?php if ($combinationDetail): ?>
 <?php foreach (['combination_detail' => '1', 'detail_entry_label' => $detailEntryLabel, 'detail_exit_label' => $detailExitLabel, 'detail_rank' => $detailRank !== false && $detailRank !== null ? (string) $detailRank : '', 'detail_ticker_pnl' => $detailTickerPnl !== null ? (string) $detailTickerPnl : '', 'detail_market_average' => $detailMarketAverage !== null ? (string) $detailMarketAverage : '', 'detail_support' => $detailSupport !== false && $detailSupport !== null ? (string) $detailSupport : '', 'detail_universe_size' => $detailUniverseSize !== false && $detailUniverseSize !== null ? (string) $detailUniverseSize : '', 'detail_trade_count' => $detailTradeCount !== false && $detailTradeCount !== null ? (string) $detailTradeCount : ''] as $detailName => $detailValue): ?><input type="hidden" name="<?= h($detailName) ?>" value="<?= h($detailValue) ?>"><?php endforeach; ?>
@@ -878,16 +898,17 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <section class="entry-strategy-group" aria-labelledby="entry-strategy-heading"><h2 class="entry-strategy-heading" id="entry-strategy-heading">Стратегия входа</h2><div class="entry-strategy-fields">
 <label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
 <label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
-<label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>"><?= h($entryLoadingLabel) ?></option></select></label>
+<label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>"><?= h($favoriteView ? $favoriteEntryLabel : $entryLoadingLabel) ?></option></select></label>
 <p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию при первом пересечении порога относительно любого из последних X снимков.</p>
 </div></section>
 <section class="exit-strategy-group" aria-labelledby="exit-strategy-heading"><h2 class="exit-strategy-heading" id="exit-strategy-heading">Стратегия выхода</h2><div class="exit-strategy-fields">
 <label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL (сразу)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с учетом интервалов</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP с учетом интервалов, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL с учетом интервалов</option></select></label>
-<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected>Загружаю варианты TP/SL…</option></select></label>
+<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected><?= h($favoriteView ? $favoriteExitLabel : 'Загружаю варианты TP/SL…') ?></option></select></label>
 <input type="hidden" name="exit_confirmation_snapshots" id="exit-confirmation-snapshots" value="<?= h((string) $exitConfirmationSnapshots) ?>">
 <p class="small-note">Варианты TP/SL сгруппированы по числу интервалов проверки. При достижении TP или SL позиция закроется, если порог всё ещё достигнут через указанное число интервалов.</p>
 </div></section>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
+<?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ Добавить в избранное</button><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
 <details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><label class="field">Макс. убыток цепочки (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>"></label><label class="field">Макс. убыток за день (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>"></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Ноль отключает лимит. Лимит цепочки закрывает её на первом снимке, где чистый убыток достигает суммы. Дневной лимит учитывает результат закрытых цепочек по дате закрытия и запрещает новые цепочки до следующего дня; лимит цепочки ограничивает текущую позицию.</p><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
@@ -986,6 +1007,30 @@ window.addEventListener('resize',()=>{W=H*svg.clientWidth/Math.max(1,svg.clientH
 </script><?php endif; ?>
 <script>
 const filtersForm = document.querySelector('.filters');
+const favoriteView = <?= $favoriteView ? 'true' : 'false' ?>;
+if (favoriteView && filtersForm) {
+    filtersForm.querySelectorAll('select, input, button').forEach(control => { control.disabled = true; });
+}
+document.querySelector('#add-favorite')?.addEventListener('click', async () => {
+    const button = document.querySelector('#add-favorite');
+    const status = document.querySelector('#favorite-status');
+    if (!filtersForm || !button) return;
+    button.disabled = true;
+    status.textContent = 'Сохраняю стратегию…';
+    const body = new URLSearchParams(new FormData(filtersForm));
+    body.set('favorite_entry_label', document.querySelector('#entry-config')?.selectedOptions[0]?.textContent || '');
+    body.set('favorite_exit_label', document.querySelector('#exit-config')?.selectedOptions[0]?.textContent || '');
+    try {
+        const response = await fetch('favorites.php', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'}, body});
+        const result = await response.json();
+        if (!response.ok || result.status !== 'ok') throw new Error(result.error || 'Не удалось сохранить стратегию');
+        status.textContent = 'Стратегия добавлена в избранное.';
+        button.textContent = '✓ В избранном';
+    } catch (error) {
+        status.textContent = error.message || 'Не удалось сохранить стратегию';
+        button.disabled = false;
+    }
+});
 function syncViewNavigation() {
     if (!filtersForm) return;
     const values = new URLSearchParams(new FormData(filtersForm));
@@ -2257,11 +2302,13 @@ window.setInterval(refreshCollectorStatus, 30000);
 refreshCalculationQueue();
 window.setInterval(refreshCalculationQueue, 5000);
 updateMartingaleInitialNotional();
-if (symbolSortMode.value === 'profit') {
+if (!favoriteView && symbolSortMode.value === 'profit') {
     loadPortfolioRanking();
-} else {
+} else if (!favoriteView) {
     loadPortfolioRanking({cachedOnly: true});
 }
-loadCachedTickerBestResults();
-loadExitRanking();
+if (!favoriteView) {
+    loadCachedTickerBestResults();
+    loadExitRanking();
+}
 </script></body></html>
