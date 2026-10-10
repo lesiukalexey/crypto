@@ -392,18 +392,44 @@ function money(string $value): string { return number_format((float) $value, 6, 
 function formatKyivTime(string $value, DateTimeZone $timezone): string { return (new DateTimeImmutable($value, new DateTimeZone('UTC')))->setTimezone($timezone)->format('d.m H:i:s'); }
 function epochMilliseconds(string $value): int { $time = new DateTimeImmutable($value, new DateTimeZone('UTC')); return ((int) $time->format('U')) * 1000 + (int) $time->format('v'); }
 $series = ['bid_price' => ['name' => 'Bid', 'color' => '#42d6a4'], 'ask_price' => ['name' => 'Ask', 'color' => '#ff7188'], 'last_price' => ['name' => 'Last', 'color' => '#86a8ff']];
-$points = [];
 $visibleQuoteCount = 0;
 $hasHistoricalCandles = false;
+$chartDays = [];
+$chartPriceMin = null;
+$chartPriceMax = null;
 foreach ($rows as $row) {
     $time = (new DateTimeImmutable($row['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone);
     if ($time < $startDay || $time >= $dayAfterEnd) continue;
     $visibleQuoteCount++;
     $hasHistoricalCandles = $hasHistoricalCandles || ($row['quote_source'] ?? 'ticker') === 'historical_candle_close';
+    $chartDays[$time->format('Y-m-d')] = true;
     foreach ($series as $key => $meta) {
         $value = (float) $row[$key];
-        if (is_finite($value)) $points[$key][] = ['t' => $time->getTimestamp() * 1000, 'v' => $value, 'label' => $row[$key]];
+        if (!is_finite($value)) continue;
+        $chartPriceMin = $chartPriceMin === null ? $value : min($chartPriceMin, $value);
+        $chartPriceMax = $chartPriceMax === null ? $value : max($chartPriceMax, $value);
     }
+}
+$chartPointLimit = 5000;
+$chartPointCount = min($visibleQuoteCount, $chartPointLimit);
+$points = [];
+$visibleIndex = 0;
+$nextChartIndex = 0;
+$sampledChartPoints = 0;
+foreach ($rows as $row) {
+    $time = (new DateTimeImmutable($row['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone);
+    if ($time < $startDay || $time >= $dayAfterEnd) continue;
+    if ($visibleIndex === $nextChartIndex) {
+        foreach ($series as $key => $meta) {
+            $value = (float) $row[$key];
+            if (is_finite($value)) $points[$key][] = ['t' => $time->getTimestamp() * 1000, 'v' => $value, 'label' => $row[$key]];
+        }
+        $sampledChartPoints++;
+        if ($sampledChartPoints < $chartPointCount && $chartPointCount > 1) {
+            $nextChartIndex = (int) round($sampledChartPoints * ($visibleQuoteCount - 1) / ($chartPointCount - 1));
+        }
+    }
+    $visibleIndex++;
 }
 $chart = [];
 foreach ($series as $key => $meta) $chart[$key] = $points[$key] ?? [];
@@ -1120,7 +1146,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Для исполнения используются действующие правила контракта Bitget (плечо 1×, шаг количества, минимумы и максимум рыночной заявки), комиссия за market/taker и указанное проскальзывание. К историческим сделкам применяются текущие правила контракта. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
 <section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты и очищает очередь. 🧹 делает то же самое и дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
-<section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head chart-info-line"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= $visibleQuoteCount ?> снимков</span><span class="chart-info-item"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
+<section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head chart-info-line"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count" title="<?= $visibleQuoteCount ?> исходных снимков; <?= $chartPointCount ?> точек в графике"><?= $visibleQuoteCount ?> снимков<?php if ($chartPointCount < $visibleQuoteCount): ?> · график <?= $chartPointCount ?><?php endif; ?></span><span class="chart-info-item"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
 <?php if ($hasHistoricalCandles): ?><p class="hint">Исторические минутные свечи: Bid, Ask и Last восстановлены по цене Close; биржевой спред в этих данных отсутствует.</p><?php endif; ?>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
 <div class="chart-display"><div class="chart-wrap"><svg id="chart" role="img" aria-label="График bid, ask и last для <?= h($symbol) ?>"></svg><div id="tooltip" aria-hidden="true"></div></div><nav class="chart-day-controls" id="chart-day-controls" aria-label="День на графике"><button class="chart-day-button" type="button" data-chart-day="" aria-pressed="true">Весь график</button></nav></div>
@@ -1137,9 +1163,10 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 </main>
 <?php if ($rows !== []): ?><script>
 const datasets = <?= json_encode($chart, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR) ?>;
+const chartDays = <?= json_encode(array_keys($chartDays), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR) ?>;
 const colors = {bid_price:'#42d6a4',ask_price:'#ff7188',last_price:'#86a8ff'};
 const svg=document.querySelector('#chart'), ns='http://www.w3.org/2000/svg',H=390,p={l:88,r:80,t:20,b:42};let W=H*svg.clientWidth/Math.max(1,svg.clientHeight);
-const all=Object.values(datasets).flat(); const xs=all.map(x=>x.t),ys=all.map(x=>x.v);let xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys);if(xmin===xmax){xmin-=30000;xmax+=30000}if(ymin===ymax){ymin*=.999;ymax*=1.001}const fullXmin=xmin,fullXmax=xmax;let viewMin=xmin,viewMax=xmax;const pad=(ymax-ymin)*.12;ymin-=pad;ymax+=pad;
+const all=Object.values(datasets).flat(); const xs=all.map(x=>x.t);let xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=<?= json_encode($chartPriceMin) ?>,ymax=<?= json_encode($chartPriceMax) ?>;if(xmin===xmax){xmin-=30000;xmax+=30000}if(ymin===ymax){ymin*=.999;ymax*=1.001}const fullXmin=xmin,fullXmax=xmax;let viewMin=xmin,viewMax=xmax;const pad=(ymax-ymin)*.12;ymin-=pad;ymax+=pad;
 const X=x=>p.l+(x-viewMin)/(viewMax-viewMin)*(W-p.l-p.r),Y=y=>p.t+(ymax-y)/(ymax-ymin)*(H-p.t-p.b);
 function el(tag,attrs={},text=''){const n=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text)n.textContent=text;svg.appendChild(n);return n}
 svg.setAttribute('viewBox',`0 0 ${W} ${H}`);svg.setAttribute('preserveAspectRatio','none');
@@ -1156,9 +1183,10 @@ tradeExitBadgeCircle.setAttribute('r','9');tradeExitBadgeCircle.setAttribute('fi
 const defs=el('defs'),clipPath=document.createElementNS(ns,'clipPath'),clipRect=document.createElementNS(ns,'rect'),clipId='chart-plot-clip';clipPath.setAttribute('id',clipId);clipRect.setAttribute('x',p.l);clipRect.setAttribute('y',p.t);clipRect.setAttribute('width',W-p.l-p.r);clipRect.setAttribute('height',H-p.t-p.b);clipPath.appendChild(clipRect);defs.appendChild(clipPath);
 const lastDayPalette=['#86a8ff','#ffc857','#b69cff','#55d6be','#ff8f70','#6ed0ff','#d6a6ff','#a8df65'];
 const lastDayKey=t=>new Date(t).toLocaleDateString('en-CA',{timeZone:'Europe/Kyiv'}),lastDayColors=new Map(),lastDaySegments=[];
+for(const day of chartDays)lastDayColors.set(day,lastDayPalette[lastDayColors.size%lastDayPalette.length]);
 for(const q of datasets.last_price){const day=lastDayKey(q.t);if(!lastDayColors.has(day))lastDayColors.set(day,lastDayPalette[lastDayColors.size%lastDayPalette.length]);let segment=lastDaySegments[lastDaySegments.length-1];if(!segment||segment.day!==day){segment={day,color:lastDayColors.get(day),points:lastDaySegments.length?[lastDaySegments[lastDaySegments.length-1].points.slice(-1)[0]]:[]};lastDaySegments.push(segment)}segment.points.push(q)}
 const chartDayControls=document.querySelector('#chart-day-controls'),chartDayBounds=new Map();
-for(const day of lastDayColors.keys()){const nextDay=new Date(day+'T12:00:00Z');nextDay.setUTCDate(nextDay.getUTCDate()+1);const min=Math.max(fullXmin,kyivWallTimeToEpoch(day,0,0)),max=Math.min(fullXmax,kyivWallTimeToEpoch(nextDay.toISOString().slice(0,10),0,0)-1);chartDayBounds.set(day,{min,max});const button=document.createElement('button');button.type='button';button.className='chart-day-button';button.dataset.chartDay=day;button.textContent=new Date(day+'T12:00:00Z').toLocaleDateString('ru-RU',{timeZone:'UTC',day:'2-digit',month:'2-digit'});button.title=new Date(day+'T12:00:00Z').toLocaleDateString('ru-RU',{timeZone:'UTC',day:'numeric',month:'long',year:'numeric'});button.setAttribute('aria-label',`Показать ${button.title}`);button.setAttribute('aria-pressed','false');chartDayControls.appendChild(button)}
+for(const day of chartDays){const nextDay=new Date(day+'T12:00:00Z');nextDay.setUTCDate(nextDay.getUTCDate()+1);const min=Math.max(fullXmin,kyivWallTimeToEpoch(day,0,0)),max=Math.min(fullXmax,kyivWallTimeToEpoch(nextDay.toISOString().slice(0,10),0,0)-1);chartDayBounds.set(day,{min,max});const button=document.createElement('button');button.type='button';button.className='chart-day-button';button.dataset.chartDay=day;button.textContent=new Date(day+'T12:00:00Z').toLocaleDateString('ru-RU',{timeZone:'UTC',day:'2-digit',month:'2-digit'});button.title=new Date(day+'T12:00:00Z').toLocaleDateString('ru-RU',{timeZone:'UTC',day:'numeric',month:'long',year:'numeric'});button.setAttribute('aria-label',`Показать ${button.title}`);button.setAttribute('aria-pressed','false');chartDayControls.appendChild(button)}
 const markers={},paths={};for(const[key]of Object.entries(datasets)){if(key==='last_price'){paths[key]=lastDaySegments.map(segment=>el('path',{d:'',fill:'none',stroke:segment.color,'stroke-width':2.7,'stroke-linejoin':'round','stroke-linecap':'round',opacity:.98,'clip-path':`url(#${clipId})`}))}else paths[key]=[];markers[key]=el('circle',{r:5,fill:colors[key],stroke:'#0b1020','stroke-width':2,visibility:'hidden','pointer-events':'none'})}
 function renderSeries(){lastDaySegments.forEach((segment,index)=>paths.last_price[index].setAttribute('d',segment.points.map((q,i)=>`${i?'L':'M'}${X(q.t).toFixed(2)},${Y(q.v).toFixed(2)}`).join(' ')))}renderSeries();
 const lastLegend=document.querySelector('.legend span:first-child');if(lastLegend)lastLegend.title='Цвет линии Last соответствует календарному дню по Киеву; при наведении видны Bid, Ask и Last';
