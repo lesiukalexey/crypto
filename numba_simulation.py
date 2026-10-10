@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import numpy as np
 from numba import njit
 
@@ -50,6 +51,33 @@ def _first_le(minimum: np.ndarray, size: int, length: int, start: int, target: f
                 return index if index < length else -1
         node //= 2
     return -1
+
+
+@njit(cache=True)
+def _market_order_quantity(
+    requested_notional: float,
+    price: float,
+    minimum_quantity: float,
+    quantity_step: float,
+    quantity_places: int,
+    minimum_usdt: float,
+    maximum_market_quantity: float,
+) -> tuple[float, float, bool]:
+    if requested_notional <= 0.0 or price <= 0.0:
+        return 0.0, 0.0, False
+    if quantity_step <= 0.0:
+        return requested_notional / price, requested_notional, True
+    quantity = math.floor(requested_notional / price / quantity_step + 1e-10) * quantity_step
+    precision_scale = 10.0 ** quantity_places
+    quantity = math.floor(quantity * precision_scale + 1e-8) / precision_scale
+    actual_notional = quantity * price
+    if quantity < minimum_quantity or actual_notional < minimum_usdt:
+        return 0.0, 0.0, False
+    if maximum_market_quantity > 0.0 and quantity > maximum_market_quantity:
+        return 0.0, 0.0, False
+    if quantity <= 0.0 or math.floor(quantity / quantity_step + 1e-8) * quantity_step != quantity:
+        return 0.0, 0.0, False
+    return quantity, actual_notional, True
 
 
 @njit(cache=True)
@@ -471,6 +499,11 @@ def simulate_martingale_numba(
     signal_shorts: np.ndarray,
     start_balance: float,
     fee_rate: float,
+    min_order_quantity: float,
+    quantity_step: float,
+    quantity_places: int,
+    min_order_notional: float,
+    max_market_order_quantity: float,
     take_profit: float,
     stop_loss: float,
     base_notional: float,
@@ -513,6 +546,12 @@ def simulate_martingale_numba(
         # not open a new chain larger than the currently available balance
         # after losses on earlier chains.
         notional = min(base_notional, balance / (1.0 + fee_rate))
+        quantity, actual_notional, order_valid = _market_order_quantity(
+            notional, price, min_order_quantity, quantity_step,
+            quantity_places, min_order_notional, max_market_order_quantity,
+        )
+        if not order_valid:
+            return np.nan, 0, 0
         if notional <= 0.0:
             break
 
@@ -520,12 +559,12 @@ def simulate_martingale_numba(
         leg_quantities = np.empty(attempts, dtype=np.float64)
         leg_fees = np.empty(attempts, dtype=np.float64)
         leg_prices[0] = price
-        leg_quantities[0] = notional / price
-        leg_fees[0] = notional * fee_rate
+        leg_quantities[0] = quantity
+        leg_fees[0] = actual_notional * fee_rate
         leg_count = 1
         chains_started += 1
-        position_notional = notional
-        chain_base_notional = notional
+        position_notional = actual_notional
+        chain_base_notional = actual_notional
         chain_realized_pnl = 0.0
         stage = 1
 
@@ -704,14 +743,20 @@ def simulate_martingale_numba(
                             leg_count = 0
                             signal_cursor = _upper_bound(signal_indexes, 0, first_take)
                             break
-                    if add_notional > 0.0 and next_index < count:
+                    if next_index < count and add_notional > 0.0:
                         add_price = bids[next_index] if next_short else asks[next_index]
+                        add_quantity, actual_add_notional, order_valid = _market_order_quantity(
+                            add_notional, add_price, min_order_quantity, quantity_step,
+                            quantity_places, min_order_notional, max_market_order_quantity,
+                        )
+                        if not order_valid:
+                            return np.nan, 0, 0
                         if add_price > 0.0:
                             leg_prices[leg_count] = add_price
-                            leg_quantities[leg_count] = add_notional / add_price
-                            leg_fees[leg_count] = add_notional * fee_rate
+                            leg_quantities[leg_count] = add_quantity
+                            leg_fees[leg_count] = actual_add_notional * fee_rate
                             leg_count += 1
-                            position_notional += add_notional
+                            position_notional += actual_add_notional
                             stage += 1
                             entry_index = next_index
                             continue
@@ -735,12 +780,18 @@ def simulate_martingale_numba(
                     next_notional = min(requested, available / (1.0 + fee_rate))
                     if next_index < count and next_notional > 0.0:
                         next_price = bids[next_index] if is_short else asks[next_index]
+                        next_quantity, actual_next_notional, order_valid = _market_order_quantity(
+                            next_notional, next_price, min_order_quantity, quantity_step,
+                            quantity_places, min_order_notional, max_market_order_quantity,
+                        )
+                        if not order_valid:
+                            return np.nan, 0, 0
                         if next_price > 0.0:
                             entry_index = next_index
-                            position_notional = next_notional
+                            position_notional = actual_next_notional
                             leg_prices[0] = next_price
-                            leg_quantities[0] = next_notional / next_price
-                            leg_fees[0] = next_notional * fee_rate
+                            leg_quantities[0] = next_quantity
+                            leg_fees[0] = actual_next_notional * fee_rate
                             leg_count = 1
                             stage += 1
                             continue
@@ -773,13 +824,19 @@ def simulate_martingale_numba(
                     reverse_notional = min(wanted, available / (1.0 + fee_rate))
                     if next_index < count and reverse_notional > 0.0:
                         reverse_price = bids[next_index] if reverse_short else asks[next_index]
+                        reverse_quantity, actual_reverse_notional, order_valid = _market_order_quantity(
+                            reverse_notional, reverse_price, min_order_quantity, quantity_step,
+                            quantity_places, min_order_notional, max_market_order_quantity,
+                        )
+                        if not order_valid:
+                            return np.nan, 0, 0
                         if reverse_price > 0.0:
                             is_short = reverse_short
                             entry_index = next_index
-                            position_notional = reverse_notional
+                            position_notional = actual_reverse_notional
                             leg_prices[0] = reverse_price
-                            leg_quantities[0] = reverse_notional / reverse_price
-                            leg_fees[0] = reverse_notional * fee_rate
+                            leg_quantities[0] = reverse_quantity
+                            leg_fees[0] = actual_reverse_notional * fee_rate
                             leg_count = 1
                             stage += 1
                             continue
@@ -811,6 +868,11 @@ def simulate_martingale_batch_numba(
     signal_shorts: np.ndarray,
     start_balance: float,
     fee_rate: float,
+    min_order_quantity: float,
+    quantity_step: float,
+    quantity_places: int,
+    min_order_notional: float,
+    max_market_order_quantity: float,
     take_profits: np.ndarray,
     stop_losses: np.ndarray,
     base_notionals: np.ndarray,
@@ -832,7 +894,8 @@ def simulate_martingale_batch_numba(
         pnl, order_count, chain_count = simulate_martingale_numba(
             bids, asks, bid_maximum, bid_minimum, ask_maximum, ask_minimum,
             tree_size, tree_length, signal_indexes, signal_shorts,
-            start_balance, fee_rate, take_profits[index], stop_losses[index],
+            start_balance, fee_rate, min_order_quantity, quantity_step, quantity_places,
+            min_order_notional, max_market_order_quantity, take_profits[index], stop_losses[index],
             base_notionals[index], mode, timing, attempts,
             target_policies[index], max_chain_loss, max_day_loss, day_ids,
             take_confirmation_snapshots, stop_confirmation_snapshots,

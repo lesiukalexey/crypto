@@ -81,6 +81,8 @@ $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
 $startingBalance = trim((string) ($_GET['balance'] ?? '10'));
 $feePercent = trim((string) ($_GET['fee'] ?? '0.06'));
 $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
+$martingaleContractRules = null;
+$martingaleOrderConstraintError = null;
 $martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');
 $martingaleAttempts = filter_var($_GET['martingale_attempts'] ?? 3, FILTER_VALIDATE_INT);
 if (!in_array($martingaleMode, ['none', 'simple', 'reverse', 'simple_profit', 'reverse_profit'], true)) $martingaleMode = 'none';
@@ -182,6 +184,14 @@ try {
         if (!in_array($symbol, $symbols, true)) {
             $symbol = $symbols[0];
         }
+        if ($martingaleMode !== 'none') {
+            $martingaleContractRules = rankingCurrentBitgetContract($config['category'], $symbol);
+            if ($martingaleContractRules['symbolStatus'] !== 'normal'
+                || bccomp((string) $martingaleContractRules['minLever'], '1', 12) > 0
+                || bccomp((string) $martingaleContractRules['maxLever'], '1', 12) < 0) {
+                throw new RuntimeException('Текущие правила Bitget не разрешают открыть эту пару с плечом 1×.');
+            }
+        }
         $startDay = DateTimeImmutable::createFromFormat('!Y-m-d', $startDayInput, $timezone);
         $startDateErrors = DateTimeImmutable::getLastErrors();
         if ($startDay === false || ($startDateErrors !== false && ($startDateErrors['warning_count'] > 0 || $startDateErrors['error_count'] > 0)) || $startDay->format('Y-m-d') !== $startDayInput) {
@@ -218,7 +228,9 @@ try {
         $rows = $stmt->fetchAll();
     }
 } catch (Throwable $e) {
-    $error ??= $e instanceof InvalidArgumentException ? $e->getMessage() : 'Не удалось загрузить котировки. Проверьте доступность MySQL и настройки подключения.';
+    $error ??= ($e instanceof InvalidArgumentException || str_contains($e->getMessage(), 'Bitget'))
+        ? $e->getMessage()
+        : 'Не удалось загрузить котировки. Проверьте доступность MySQL и настройки подключения.';
 }
 
 $cachedStandardTradeEvents = null;
@@ -473,7 +485,7 @@ if ($cachedStandardTradeEvents !== null) {
     }
     $dailyRealizedByDay = [];
     $chainAttempt = 0;
-    while (bccomp($balance, '0', 24) > 0 && $chainAttempt < 100000) {
+    while (bccomp($balance, '0', 24) > 0 && $chainAttempt < 100000 && $martingaleOrderConstraintError === null) {
         $signal = $isImmediateEntry
             ? ($chainAttempt === 0 && $rowCount > 1 ? [0, $immediateDirection === 'short'] : null)
             : $findMomentumEntry($tradeEntryIndex);
@@ -495,17 +507,25 @@ if ($cachedStandardTradeEvents !== null) {
         $legs = [];
         $positionNotional = '0';
         $stage = 1;
-        $addLeg = static function (int $index, bool $short, string $notional) use (&$legs, &$positionNotional, $rows, $feeRate): bool {
+        $addLeg = static function (int $index, bool $short, string &$notional) use (&$legs, &$positionNotional, &$martingaleOrderConstraintError, $rows, $feeRate, $martingaleContractRules): bool {
             $entry = $rows[$index];
             $price = $short ? $entry['bid_price'] : $entry['ask_price'];
             if (bccomp($price, '0', 24) <= 0 || bccomp($notional, '0', 24) <= 0) return false;
-            $qty = bcdiv($notional, $price, 24);
-            $entryFee = bcmul(bcmul($qty, $price, 24), $feeRate, 24);
+            $reservedBalance = bcadd($notional, bcmul($notional, $feeRate, 24), 24);
+            $order = rankingQuantizeBitgetMarketOrder($notional, $price, $martingaleContractRules ?? [], $feeRate, $reservedBalance);
+            if ($order === null) {
+                $martingaleOrderConstraintError = 'Один из ордеров мартингейла не проходит текущие правила Bitget или не помещается в доступный баланс. Вариант исключён.';
+                return false;
+            }
+            $notional = $order['notional'];
+            $qty = $order['quantity'];
+            $entryFee = bcmul($notional, $feeRate, 24);
             $legs[] = ['entry' => $entry, 'entry_price' => $price, 'quantity' => $qty, 'entry_fee' => $entryFee, 'notional' => $notional, 'is_short' => $short];
             $positionNotional = bcadd($positionNotional, $notional, 24);
             return true;
         };
         if (!$addLeg($tradeEntryIndex, $tradeIsShort, $stake)) break;
+        $chainBaseStake = $stake;
 
         while ($legs !== []) {
             $exitIndex = $rowCount - 1;
@@ -704,6 +724,10 @@ if ($cachedStandardTradeEvents !== null) {
         }
         $chainAttempt++;
     }
+    if ($martingaleOrderConstraintError !== null) {
+        $trades = [];
+        $balance = $startingBalance;
+    }
 } else {
 while (bccomp($balance, '0', 24) > 0) {
     if ($isImmediateEntry) {
@@ -889,6 +913,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 </section>
 <?php endif; ?>
 <?php if ($error !== null): ?><section class="panel error"><?= h($error) ?></section><?php endif; ?>
+<?php if ($martingaleOrderConstraintError !== null): ?><section class="panel error"><?= h($martingaleOrderConstraintError) ?></section><?php endif; ?>
 <section class="panel"><form class="filters<?= $favoriteView ? ' favorite-readonly' : '' ?>" method="get">
 <input type="hidden" name="ranking_generation" id="ranking-generation" value="<?= h($rankingGeneration) ?>">
 <?php if ($combinationDetail): ?>
@@ -921,7 +946,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
-<details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><label class="field">Макс. убыток цепочки (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>"></label><label class="field">Макс. убыток за день (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>"></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Ноль отключает лимит. Лимит цепочки закрывает её на первом снимке, где чистый убыток достигает суммы. Дневной лимит учитывает результат закрытых цепочек по дате закрытия и запрещает новые цепочки до следующего дня; лимит цепочки ограничивает текущую позицию.</p><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
+<details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><label class="field">Макс. убыток цепочки (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>"></label><label class="field">Макс. убыток за день (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>"></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Ноль отключает лимит. Лимит цепочки закрывает её на первом снимке, где чистый убыток достигает суммы. Дневной лимит учитывает результат закрытых цепочек по дате закрытия и запрещает новые цепочки до следующего дня; лимит цепочки ограничивает текущую позицию.</p><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Перед расчётом каждый ордер сверяется с актуальными правилами контракта Bitget: минимумом суммы и количества, шагом количества, максимальным размером рыночного ордера и доступным балансом.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php

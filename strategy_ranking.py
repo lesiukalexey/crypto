@@ -23,6 +23,7 @@ import numpy as np
 import pymysql
 
 from app import load_config
+from contract_rules import load_contract_specs, numba_market_order_rules
 from database import connect_mysql
 from martingale import martingale_base_notional
 from ranking_checkpoints import STATE_DTYPE, daily_quote_boundaries, dated_state_checkpoint_path, has_dated_state_checkpoint, load_best_state_checkpoint, load_exact_state_checkpoint, write_state_checkpoint
@@ -427,6 +428,7 @@ def simulate(
     martingale_max_day_loss: float | None = None,
     take_confirmation_snapshots: int = 0,
     stop_confirmation_snapshots: int = 0,
+    order_rules: tuple[float, float, int, float, float] | None = None,
 ) -> tuple[float, int] | tuple[float, int, int]:
     indexes = signal_indexes if isinstance(signal_indexes, np.ndarray) else np.asarray(signal_indexes, dtype=np.int64)
     shorts = signal_shorts if isinstance(signal_shorts, np.ndarray) else np.asarray(signal_shorts, dtype=np.bool_)
@@ -442,11 +444,12 @@ def simulate(
             raise ValueError("Invalid martingale options")
         if martingale_target_policy not in ("scaled", "fixed"):
             raise ValueError("Invalid martingale exit target policy")
+        market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
         pnl, order_count, _ = simulate_martingale_numba(
             quotes.bids, quotes.asks,
             bid_tree.maximum, bid_tree.minimum, ask_tree.maximum, ask_tree.minimum,
             bid_tree.size, bid_tree.length, indexes, shorts,
-            start_balance, fee_rate,
+            start_balance, fee_rate, *market_rules,
             np.nan if take_profit_amount is None else take_profit_amount,
             np.nan if stop_loss_amount is None else -stop_loss_amount,
             martingale_base_notional(
@@ -500,6 +503,7 @@ def simulate_martingale_batch(
     candidates: list[tuple[str, float | None, float | None, str]],
     take_confirmation_snapshots: int = 0,
     stop_confirmation_snapshots: int = 0,
+    order_rules: tuple[float, float, int, float, float] | None = None,
 ) -> dict[tuple[str, str], tuple[float, int, int]]:
     """Run a complete martingale exit grid in one Python-to-Numba call."""
     from martingale import martingale_base_notional
@@ -524,10 +528,11 @@ def simulate_martingale_batch(
     policies = np.fromiter((0 if policy == "scaled" else 1 for _, _, _, policy in candidates), dtype=np.int64, count=len(candidates))
     mode_id = {"simple": 0, "reverse": 1, "simple_profit": 2, "reverse_profit": 3}[mode]
     timing_id = 0 if timing == "immediate" else 1
+    market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
     pnls, order_counts, chain_counts = simulate_martingale_batch_numba(
         quotes.bids, quotes.asks, bid_tree.maximum, bid_tree.minimum,
         ask_tree.maximum, ask_tree.minimum, bid_tree.size, bid_tree.length,
-        signal_indexes, signal_shorts, start_balance, fee_rate, takes, stops,
+        signal_indexes, signal_shorts, start_balance, fee_rate, *market_rules, takes, stops,
         base_notionals, mode_id, timing_id, attempts, policies,
         np.nan if max_chain_loss is None else max_chain_loss,
         np.nan if max_day_loss is None else max_day_loss,
@@ -858,6 +863,13 @@ def main() -> int:
             return 0
     try:
         config = load_config(Path(__file__).with_name("config.json"))
+        order_rules = None
+        if args.martingale_mode != "none":
+            contract_specs = load_contract_specs(config["category"])
+            contract = contract_specs.get(args.symbol)
+            if contract is None:
+                raise RuntimeError(f"Bitget contract rules are unavailable for {args.symbol}")
+            order_rules = numba_market_order_rules(contract, leverage=1.0)
         connection = connect_mysql(config["mysql"])
         try:
             end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
@@ -996,6 +1008,7 @@ def main() -> int:
                         args.martingale_max_chain_loss, args.martingale_max_day_loss,
                         martingale_batch_candidates,
                         take_confirmation_snapshots, stop_confirmation_snapshots,
+                        order_rules,
                     )
 
                 checkpoint_path = None
@@ -1141,7 +1154,7 @@ def main() -> int:
                             else:
                                 pnl, trade_count, chain_count = martingale_batch_results[(identifier, target_policy)]
                             independent_count = chain_count if args.martingale_mode != "none" else trade_count
-                            if independent_count >= args.min_trades:
+                            if math.isfinite(pnl) and independent_count >= args.min_trades:
                                 profile_best[0] = max(profile_best[0], pnl)
                                 ranked_id = f"{identifier}:{target_policy}" if policy_label else identifier
                                 best = best_by_policy[target_policy]

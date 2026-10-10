@@ -94,7 +94,7 @@ try {
     $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
     $keyParts = ['symbol-ranking-v15-canonical-ledger', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
     if ($martingaleMode !== 'none') {
-        $keyParts[] = 'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1';
+        $keyParts[] = 'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1-bitget-contract-rules-v2';
         $keyParts[] = $martingaleRiskLimits;
     }
     $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration);

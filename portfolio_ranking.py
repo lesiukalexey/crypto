@@ -25,6 +25,7 @@ import numpy as np
 import pymysql
 
 from app import load_config
+from contract_rules import load_contract_specs, numba_market_order_rules
 from database import connect_mysql
 from ranking_checkpoints import (
     CHECKPOINT_MIN_FREE_BYTES,
@@ -68,7 +69,7 @@ def durable_result_path(
         for symbol in sorted(max_ids)
     ]
     key = hashlib.sha256(json.dumps([
-        "portfolio-durable-result-v6-canonical-ledger" if args.martingale_mode == "none" else "portfolio-durable-result-v10-independent-chains", category, args.start_day, args.end_day,
+        "portfolio-durable-result-v6-canonical-ledger" if args.martingale_mode == "none" else "portfolio-durable-result-v11-bitget-contract-rules", category, args.start_day, args.end_day,
         args.balance, args.fee_percent, args.min_trades, args.entry_config,
         args.ranking_params, args.martingale_mode, args.martingale_timing,
         args.martingale_attempts, args.martingale_max_chain_loss,
@@ -123,7 +124,7 @@ def pair_result_cache_paths(
 
     scope_keys = {
         symbol: hashlib.sha256(json.dumps([
-            "portfolio-pair-simulation-v7-canonical-ledger" if martingale_mode == "none" else "portfolio-pair-simulation-v11-independent-chains",
+            "portfolio-pair-simulation-v7-canonical-ledger" if martingale_mode == "none" else "portfolio-pair-simulation-v12-bitget-contract-rules",
             category,
             symbol,
             max_ids[symbol],
@@ -294,6 +295,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                 args.martingale_max_chain_loss, args.martingale_max_day_loss,
                 uncached,
                 state["take_confirmation_snapshots"], state["stop_confirmation_snapshots"],
+                state["order_rules_by_symbol"][symbol],
             )
     cache_updated = False
     checkpoint_updated = bool(boundaries_to_capture)
@@ -477,6 +479,14 @@ def main() -> int:
             return 0
 
         config = load_config(Path(__file__).with_name("config.json"))
+        order_rules_by_symbol = {}
+        if args.martingale_mode != "none":
+            contract_specs = load_contract_specs(config["category"])
+            for contract_symbol in max_ids:
+                contract = contract_specs.get(contract_symbol)
+                if contract is None:
+                    raise RuntimeError(f"Bitget contract rules are unavailable for {contract_symbol}")
+                order_rules_by_symbol[contract_symbol] = numba_market_order_rules(contract, leverage=1.0)
         end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
         start_local = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV)
@@ -593,6 +603,7 @@ def main() -> int:
             "exit_options": exit_options,
             "args": args,
             "fee_rate": fee_rate,
+            "order_rules_by_symbol": order_rules_by_symbol,
         }
         worker_count = min(args.workers, len(quotes_by_symbol), os.cpu_count() or 1)
         if worker_count > 1:

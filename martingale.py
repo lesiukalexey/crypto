@@ -50,6 +50,8 @@ def simulate_martingale(
     target_policy: str = "scaled",
     max_chain_loss: float | None = None,
     max_day_loss: float | None = None,
+    min_order_notional: float = 0.0,
+    contract_rules: dict[str, Any] | None = None,
 ) -> tuple[float, int, int]:
     """Replay capped, 1x martingale exposure. Each opened order counts as a trade."""
     if mode not in ("simple", "reverse", "simple_profit", "reverse_profit") or timing not in ("immediate", "rules") or not 2 <= attempts <= 10:
@@ -66,6 +68,21 @@ def simulate_martingale(
     base_notional = martingale_base_notional(start_balance, fee_rate, stop_loss, mode, attempts, target_policy)
     if base_notional <= 0:
         return 0.0, 0, 0
+
+    def market_order(requested: float, price: float) -> tuple[float, float] | None:
+        if contract_rules is None:
+            if requested < min_order_notional or requested <= 0 or price <= 0:
+                return None
+            return requested, requested / price
+        from contract_rules import validate_market_order
+
+        result = validate_market_order(
+            requested, price, contract_rules, leverage=1,
+            available_balance=requested * (1 + fee_rate), fee_rate=fee_rate,
+        )
+        if not result["valid"]:
+            return None
+        return float(result["notional"]), float(result["quantity"])
 
     while balance > 0 and signal_cursor < len(signal_indexes):
         entry_index = signal_indexes[signal_cursor]
@@ -88,7 +105,11 @@ def simulate_martingale(
         chain_base_notional = notional
         chain_realized_pnl = 0.0
         stage = 1
-        leg_quantity = notional / price
+        initial_order = market_order(notional, price)
+        if initial_order is None:
+            return float("nan"), 0, 0
+        notional, leg_quantity = initial_order
+        chain_base_notional = notional
         legs.append((price, leg_quantity, notional * fee_rate))
         chains_started += 1
         position_notional += notional
@@ -234,7 +255,10 @@ def simulate_martingale(
                     if add_notional > 0 and next_index < count:
                         add_price = quotes.bids[next_index] if next_short else quotes.asks[next_index]
                         if add_price > 0:
-                            add_quantity = add_notional / add_price
+                            order = market_order(add_notional, add_price)
+                            if order is None:
+                                return float("nan"), 0, 0
+                            add_notional, add_quantity = order
                             legs.append((add_price, add_quantity, add_notional * fee_rate))
                             position_notional += add_notional
                             stage += 1
@@ -260,9 +284,13 @@ def simulate_martingale(
                     if next_index < count and add_notional > 0:
                         add_price = quotes.bids[next_index] if is_short else quotes.asks[next_index]
                         if add_price > 0:
+                            order = market_order(add_notional, add_price)
+                            if order is None:
+                                return float("nan"), 0, 0
+                            add_notional, add_quantity = order
                             position_notional = add_notional
                             entry_index = next_index
-                            legs.append((add_price, add_notional / add_price, add_notional * fee_rate))
+                            legs.append((add_price, add_quantity, add_notional * fee_rate))
                             stage += 1
                             continue
                     break
@@ -295,10 +323,14 @@ def simulate_martingale(
                     if next_index < count and reverse_notional > 0:
                         reverse_price = quotes.bids[next_index] if reverse_short else quotes.asks[next_index]
                         if reverse_price > 0:
+                            order = market_order(reverse_notional, reverse_price)
+                            if order is None:
+                                return float("nan"), 0, 0
+                            reverse_notional, reverse_quantity = order
                             is_short = reverse_short
                             entry_index = next_index
                             position_notional = reverse_notional
-                            legs.append((reverse_price, reverse_notional / reverse_price, reverse_notional * fee_rate))
+                            legs.append((reverse_price, reverse_quantity, reverse_notional * fee_rate))
                             stage += 1
                             continue
                     signal_cursor = bisect.bisect_right(signal_indexes, exit_index, lo=signal_cursor)

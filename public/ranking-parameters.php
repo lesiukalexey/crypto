@@ -127,9 +127,84 @@ function rankingMartingaleCacheIdentity(string $mode, array $riskLimits): array
 {
     if ($mode === 'none') return [];
     return [
-        'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1',
+        'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1-bitget-contract-rules-v2',
         $riskLimits,
     ];
+}
+
+function rankingCurrentBitgetContract(string $productType, string $symbol): array
+{
+    if (!in_array($productType, ['USDT-FUTURES', 'USDC-FUTURES', 'COIN-FUTURES'], true)) {
+        throw new RuntimeException('Ограничения мартингейла настроены только для бессрочных фьючерсов Bitget.');
+    }
+    $safeType = strtolower((string) preg_replace('/[^a-z0-9-]/i', '', $productType));
+    $root = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-contract-specs';
+    if (!is_dir($root) && !mkdir($root, 0700, true) && !is_dir($root)) {
+        throw new RuntimeException('Не удалось подготовить кэш правил контрактов Bitget.');
+    }
+    $path = $root . '/' . $safeType . '.json';
+    $lock = fopen($path . '.lock', 'c');
+    if ($lock === false || !flock($lock, LOCK_EX)) {
+        throw new RuntimeException('Не удалось заблокировать кэш правил контрактов Bitget.');
+    }
+    try {
+        $cache = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
+        if (!is_array($cache) || !is_array($cache['contracts'] ?? null)
+            || (int) ($cache['fetched_at'] ?? 0) < time() - 3600) {
+            if (!function_exists('curl_init')) throw new RuntimeException('Для обновления правил Bitget требуется PHP cURL.');
+            $curl = curl_init('https://api.bitget.com/api/v2/mix/market/contracts?productType=' . rawurlencode($productType));
+            curl_setopt_array($curl, [CURLOPT_RETURNTRANSFER => true, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => 15, CURLOPT_USERAGENT => 'BitgetHistoricalReplay/1.0']);
+            $body = curl_exec($curl);
+            $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($curl);
+            curl_close($curl);
+            if (!is_string($body) || $status !== 200) throw new RuntimeException('Не удалось получить актуальные правила Bitget: ' . ($curlError !== '' ? $curlError : 'HTTP ' . $status));
+            $payload = json_decode($body, true);
+            if (!is_array($payload) || ($payload['code'] ?? null) !== '00000' || !is_array($payload['data'] ?? null)) {
+                throw new RuntimeException('Bitget вернул некорректные правила контрактов.');
+            }
+            $contracts = [];
+            foreach ($payload['data'] as $item) {
+                if (!is_array($item) || !is_string($item['symbol'] ?? null)) continue;
+                foreach (['symbolStatus', 'minTradeUSDT', 'minTradeNum', 'sizeMultiplier', 'volumePlace', 'pricePlace', 'priceEndStep', 'maxMarketOrderQty', 'maxOrderQty', 'minLever', 'maxLever', 'takerFeeRate'] as $field) {
+                    if (!array_key_exists($field, $item)) throw new RuntimeException('Bitget не вернул поле ' . $field . ' для ' . $item['symbol'] . '.');
+                }
+                $contracts[$item['symbol']] = $item;
+            }
+            $cache = ['fetched_at' => time(), 'product_type' => $productType, 'contracts' => $contracts];
+            $encoded = json_encode($cache, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+            $temporary = tempnam($root, '.contracts-');
+            if ($temporary === false || file_put_contents($temporary, $encoded, LOCK_EX) === false || !rename($temporary, $path)) {
+                if (is_string($temporary)) @unlink($temporary);
+                throw new RuntimeException('Не удалось сохранить актуальные правила Bitget.');
+            }
+        }
+        $contract = $cache['contracts'][$symbol] ?? null;
+        if (!is_array($contract)) throw new RuntimeException('Bitget не вернул текущие правила для ' . $symbol . '.');
+        return $contract;
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+}
+
+function rankingQuantizeBitgetMarketOrder(string $notional, string $price, array $contract, string $feeRate, string $availableBalance): ?array
+{
+    if (($contract['symbolStatus'] ?? null) !== 'normal') return null;
+    if (bccomp((string) $contract['minLever'], '1', 12) > 0 || bccomp((string) $contract['maxLever'], '1', 12) < 0) return null;
+    $step = (string) $contract['sizeMultiplier'];
+    if (bccomp($step, '0', 24) <= 0 || bccomp($price, '0', 24) <= 0 || bccomp($notional, '0', 24) <= 0) return null;
+    $rawQuantity = bcdiv($notional, $price, 24);
+    $steps = bcdiv($rawQuantity, $step, 0);
+    $quantity = bcmul($steps, $step, (int) $contract['volumePlace']);
+    if (bccomp($quantity, (string) $contract['minTradeNum'], 24) < 0) return null;
+    if (bccomp((string) $contract['maxMarketOrderQty'], '0', 24) > 0
+        && bccomp($quantity, (string) $contract['maxMarketOrderQty'], 24) > 0) return null;
+    $actualNotional = bcmul($quantity, $price, 24);
+    if (bccomp($actualNotional, (string) $contract['minTradeUSDT'], 24) < 0) return null;
+    $marginAndFee = bcadd($actualNotional, bcmul($actualNotional, $feeRate, 24), 24);
+    if (bccomp($marginAndFee, $availableBalance, 24) > 0) return null;
+    return ['quantity' => $quantity, 'notional' => $actualNotional];
 }
 
 function rankingValues(array $ranges): array
