@@ -57,8 +57,17 @@ function rankingSnapshotIds(PDO $pdo, string $cacheDir, string $category, string
                 && ($saved['generation'] ?? null) === $generation
                 && is_array($saved['snapshot_ids'] ?? null)) {
                 $snapshotIds = array_map('intval', $saved['snapshot_ids']);
-                if (!$refreshSnapshot) return $snapshotIds;
-                $snapshotIds = rankingSnapshotLatestIds($pdo, $category, $startUtc, $endUtc);
+                if (!$refreshSnapshot) {
+                    if ($snapshotIds !== []) return $snapshotIds;
+                    $latestIds = rankingSnapshotLatestIds($pdo, $category, $startUtc, $endUtc);
+                    if ($latestIds === []) return $snapshotIds;
+                    // Historical imports can populate a date range after its
+                    // original empty snapshot was cached. Hydrate that empty
+                    // snapshot so ranking workers see the newly available rows.
+                    $snapshotIds = $latestIds;
+                } else {
+                    $snapshotIds = rankingSnapshotLatestIds($pdo, $category, $startUtc, $endUtc);
+                }
                 $saved['snapshot_ids'] = $snapshotIds;
                 $saved['refreshed_snapshot_sha256'] = hash('sha256', json_encode($snapshotIds, JSON_THROW_ON_ERROR));
                 $payload = json_encode($saved, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
