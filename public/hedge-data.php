@@ -50,21 +50,50 @@ try {
     $pdo = new PDO(
         sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $db['host'], $db['port'], $db['database']),
         $db['user'], $password,
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
+        [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => false,
+        ]
     );
     $startUtc = $startDay->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
     $endUtc = $endDay->modify('+1 day')->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
+    $countStatement = $pdo->prepare(
+        'SELECT COUNT(*) FROM quote_snapshots '
+        . 'WHERE category = ? AND symbol = ? AND received_at_utc >= ? AND received_at_utc < ?'
+    );
     $statement = $pdo->prepare(
         'SELECT received_at_utc, bid_price, ask_price, last_price FROM quote_snapshots '
         . 'WHERE category = ? AND symbol = ? AND received_at_utc >= ? AND received_at_utc < ? '
-        . 'ORDER BY received_at_utc, id LIMIT 100001'
+        . 'ORDER BY received_at_utc, id'
     );
     $quotes = [];
+    $quoteCounts = [];
+    $samplingSteps = [];
+    $sampleLimit = 25000;
     foreach ([$longSymbol, $shortSymbol] as $symbol) {
-        $statement->execute([$config['category'], $symbol, $startUtc, $endUtc]);
-        $quotes[$symbol] = $statement->fetchAll();
-        if (count($quotes[$symbol]) > 100000) {
-            hedge_respond(['status' => 'error', 'message' => 'Для выбранного периода слишком много снимков. Сузьте диапазон дат и повторите расчёт.'], 400);
+        $params = [$config['category'], $symbol, $startUtc, $endUtc];
+        $countStatement->execute($params);
+        $quoteCounts[$symbol] = (int) $countStatement->fetchColumn();
+        $countStatement->closeCursor();
+        $targetCount = min($quoteCounts[$symbol], $sampleLimit);
+        $samplingSteps[$symbol] = $targetCount > 0 ? $quoteCounts[$symbol] / $targetCount : 1;
+
+        $statement->execute($params);
+        $quotes[$symbol] = [];
+        $index = 0;
+        $nextSampleIndex = 0;
+        while (($quote = $statement->fetch()) !== false) {
+            if ($index === $nextSampleIndex) {
+                $quotes[$symbol][] = $quote;
+                $sampledIndex = count($quotes[$symbol]);
+                if ($sampledIndex < $targetCount) {
+                    $nextSampleIndex = (int) round(
+                        $sampledIndex * ($quoteCounts[$symbol] - 1) / ($targetCount - 1)
+                    );
+                }
+            }
+            $index++;
         }
     }
     $pdo = null;
@@ -78,8 +107,12 @@ try {
             'message' => 'Нет достаточно близких по времени снимков для одновременного открытия двух позиций.',
             'long_symbol' => $longSymbol,
             'short_symbol' => $shortSymbol,
-            'long_quotes' => count($quotes[$longSymbol]),
-            'short_quotes' => count($quotes[$shortSymbol]),
+            'long_quotes' => $quoteCounts[$longSymbol],
+            'short_quotes' => $quoteCounts[$shortSymbol],
+            'sampled_long_quotes' => count($quotes[$longSymbol]),
+            'sampled_short_quotes' => count($quotes[$shortSymbol]),
+            'long_sampling_interval' => $samplingSteps[$longSymbol],
+            'short_sampling_interval' => $samplingSteps[$shortSymbol],
         ]);
     }
     $summary = $simulation['summary'];
@@ -107,8 +140,12 @@ try {
         'end_day' => $endValue,
         'starting_balance' => (float) $balance,
         'fee_percent' => (float) $feePercent,
-        'long_quotes' => count($quotes[$longSymbol]),
-        'short_quotes' => count($quotes[$shortSymbol]),
+        'long_quotes' => $quoteCounts[$longSymbol],
+        'short_quotes' => $quoteCounts[$shortSymbol],
+        'sampled_long_quotes' => count($quotes[$longSymbol]),
+        'sampled_short_quotes' => count($quotes[$shortSymbol]),
+        'long_sampling_interval' => $samplingSteps[$longSymbol],
+        'short_sampling_interval' => $samplingSteps[$shortSymbol],
         'raw_aligned_points' => $summary['aligned_points'],
         'summary' => $summary,
         'points' => $points,
