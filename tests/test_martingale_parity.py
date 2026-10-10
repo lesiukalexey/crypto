@@ -115,6 +115,26 @@ class MartingaleParityTests(unittest.TestCase):
         self.assertEqual(numba_result[1], 1)
         self.assertLessEqual(float(numba_result[0]), -0.2)
 
+    def test_chain_loss_crossed_during_quote_gap_closes_at_next_observation(self):
+        prices = np.asarray([100.0, 100.0, 60.0])
+        quotes = QuoteArrays(
+            prices, prices, prices,
+            np.asarray([0.0, 60.0, 660.0]),
+        )
+        bid_tree, ask_tree = PriceTree(quotes.bids), PriceTree(quotes.asks)
+        numba_result = simulate(
+            quotes, [0], [False], bid_tree, ask_tree, 10.0, 0.0,
+            None, None, "simple", "immediate", 2, "scaled", 1.0, None,
+        )
+        python_result = simulate_martingale(
+            quotes, [0], [False], bid_tree, ask_tree, 10.0, 0.0,
+            None, None, "simple", "immediate", 2, "scaled", 1.0, None,
+        )
+        self.assert_parity(numba_result, python_result)
+        self.assertEqual(numba_result[1], 1)
+        # No quote exists inside the 10-minute gap, so the 1-USDT limit can overshoot.
+        self.assertAlmostEqual(float(numba_result[0]), -2.0, delta=1e-9)
+
     def test_daily_loss_limit_blocks_new_chains_until_the_next_day(self):
         prices = np.asarray([10.0, 7.5, 0.5, 0.5, 1.0, 1.0, 1.0])
         quotes = QuoteArrays(prices, prices, prices, np.arange(len(prices), dtype=np.float64))
