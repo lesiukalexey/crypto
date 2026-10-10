@@ -124,31 +124,35 @@ def import_symbol(
     if last_ms < start_ms:
         return 0, 0, 0
 
-    candle_rows: dict[int, list[str]] = {}
+    totals = {"candles_received": 0, "candles_inserted": 0, "snapshots_inserted": 0}
     page_start = start_ms
     page_count = math.ceil((last_ms - start_ms + INTERVAL_MS) / (PAGE_CANDLES * INTERVAL_MS))
     page_number = 0
     while page_start <= last_ms:
         page_last = min(page_start + (PAGE_CANDLES - 1) * INTERVAL_MS, last_ms)
         rows = fetch_page(category, symbol, page_start, page_last, timeout)
+        candle_rows: dict[int, list[str]] = {}
         for row in rows:
             timestamp = int(row[0])
             if page_start <= timestamp <= page_last:
                 candle_rows[timestamp] = row
+        candles = [candle_rows[key] for key in sorted(candle_rows)]
+        try:
+            raw_inserted = insert_historical_candles(connection, category, symbol, INTERVAL, candles)
+            snapshots_inserted = insert_historical_candle_snapshots(
+                connection, category, symbol, INTERVAL, page_start, page_last + INTERVAL_MS,
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        totals["candles_received"] += len(candles)
+        totals["candles_inserted"] += raw_inserted
+        totals["snapshots_inserted"] += snapshots_inserted
         page_number += 1
-        on_page(page_number, page_count)
+        on_page(page_number, page_count, len(candles), raw_inserted, snapshots_inserted)
         page_start = page_last + INTERVAL_MS
 
-    candles = [candle_rows[key] for key in sorted(candle_rows)]
-    try:
-        raw_inserted = insert_historical_candles(connection, category, symbol, INTERVAL, candles)
-        snapshots_inserted = insert_historical_candle_snapshots(
-            connection, category, symbol, INTERVAL, start_ms, end_exclusive_ms,
-        )
-        return len(candles), raw_inserted, snapshots_inserted
-    except Exception:
-        connection.rollback()
-        raise
+    return totals["candles_received"], totals["candles_inserted"], totals["snapshots_inserted"]
 
 
 def main() -> int:
@@ -220,18 +224,25 @@ def main() -> int:
             if start_ms is None:
                 continue
             symbol_pages = math.ceil(max(0, end_exclusive_ms - start_ms) / (PAGE_CANDLES * INTERVAL_MS))
-            write_status(args.status_file, {
-                "status": "running", "progress": int(page_offset * 100 / max(1, total_pages)),
-                "start_day": "per-symbol latest" if args.from_latest else args.start_date,
-                "end_day": end_date_value, "symbol_count": len(symbols),
-                "completed_symbols": symbol_index - 1, "current_symbol": symbol, **totals,
-                "message": f"Загружаю {symbol} ({symbol_index}/{len(symbols)})…",
-            })
+            completed_pages_for_symbol = [0]
 
-            def on_page(page_number: int, page_count: int) -> None:
+            def on_page(
+                page_number: int,
+                page_count: int,
+                page_received: int,
+                page_inserted: int,
+                page_snapshots: int,
+            ) -> None:
+                totals["candles_received"] += page_received
+                totals["candles_inserted"] += page_inserted
+                totals["snapshots_inserted"] += page_snapshots
+                completed_pages_for_symbol[0] = page_number
                 current_pages = page_offset + page_number
+                overall_progress = round(current_pages * 100 / max(1, total_pages), 2)
+                symbol_progress = round(page_number * 100 / max(1, page_count), 1)
                 write_status(args.status_file, {
-                    "status": "running", "progress": int(current_pages * 100 / max(1, total_pages)),
+                    "status": "running", "progress": overall_progress,
+                    "symbol_progress": symbol_progress,
                     "start_day": "per-symbol latest" if args.from_latest else args.start_date,
                     "end_day": end_date_value, "symbol_count": len(symbols),
                     "completed_symbols": symbol_index - 1, "current_symbol": symbol,
@@ -239,21 +250,26 @@ def main() -> int:
                     "message": f"{symbol}: страница {page_number} из {page_count}",
                 })
 
+            write_status(args.status_file, {
+                "status": "running", "progress": round(page_offset * 100 / max(1, total_pages), 2),
+                "start_day": "per-symbol latest" if args.from_latest else args.start_date,
+                "end_day": end_date_value, "symbol_count": len(symbols),
+                "completed_symbols": symbol_index - 1, "current_symbol": symbol, **totals,
+                "message": f"Загружаю {symbol} ({symbol_index}/{len(symbols)})…",
+            })
+
             try:
                 received, inserted, snapshots = import_symbol(
                     connection, category, symbol, start_ms, end_exclusive_ms, args.timeout, on_page,
                 )
-                totals["candles_received"] += received
-                totals["candles_inserted"] += inserted
-                totals["snapshots_inserted"] += snapshots
                 logging.info("%s: fetched=%s archived=%s snapshots_added=%s", symbol, received, inserted, snapshots)
             except Exception as exc:
                 connection.rollback()
                 failures.append({"symbol": symbol, "message": str(exc)[:500]})
                 logging.exception("Historical import failed for %s", symbol)
-            page_offset += symbol_pages
+            page_offset += completed_pages_for_symbol[0]
             write_status(args.status_file, {
-                "status": "running", "progress": int(page_offset * 100 / max(1, total_pages)),
+                "status": "running", "progress": round(page_offset * 100 / max(1, total_pages), 2),
                 "start_day": "per-symbol latest" if args.from_latest else args.start_date,
                 "end_day": end_date_value, "symbol_count": len(symbols),
                 "completed_symbols": symbol_index,

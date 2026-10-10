@@ -1201,7 +1201,14 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 function renderHistoryImportProgress(status) {
     historyImportStatus.dataset.status = status.status || 'running';
     let message = status.message || 'Загружаю исторические свечи…';
-    if (status.status === 'running') message += ` · ${status.progress || 0}%`;
+    if (status.status === 'running') {
+        const overall = Number(status.progress || 0).toLocaleString('ru-RU', {minimumFractionDigits:1, maximumFractionDigits:2});
+        const symbolProgress = Number.isFinite(Number(status.symbol_progress))
+            ? Number(status.symbol_progress)
+            : Number(status.current_page || 0) * 100 / Math.max(1, Number(status.symbol_pages || 1));
+        message += ` · по паре ${symbolProgress.toLocaleString('ru-RU', {maximumFractionDigits:1})}% · всего ${overall}%`;
+        if (Number.isFinite(Number(status.candles_received))) message += ` · получено свечей: ${Number(status.candles_received).toLocaleString('ru-RU')}`;
+    }
     if (Number.isFinite(Number(status.snapshots_inserted))) message += ` · в БД добавлено минут: ${Number(status.snapshots_inserted).toLocaleString('ru-RU')}`;
     historyImportStatus.textContent = message;
 }
