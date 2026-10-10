@@ -31,8 +31,7 @@ try {
     $kyiv = new DateTimeZone('Europe/Kyiv');
     $nowUtc = new DateTimeImmutable('now', new DateTimeZone('UTC'));
     $ageSeconds = max(0, $nowUtc->getTimestamp() - $latestUtc->getTimestamp());
-    $sameKyivDay = $latestUtc->setTimezone($kyiv)->format('Y-m-d') === $nowUtc->setTimezone($kyiv)->format('Y-m-d');
-    $status = $ageSeconds > 86400 ? 'stale-red' : ($ageSeconds >= 3600 || !$sameKyivDay ? 'stale-green' : 'fresh-yellow');
+    $status = $ageSeconds > 86400 ? 'stale-red' : ($ageSeconds >= 3600 ? 'fresh-yellow' : 'stale-green');
     $latestKyiv = $latestUtc->setTimezone($kyiv)->format('d.m.Y H:i:s');
     echo json_encode([
         'status' => $status,
