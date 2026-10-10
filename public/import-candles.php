@@ -137,6 +137,7 @@ try {
     if (!is_executable($python)) $python = '/usr/bin/python3';
     $command = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/launch-ranking-worker.py')
         . ' ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/import_historical_candles.py')
+        . ' --config ' . escapeshellarg($root . '/config.json')
         . ($scope === 'all' || $latestMode ? ' --all-enabled' : ' --symbol ' . escapeshellarg($symbols[0]))
         . ($latestMode ? ' --from-latest' : ' --start-date ' . escapeshellarg($startValue))
         . ' --end-date ' . escapeshellarg($endValue)
