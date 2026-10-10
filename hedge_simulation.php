@@ -21,7 +21,7 @@ function simulate_cross_hedge(
     $firstPoint = null;
     $lastPoint = null;
     $alignedPoints = 0;
-    $chartPointLimit = 1800;
+    $chartPointLimit = 25000;
     $chartRangeStarts = [];
     $chartRangeEnds = [];
     foreach ([$longRows, $shortRows] as $rows) {

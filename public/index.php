@@ -410,7 +410,7 @@ foreach ($rows as $row) {
         $chartPriceMax = $chartPriceMax === null ? $value : max($chartPriceMax, $value);
     }
 }
-$chartPointLimit = 5000;
+$chartPointLimit = 25000;
 $chartPointCount = min($visibleQuoteCount, $chartPointLimit);
 $points = [];
 $visibleIndex = 0;

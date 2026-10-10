@@ -71,7 +71,7 @@ try {
     $quotes = [];
     $quoteCounts = [];
     $samplingSteps = [];
-    $sampleLimit = 5000;
+    $sampleLimit = 25000;
     foreach ([$longSymbol, $shortSymbol] as $symbol) {
         $params = [$config['category'], $symbol, $startUtc, $endUtc];
         $countStatement->execute($params);
