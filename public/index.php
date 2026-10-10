@@ -451,7 +451,8 @@ if ($cachedStandardTradeEvents !== null) {
     $trades = $cachedStandardTradeEvents;
     $balance = $startingBalance;
 } elseif ($martingaleMode !== 'none') {
-    $appendLegTrades = static function (array $legs, int $exitIndex, string $reason, string &$currentBalance) use (&$trades, $rows, $feeRate, $martingaleMode): void {
+    $chainAttempt = 0;
+    $appendLegTrades = static function (array $legs, int $exitIndex, string $reason, string &$currentBalance) use (&$trades, &$chainAttempt, $rows, $feeRate, $martingaleMode): void {
         $exit = $rows[$exitIndex];
         foreach ($legs as $leg) {
             $short = $leg['is_short'];
@@ -461,7 +462,7 @@ if ($cachedStandardTradeEvents !== null) {
             $exitFee = bcmul(bcmul($leg['quantity'], $exitPrice, 24), $feeRate, 24);
             $net = bcsub(bcsub($gross, $leg['entry_fee'], 24), $exitFee, 24);
             $currentBalance = bcadd($currentBalance, $net, 24);
-            $trades[] = ['entry' => $leg['entry'], 'exit' => $exit, 'quantity' => $leg['quantity'], 'entry_price' => $leg['entry_price'], 'exit_price' => $exitPrice, 'entry_fee' => $leg['entry_fee'], 'exit_fee' => $exitFee, 'gross' => $gross, 'net' => $net, 'balance' => $currentBalance, 'reason' => $reason, 'is_short' => $short];
+            $trades[] = ['entry' => $leg['entry'], 'exit' => $exit, 'quantity' => $leg['quantity'], 'entry_price' => $leg['entry_price'], 'exit_price' => $exitPrice, 'entry_fee' => $leg['entry_fee'], 'exit_fee' => $exitFee, 'gross' => $gross, 'net' => $net, 'balance' => $currentBalance, 'reason' => $reason, 'is_short' => $short, 'chain_id' => $chainAttempt];
         }
     };
     $finalScale = (string) (2 ** ($martingaleAttempts - 1));
@@ -484,7 +485,6 @@ if ($cachedStandardTradeEvents !== null) {
         $baseStake = bccomp($availableForStakes, '0', 24) > 0 ? bcdiv($availableForStakes, $requiredPerBase, 24) : '0';
     }
     $dailyRealizedByDay = [];
-    $chainAttempt = 0;
     while (bccomp($balance, '0', 24) > 0 && $chainAttempt < 100000 && $martingaleOrderConstraintError === null) {
         $signal = $isImmediateEntry
             ? ($chainAttempt === 0 && $rowCount > 1 ? [0, $immediateDirection === 'short'] : null)
@@ -787,6 +787,34 @@ while (bccomp($balance, '0', 24) > 0) {
     $tradeEntryIndex = $exitIndex + 1;
 }
 }
+$martingaleChainResults = [];
+if ($martingaleMode !== 'none') {
+    foreach ($trades as $trade) {
+        $chainId = (int) ($trade['chain_id'] ?? 0);
+        $martingaleChainResults[$chainId] = bcadd($martingaleChainResults[$chainId] ?? '0', $trade['net'], 24);
+    }
+    ksort($martingaleChainResults, SORT_NUMERIC);
+}
+$martingaleChainCount = count($martingaleChainResults);
+$martingaleWorstChain = $martingaleChainCount > 0 ? min($martingaleChainResults) : null;
+$martingaleMedianChain = null;
+$martingaleMaxDrawdown = '0';
+if ($martingaleChainCount > 0) {
+    $sortedChainResults = array_values($martingaleChainResults);
+    usort($sortedChainResults, static fn (string $a, string $b): int => bccomp($a, $b, 24));
+    $middle = intdiv($martingaleChainCount, 2);
+    $martingaleMedianChain = $martingaleChainCount % 2 === 1
+        ? $sortedChainResults[$middle]
+        : bcdiv(bcadd($sortedChainResults[$middle - 1], $sortedChainResults[$middle], 24), '2', 24);
+    $chainEquity = $startingBalance;
+    $chainPeak = $startingBalance;
+    foreach ($martingaleChainResults as $chainResult) {
+        $chainEquity = bcadd($chainEquity, $chainResult, 24);
+        if (bccomp($chainEquity, $chainPeak, 24) > 0) $chainPeak = $chainEquity;
+        $drawdown = bcsub($chainPeak, $chainEquity, 24);
+        if (bccomp($drawdown, $martingaleMaxDrawdown, 24) > 0) $martingaleMaxDrawdown = $drawdown;
+    }
+}
 if ($martingaleMode === 'none' && $cachedStandardTradeEvents === null
     && $closedTradeLedgerKey !== null && $ledgerSourceDay !== null) {
     try {
@@ -987,7 +1015,8 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <div class="chart-display"><div class="chart-wrap"><svg id="chart" role="img" aria-label="График bid, ask и last для <?= h($symbol) ?>"></svg><div id="tooltip" aria-hidden="true"></div></div><nav class="chart-day-controls" id="chart-day-controls" aria-label="День на графике"><button class="chart-day-button" type="button" data-chart-day="" aria-pressed="true">Весь график</button></nav></div>
 <?php endif; ?></section>
 <section class="panel" id="results"><div class="chart-head"><h2>Сделки стратегии</h2><span class="count"><?= $closedTradeCount ?> закрытых сделок<?php if ($openTradeCount > 0): ?> · <?= $openTradeCount ?> открыто на последнем снимке<?php endif; ?></span></div>
-<div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div></div>
+<div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div><?php if ($martingaleMode !== 'none'): ?><div class="stat"><span>Цепочки в расчёте</span><strong><?= $martingaleChainCount ?></strong></div><div class="stat"><span>Медианный результат цепочки</span><strong><?= $martingaleMedianChain === null ? '—' : (($martingaleMedianChain[0] === '-' ? '' : '+') . money($martingaleMedianChain)) ?> USDT</strong></div><div class="stat"><span>Худшая цепочка</span><strong class="<?= $martingaleWorstChain !== null && bccomp($martingaleWorstChain, '0', 24) < 0 ? 'loss' : '' ?>"><?= $martingaleWorstChain === null ? '—' : money($martingaleWorstChain) ?> USDT</strong></div><div class="stat"><span>Просадка по результатам цепочек</span><strong><?= money($martingaleMaxDrawdown) ?> USDT</strong></div><?php endif; ?></div>
+<?php if ($martingaleMode !== 'none' && $martingaleChainCount > 0): ?><p class="small-note">Метрики сгруппированы по одной мартингейл-попытке. Просадка рассчитана по балансу после каждой цепочки; позиция, оставшаяся открытой на последнем снимке, учитывается по этому снимку.</p><?php endif; ?>
 <?php if (count($rows) < 2): ?><div class="empty">Нужно минимум два снимка в выбранном периоде, чтобы выполнить симуляцию.</div>
 <?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 1, ',', ' ') . '% ' . ($entrySignalMode === 'within' ? 'в пределах ' : 'за ') . $momentumLookback . ' снимков.' ?></div>
 <?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Сумма входа</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>

@@ -18,6 +18,7 @@ import pymysql
 
 from app import load_config
 from database import connect_mysql
+from contract_rules import load_contract_specs, numba_market_order_rules
 import portfolio_ranking as portfolio_engine
 from portfolio_ranking import exit_specs
 from ranking_checkpoints import daily_quote_boundaries
@@ -110,6 +111,13 @@ def main() -> int:
             return 0
 
         config = load_config(Path(__file__).with_name("config.json"))
+        contract_rules_by_symbol = {}
+        if args.martingale_mode != "none":
+            contract_specs = load_contract_specs(config["category"])
+            contract_rules_by_symbol = {
+                symbol: numba_market_order_rules(spec, leverage=1.0)
+                for symbol, spec in contract_specs.items()
+            }
         end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
         start_utc = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV).astimezone(timezone.utc).replace(tzinfo=None)
@@ -125,7 +133,7 @@ def main() -> int:
             )
         else:
             quote_query = (
-                "SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price "
+                "SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price, quote_source "
                 "FROM quote_snapshots WHERE category = %s AND received_at_utc >= %s AND received_at_utc < %s "
                 "ORDER BY symbol, received_at_utc, id"
             )
@@ -234,6 +242,7 @@ def main() -> int:
                             target_policy,
                             args.martingale_max_chain_loss,
                             args.martingale_max_day_loss,
+                            order_rules=contract_rules_by_symbol.get(symbol),
                         )
                         pnl, trade_count = simulation_result[:2]
                         chain_count = int(simulation_result[2]) if len(simulation_result) > 2 else trade_count
