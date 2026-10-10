@@ -2552,7 +2552,7 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
     const requestVersion = ++portfolioRankingRequestVersion;
     portfolioRankingTimer.reset();
     portfolioRankingPanel.hidden = false;
-    portfolioRankingContent.hidden = cachedOnly || portfolioRankingCollapsed;
+    portfolioRankingContent.hidden = portfolioRankingCollapsed;
     if (!cachedOnly) {
         portfolioRankingTimer.start();
         portfolioRankingStatus.textContent = 'Подготавливаю общий рейтинг…';
@@ -2575,7 +2575,10 @@ async function loadPortfolioRanking({cachedOnly = false} = {}) {
             ranking = await response.json();
             if (requestVersion !== portfolioRankingRequestVersion) return;
             if (!response.ok || ranking.status === 'error') throw new Error(ranking.message || 'Не удалось рассчитать общий рейтинг');
-            if (cachedOnly && ranking.status === 'missing') return;
+            if (cachedOnly && ranking.status === 'missing') {
+                portfolioRankingStatus.textContent = 'Сохранённый общий рейтинг для выбранного периода и параметров не найден. Нажмите ↻, чтобы запустить расчёт.';
+                return;
+            }
             portfolioRankingDiagnosticsText(ranking);
             if (ranking.status === 'pending') {
                 sawPending = true;
