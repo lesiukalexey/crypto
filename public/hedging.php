@@ -152,7 +152,12 @@ function render(data){
   const hit=add('rect',{x:pad.l,y:pad.t,width:width-pad.l-pad.r,height:height-pad.t-pad.b,fill:'transparent'});
   hit.addEventListener('pointermove',event=>{
     const rect=chart.getBoundingClientRect(),ratio=(event.clientX-rect.left)/rect.width;
-    const index=Math.max(0,Math.min(points.length-1,Math.round(ratio*(points.length-1)))),point=points[index],x=X(Number(point.t));
+    const chartX=ratio*width,plotRatio=Math.max(0,Math.min(1,(chartX-pad.l)/(width-pad.l-pad.r)));
+    const targetTime=xmin+plotRatio*(xmax-xmin);
+    let lowIndex=0,highIndex=points.length-1;
+    while(lowIndex<highIndex){const middle=Math.floor((lowIndex+highIndex)/2);if(Number(points[middle].t)<targetTime)lowIndex=middle+1;else highIndex=middle;}
+    if(lowIndex>0&&Math.abs(Number(points[lowIndex-1].t)-targetTime)<Math.abs(Number(points[lowIndex].t)-targetTime))lowIndex--;
+    const point=points[lowIndex],x=X(Number(point.t));
     cursor.setAttribute('x1',x);cursor.setAttribute('x2',x);cursor.setAttribute('visibility','visible');
     tooltip.innerHTML=netView
       ? `<strong>${new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев</strong><br>Чистый итог: ${money(point.net_pnl)}`

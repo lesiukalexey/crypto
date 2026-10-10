@@ -70,7 +70,7 @@ try {
     $quotes = [];
     $quoteCounts = [];
     $samplingSteps = [];
-    $sampleLimit = 25000;
+    $sampleLimit = 5000;
     foreach ([$longSymbol, $shortSymbol] as $symbol) {
         $params = [$config['category'], $symbol, $startUtc, $endUtc];
         $countStatement->execute($params);
@@ -122,16 +122,6 @@ try {
         $summary[$field] = round($summary[$field], 10);
     }
     $points = $simulation['points'];
-    $limit = 1800;
-    if (count($points) > $limit) {
-        $sampled = [];
-        $lastIndex = count($points) - 1;
-        for ($index = 0; $index < $limit; $index++) {
-            $sourceIndex = (int) round($index * $lastIndex / ($limit - 1));
-            $sampled[] = $points[$sourceIndex];
-        }
-        $points = $sampled;
-    }
     hedge_respond([
         'status' => 'ready',
         'long_symbol' => $longSymbol,

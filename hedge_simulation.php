@@ -18,9 +18,19 @@ function simulate_cross_hedge(
     $shortCursor = 0;
     $entry = null;
     $points = [];
+    $firstPoint = null;
     $lastPoint = null;
     $alignedPoints = 0;
-    $chartPointLimit = 3600;
+    $chartPointLimit = 1800;
+    $chartRangeStarts = [];
+    $chartRangeEnds = [];
+    foreach ([$longRows, $shortRows] as $rows) {
+        if ($rows === []) continue;
+        $chartRangeStarts[] = hedge_timestamp_ms($rows[0]);
+        $chartRangeEnds[] = hedge_timestamp_ms($rows[count($rows) - 1]);
+    }
+    $chartStartMs = $chartRangeStarts === [] ? 0 : min($chartRangeStarts);
+    $chartEndMs = $chartRangeEnds === [] ? $chartStartMs : max($chartRangeEnds);
     $allocation = $startingBalance / 2.0;
     $longNotional = $allocation / (1.0 + $feeRate);
     $shortNotional = $allocation / (1.0 + $feeRate);
@@ -81,17 +91,15 @@ function simulate_cross_hedge(
             'long_close' => $longBid,
             'short_close' => $shortAsk,
         ];
+        $firstPoint ??= $point;
         $lastPoint = $point;
         $alignedPoints++;
-        $points[] = $point;
-        // Keep enough points for the chart while allowing long date ranges.
-        if (count($points) > $chartPointLimit) {
-            $points = array_values(array_filter(
-                $points,
-                static fn (array $_point, int $index): bool => $index % 2 === 0,
-                ARRAY_FILTER_USE_BOTH,
-            ));
-        }
+        $bucket = $chartEndMs > $chartStartMs
+            ? (int) floor(($timestampMs - $chartStartMs) * ($chartPointLimit - 1) / ($chartEndMs - $chartStartMs))
+            : 0;
+        $bucket = max(0, min($chartPointLimit - 1, $bucket));
+        // Keep the latest eligible point in each uniform time bucket.
+        $points[$bucket] = $point;
     }
 
     if ($entry === null || $points === []) {
@@ -99,6 +107,8 @@ function simulate_cross_hedge(
     }
 
     $last = $lastPoint;
+    $points = array_values($points);
+    $points[0] = $firstPoint;
     $points[count($points) - 1] = $last;
     return [
         'entry' => $entry,
