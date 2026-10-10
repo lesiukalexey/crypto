@@ -84,25 +84,74 @@ function withQuoteSets(array $config, ?callable $update = null): array
     @chmod($path . '.lock', 0600);
     try {
         $shouldSave = !is_file($path) || $update !== null;
+        $enabledSymbols = enabledTickerSymbols($config);
+        $baseListInitialized = false;
         if (is_file($path)) {
             $stored = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
             if (!is_array($stored) || !is_array($stored['sets'] ?? null)) {
                 throw new RuntimeException('Файл наборов котировок имеет неверный формат.');
             }
             $sets = $stored['sets'];
+            $baseListInitialized = ($stored['base_list_initialized'] ?? false) === true;
         } else {
             $sets = [[
                 'id' => bin2hex(random_bytes(8)),
-                'name' => 'Мой список',
-                'symbols' => enabledTickerSymbols($config),
+                'name' => 'Базовый список',
+                'symbols' => $enabledSymbols,
             ]];
+        }
+
+        // Migrate the automatically-created BIT-128 list in place, preserving
+        // its ID and membership. Keep user-created lists and their members.
+        $baseIndex = null;
+        $legacyIndex = null;
+        $normalizeName = static fn (string $name): string => function_exists('mb_strtolower')
+            ? mb_strtolower(trim($name), 'UTF-8')
+            : strtolower(trim($name));
+        foreach ($sets as $index => $set) {
+            if (!is_array($set)) continue;
+            $name = (string) ($set['name'] ?? '');
+            if ($normalizeName($name) === $normalizeName('Базовый список')) $baseIndex = $index;
+            if ($normalizeName($name) === $normalizeName('Мой список')) $legacyIndex = $index;
+        }
+        if ($baseIndex === null) {
+            if ($legacyIndex !== null) {
+                $baseIndex = $legacyIndex;
+                if (($sets[$baseIndex]['name'] ?? '') !== 'Базовый список') {
+                    $sets[$baseIndex]['name'] = 'Базовый список';
+                    $shouldSave = true;
+                }
+            } else {
+                $sets[] = ['id' => bin2hex(random_bytes(8)), 'name' => 'Базовый список', 'symbols' => []];
+                $baseIndex = array_key_last($sets);
+                $shouldSave = true;
+            }
+        } elseif (($sets[$baseIndex]['name'] ?? '') !== 'Базовый список') {
+            $sets[$baseIndex]['name'] = 'Базовый список';
+            $shouldSave = true;
+        }
+        $baseMembers = array_values(array_unique(array_map('strval', is_array($sets[$baseIndex]['symbols'] ?? null) ? $sets[$baseIndex]['symbols'] : [])));
+        if (!$baseListInitialized) {
+            foreach ($enabledSymbols as $symbol) {
+                if (!in_array($symbol, $baseMembers, true)) {
+                    $baseMembers[] = $symbol;
+                    $shouldSave = true;
+                }
+            }
+            $baseListInitialized = true;
+            $shouldSave = true;
+        }
+        sort($baseMembers, SORT_STRING);
+        if ($baseMembers !== ($sets[$baseIndex]['symbols'] ?? [])) {
+            $sets[$baseIndex]['symbols'] = $baseMembers;
+            $shouldSave = true;
         }
         if ($update !== null) $sets = $update($sets);
         if (!is_array($sets)) throw new RuntimeException('Не удалось обновить наборы котировок.');
 
         if ($shouldSave) {
             $temporary = $path . '.tmp';
-            $json = json_encode(['sets' => array_values($sets)], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+            $json = json_encode(['base_list_initialized' => $baseListInitialized, 'sets' => array_values($sets)], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
             if (file_put_contents($temporary, $json, LOCK_EX) === false || !rename($temporary, $path)) {
                 @unlink($temporary);
                 throw new RuntimeException('Не удалось сохранить наборы котировок.');

@@ -28,12 +28,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 $symbol = strtoupper(trim((string) ($_POST['symbol'] ?? '')));
                 if ($action === 'set_create') {
                     $nameLength = function_exists('mb_strlen') ? mb_strlen($name, 'UTF-8') : strlen($name);
-                    if ($name === '' || $nameLength > 100) throw new InvalidArgumentException('Введите название набора длиной до 100 символов.');
+                    if ($name === '' || $nameLength > 100) throw new InvalidArgumentException('Введите название списка длиной до 100 символов.');
                     $normalizedName = function_exists('mb_strtolower') ? mb_strtolower($name, 'UTF-8') : strtolower($name);
                     foreach ($sets as $set) {
                         $existingName = (string) ($set['name'] ?? '');
                         $normalizedExisting = function_exists('mb_strtolower') ? mb_strtolower($existingName, 'UTF-8') : strtolower($existingName);
-                        if ($normalizedExisting === $normalizedName) throw new InvalidArgumentException('Набор с таким названием уже существует.');
+                        if ($normalizedExisting === $normalizedName) throw new InvalidArgumentException('Список с таким названием уже существует.');
                     }
                     $sets[] = ['id' => bin2hex(random_bytes(8)), 'name' => $name, 'symbols' => []];
                     return $sets;
@@ -43,7 +43,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 foreach ($sets as $index => $set) {
                     if (($set['id'] ?? '') === $setId) { $setIndex = $index; break; }
                 }
-                if ($setIndex === null) throw new InvalidArgumentException('Набор котировок не найден.');
+                if ($setIndex === null) throw new InvalidArgumentException('Список тикеров не найден.');
                 $configured = configuredTickerSymbols($config);
                 if (!in_array($symbol, $configured, true)) throw new InvalidArgumentException('Укажите настроенную торговую пару.');
                 $members = array_values(array_unique(array_map('strval', $sets[$setIndex]['symbols'] ?? [])));
@@ -60,7 +60,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         } catch (InvalidArgumentException $error) {
             settingsRespond(['status' => 'error', 'error' => $error->getMessage()], 422);
         } catch (Throwable) {
-            settingsRespond(['status' => 'error', 'error' => 'Не удалось сохранить набор котировок.'], 500);
+            settingsRespond(['status' => 'error', 'error' => 'Не удалось сохранить список тикеров.'], 500);
         }
     }
 
@@ -91,17 +91,19 @@ $quoteSets = loadQuoteSets($config);
 <style>
 .market-cap-status{margin:8px 0;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}.ticker-row-main{min-width:0}.ticker-cap-rank{margin-top:2px;color:#aebbe0;font-size:12px;font-variant-numeric:tabular-nums}.ticker-cap-unranked{color:var(--muted)}@media(max-width:600px){.ticker-row{gap:10px}.ticker-cap-rank{max-width:calc(100vw - 118px);overflow-wrap:anywhere}}
 .quote-sets-panel{padding:18px 20px}.quote-sets-panel h2{margin:2px 0 6px;font-size:20px}.quote-sets-intro{margin:0 0 14px;color:var(--muted);font-size:13px}.quote-set-create,.quote-set-add{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.quote-set-create input,.quote-set-add select{min-width:220px;padding:9px 11px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.quote-set-create button,.quote-set-add button{min-width:0;padding:9px 13px;border:0;border-radius:9px;background:#607df4;color:#fff;font:inherit;font-weight:700;cursor:pointer}.quote-set-list{display:grid;gap:12px;margin-top:16px}.quote-set-card{padding:14px;border:1px solid var(--line);border-radius:12px;background:#0e1527}.quote-set-card h3{margin:0 0 10px;font-size:16px}.quote-set-members{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px;padding:0;list-style:none}.quote-set-members li{display:inline-flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #34415e;border-radius:8px;color:#dce5ff;font-size:13px}.quote-set-remove{padding:0;border:0;background:none;color:#ff9eaa;font:inherit;cursor:pointer}.quote-set-empty{margin:0 0 12px;color:var(--muted);font-size:13px}.quote-set-status{min-height:20px;margin:10px 0 0;color:var(--muted);font-size:13px}.quote-set-status.error{color:#ff9eaa}@media(max-width:600px){.quote-sets-panel{padding:14px}.quote-set-create input,.quote-set-add select{min-width:0;width:100%}.quote-set-create button,.quote-set-add button{width:100%}}
+.settings-subnav{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 4px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.settings-subnav a{padding:8px 13px;border-radius:8px;color:#b7c1d5;text-decoration:none}.settings-subnav a:hover,.settings-subnav a:focus-visible{background:#263968;color:#fff;outline:none}.settings-section{scroll-margin-top:18px}.settings-section>h2{margin:2px 0 8px;font-size:20px}@media(max-width:600px){.settings-subnav{width:100%}.settings-subnav a{flex:1;text-align:center}}
 </style>
 </head>
 <body><main class="wrap">
 <nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php" aria-current="page">Настройки</a></nav>
 <h1>Настройки</h1><p class="intro">Выключенные тикеры продолжают собираться и сохраняться в MySQL, но скрыты на других страницах и исключены из расчётов. История котировок и избранное остаются на месте.</p><p class="market-cap-status" id="market-cap-status" role="status" aria-live="polite">Загружаю капитализацию тикеров…</p>
-<section class="panel" aria-label="Доступность тикеров">
+<nav class="settings-subnav" aria-label="Разделы настроек"><a href="#ticker-lists">Списки тикеров</a><a href="#active-tickers">Активные тикеры</a></nav>
+<section class="panel quote-sets-panel settings-section" id="ticker-lists" aria-labelledby="quote-sets-heading"><h2 id="quote-sets-heading">Списки тикеров</h2><p class="quote-sets-intro">Создавайте списки и добавляйте в каждый нужные тикеры по одному.</p><form class="quote-set-create" id="quote-set-create"><input type="text" name="name" maxlength="100" placeholder="Название списка" aria-label="Название нового списка тикеров" required><button type="submit">Создать список</button></form><p class="quote-set-status" id="quote-set-status" role="status" aria-live="polite"></p><div class="quote-set-list" id="quote-set-list"></div></section>
+<section class="panel settings-section" id="active-tickers" aria-labelledby="active-tickers-heading"><h2 id="active-tickers-heading">Активные тикеры</h2>
 <?php foreach ($configuredSymbols as $symbol): $isEnabled = isset($enabledLookup[$symbol]); ?>
 <div class="ticker-row"><div class="ticker-row-main"><div class="ticker-name"><?= settingsH($symbol) ?></div><div class="ticker-cap-rank" data-market-cap-for="<?= settingsH($symbol) ?>">Загружаю капитализацию…</div><div class="ticker-state" data-state-for="<?= settingsH($symbol) ?>"><?= $isEnabled ? 'Включён' : 'Выключен' ?></div></div><label class="switch"><input type="checkbox" role="switch" data-symbol="<?= settingsH($symbol) ?>" aria-label="Участвует тикер <?= settingsH($symbol) ?>" <?= $isEnabled ? 'checked' : '' ?>><span class="switch-track"></span></label></div>
 <?php endforeach; ?>
 </section><p class="settings-status" id="settings-status" role="status" aria-live="polite"></p>
-<section class="panel quote-sets-panel" aria-labelledby="quote-sets-heading"><h2 id="quote-sets-heading">Наборы котировок</h2><p class="quote-sets-intro">Создавайте списки пар для быстрого выбора и добавляйте котировки по одной.</p><form class="quote-set-create" id="quote-set-create"><input type="text" name="name" maxlength="100" placeholder="Название набора" aria-label="Название нового набора" required><button type="submit">Создать набор</button></form><p class="quote-set-status" id="quote-set-status" role="status" aria-live="polite"></p><div class="quote-set-list" id="quote-set-list"></div></section>
 </main><script>
 const statusNode=document.querySelector('#settings-status');
 const quoteSetStatusNode=document.querySelector('#quote-set-status');
@@ -119,34 +121,34 @@ function renderQuoteSets(){
             for(const symbol of members){
                 const item=document.createElement('li');
                 const label=document.createElement('span');label.textContent=symbol;
-                const remove=document.createElement('button');remove.type='button';remove.className='quote-set-remove';remove.textContent='×';remove.title=`Удалить ${symbol} из набора ${set.name}`;remove.setAttribute('aria-label',remove.title);remove.dataset.setId=set.id;remove.dataset.removeSymbol=symbol;
+                const remove=document.createElement('button');remove.type='button';remove.className='quote-set-remove';remove.textContent='×';remove.title=`Удалить ${symbol} из списка ${set.name}`;remove.setAttribute('aria-label',remove.title);remove.dataset.setId=set.id;remove.dataset.removeSymbol=symbol;
                 item.append(label,remove);list.append(item);
             }
             card.append(list);
         }else{
-            const empty=document.createElement('p');empty.className='quote-set-empty';empty.textContent='В наборе пока нет котировок.';card.append(empty);
+            const empty=document.createElement('p');empty.className='quote-set-empty';empty.textContent='В списке пока нет тикеров.';card.append(empty);
         }
         const form=document.createElement('form');form.className='quote-set-add';form.dataset.setId=set.id;
-        const select=document.createElement('select');select.name='symbol';select.setAttribute('aria-label',`Добавить котировку в набор ${set.name}`);select.required=true;
+        const select=document.createElement('select');select.name='symbol';select.setAttribute('aria-label',`Добавить тикер в список ${set.name}`);select.required=true;
         const available=configuredQuoteSymbols.filter(symbol=>!members.includes(symbol));
         if(available.length){
-            const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Выберите котировку';placeholder.disabled=true;placeholder.selected=true;select.append(placeholder);
+            const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Выберите тикер';placeholder.disabled=true;placeholder.selected=true;select.append(placeholder);
             for(const symbol of available){const option=document.createElement('option');option.value=symbol;option.textContent=symbol;select.append(option)}
         }else{
             const option=document.createElement('option');option.value='';option.textContent='Все настроенные пары уже в наборе';select.append(option);select.disabled=true;
         }
-        const add=document.createElement('button');add.type='submit';add.textContent='Добавить котировку';add.disabled=!available.length;
+        const add=document.createElement('button');add.type='submit';add.textContent='Добавить тикер';add.disabled=!available.length;
         form.append(select,add);card.append(form);quoteSetListNode.append(card);
     }
 }
 async function saveQuoteSetAction(values){
-    quoteSetStatusNode.classList.remove('error');quoteSetStatusNode.textContent='Сохраняю набор…';
+    quoteSetStatusNode.classList.remove('error');quoteSetStatusNode.textContent='Сохраняю список…';
     try{
         const response=await fetch('settings.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams(values)});
         const result=await response.json();
-        if(!response.ok||result.status!=='ok')throw new Error(result.error||'Не удалось сохранить набор.');
-        quoteSets=result.sets;renderQuoteSets();quoteSetStatusNode.textContent='Набор сохранён.';return true;
-    }catch(error){quoteSetStatusNode.textContent=error.message||'Ошибка сохранения набора.';quoteSetStatusNode.classList.add('error');return false}
+        if(!response.ok||result.status!=='ok')throw new Error(result.error||'Не удалось сохранить список.');
+        quoteSets=result.sets;renderQuoteSets();quoteSetStatusNode.textContent='Список сохранён.';return true;
+    }catch(error){quoteSetStatusNode.textContent=error.message||'Ошибка сохранения списка.';quoteSetStatusNode.classList.add('error');return false}
 }
 renderQuoteSets();
 document.querySelector('#quote-set-create').addEventListener('submit',async event=>{
