@@ -14,6 +14,21 @@ function respond(array $payload, int $status = 200): never
     exit;
 }
 
+function savePortfolioRankingMetadata(string $path, array $metadata): void
+{
+    $temporaryPath = tempnam(dirname($path), '.portfolio-metadata-');
+    if ($temporaryPath === false) throw new RuntimeException('Не удалось подготовить параметры сохранённого рейтинга.');
+    try {
+        $json = json_encode($metadata, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (file_put_contents($temporaryPath, $json, LOCK_EX) === false || !rename($temporaryPath, $path)) {
+            throw new RuntimeException('Не удалось сохранить параметры рейтинга.');
+        }
+        @chmod($path, 0600);
+    } finally {
+        if (is_file($temporaryPath)) @unlink($temporaryPath);
+    }
+}
+
 try {
     $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
     $simulationCosts = rankingSimulationCosts($_GET);
@@ -93,8 +108,10 @@ try {
     }
     // Ignore legacy URL snapshot_ids: all ranking types share one frozen
     // snapshot per date range and generation, even across browser tabs.
+    $selectedSet = selectedTickerSet($config, trim((string) ($_GET['ticker_set'] ?? '')));
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
-    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config, trim((string) ($_GET['ticker_set'] ?? '')));
+    $selectedSymbols = array_fill_keys($selectedSet['symbols'], true);
+    $maxIds = array_intersect_key($maxIds, $selectedSymbols);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $entryProfileCount = count($ranking['immediate_directions']);
     foreach ($ranking['entry_profiles'] as $entryProfile) {
@@ -124,15 +141,63 @@ try {
     ];
     array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
     array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
-    array_push($keyParts, ...rankingContractRulesIdentity($config['category'], array_keys($maxIds)));
+    $contractRulesIdentity = rankingContractRulesIdentity($config['category'], array_keys($maxIds));
+    array_push($keyParts, ...$contractRulesIdentity);
     $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration);
     if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
     $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';
     $statusPath = $cacheDir . '/portfolio-' . $key . '.status.json';
+    $metadataPath = $cacheDir . '/portfolio-' . $key . '.meta.json';
+    $metadataRequestKeys = [
+        'ticker_set', 'start_day', 'end_day', 'save_mode', 'entry_config', 'balance', 'fee',
+        'martingale_mode', 'martingale_timing', 'martingale_attempts', 'martingale_max_chain_loss',
+        'martingale_max_day_loss', 'entry_signal_mode', 'entry_direction_mode', 'exit_confirmation_mode',
+        'exit_confirmation_snapshots', 'threshold_mode', 'threshold_ranges', 'window_mode', 'window_ranges',
+        'fixed_grid_mode', 'fixed_tp_ranges', 'fixed_sl_ranges', 'profit_ranges', 'loss_ranges',
+        'slippage_bps', 'include_funding',
+    ];
+    $metadata = [
+        'version' => 1,
+        'cache_key' => $key,
+        'ticker_set' => [
+            'id' => $selectedSet['id'],
+            'name' => $selectedSet['name'],
+            'symbols' => $selectedSet['symbols'],
+        ],
+        'start_day' => $startValue,
+        'end_day' => $endValue,
+        'request_params' => array_intersect_key($_GET, array_fill_keys($metadataRequestKeys, true)),
+        'parameters' => [
+            'category' => $config['category'],
+            'balance' => $balance,
+            'fee' => $fee,
+            'min_trades' => $minTrades,
+            'entry_config' => $entryConfig,
+            'ranking' => $ranking,
+            'martingale' => [
+                'mode' => $martingaleMode,
+                'timing' => $martingaleTiming,
+                'attempts' => $martingaleAttempts,
+                'risk_limits_usdt' => $martingaleRiskLimits,
+            ],
+            'simulation_costs' => $simulationCosts,
+            'contract_rules_identity' => $contractRulesIdentity,
+            'cache_generation' => $cacheGeneration,
+            'snapshot_revision' => $snapshotRevision,
+        ],
+    ];
+    $persistMetadata = static function () use ($metadataPath, $metadata): void {
+        try {
+            savePortfolioRankingMetadata($metadataPath, $metadata);
+        } catch (Throwable $metadataError) {
+            error_log('Unable to save portfolio ranking metadata: ' . $metadataError->getMessage());
+        }
+    };
     if (is_file($resultPath)) {
         $result = json_decode((string) file_get_contents($resultPath), true);
         if (is_array($result) && ($result['status'] ?? '') === 'ready') {
+            $persistMetadata();
             $finishedStatus = is_file($statusPath)
                 ? json_decode((string) file_get_contents($statusPath), true)
                 : null;
@@ -148,6 +213,8 @@ try {
     if ((string) ($_GET['cached_only'] ?? '') === '1') {
         respond(['status' => 'missing']);
     }
+
+    $persistMetadata();
 
     $status = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
     $statusAge = is_file($statusPath) ? time() - (int) filemtime($statusPath) : PHP_INT_MAX;
