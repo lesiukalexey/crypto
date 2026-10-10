@@ -26,7 +26,36 @@ if ($favoriteId !== '' && is_file($favoritesPath)) {
 }
 $symbols = enabledTickerSymbols($config);
 $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Kyiv'));
-$startDay = (string) ($_GET['start_day'] ?? '2026-10-06');
+$defaultStartDay = '2026-10-06';
+if (!array_key_exists('start_day', $_GET) && $symbols !== []) {
+    $db = $config['mysql'];
+    $passwordEnv = (string) ($db['password_env'] ?? '');
+    $password = $passwordEnv !== '' ? (getenv($passwordEnv) ?: '') : '';
+    if ($password !== '') {
+        try {
+            $pdo = new PDO(
+                sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $db['host'], $db['port'], $db['database']),
+                $db['user'], $password,
+                [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
+            );
+            $placeholders = implode(', ', array_fill(0, count($symbols), '?'));
+            $statement = $pdo->prepare(
+                'SELECT MIN(received_at_utc) FROM quote_snapshots '
+                . 'WHERE category = ? AND symbol IN (' . $placeholders . ')'
+            );
+            $statement->execute([$config['category'], ...$symbols]);
+            $earliestQuote = $statement->fetchColumn();
+            if (is_string($earliestQuote) && $earliestQuote !== '') {
+                $defaultStartDay = (new DateTimeImmutable($earliestQuote, new DateTimeZone('UTC')))
+                    ->setTimezone(new DateTimeZone('Europe/Kyiv'))
+                    ->format('Y-m-d');
+            }
+        } catch (Throwable $error) {
+            error_log('Unable to determine default hedge start date: ' . $error->getMessage());
+        }
+    }
+}
+$startDay = (string) ($_GET['start_day'] ?? $defaultStartDay);
 $endDay = (string) ($_GET['end_day'] ?? $today->format('Y-m-d'));
 $balance = (string) ($_GET['balance'] ?? '10');
 $fee = (string) ($_GET['fee'] ?? '0.06');
