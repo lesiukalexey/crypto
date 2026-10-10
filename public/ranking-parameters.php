@@ -127,7 +127,7 @@ function rankingMartingaleCacheIdentity(string $mode, array $riskLimits): array
 {
     if ($mode === 'none') return [];
     return [
-        'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1-bitget-contract-rules-v2',
+        'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1-bitget-contract-rules-v3-chain-metrics',
         $riskLimits,
     ];
 }

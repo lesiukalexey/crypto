@@ -56,6 +56,9 @@ class MartingaleParityTests(unittest.TestCase):
         self.assertEqual(numba_result[1], python_result[1])
         if len(numba_result) > 2 and len(python_result) > 2:
             self.assertEqual(numba_result[2], python_result[2])
+        if len(numba_result) > 3 and len(python_result) > 3:
+            self.assertAlmostEqual(float(numba_result[3]), float(python_result[3]), delta=1e-9)
+            self.assertAlmostEqual(float(numba_result[4]), float(python_result[4]), delta=1e-9)
 
     def test_new_chain_stake_is_capped_after_previous_chain_loss(self):
         numba_result, python_result = self.replay(
@@ -265,12 +268,26 @@ class MartingaleParityTests(unittest.TestCase):
                         quotes, indexes, directions, bid_tree, ask_tree, 10.0, 0.0006,
                         mode, timing, 3, 0.4, 0.6, candidates,
                     )
+                    risk_results = simulate_martingale_batch(
+                        quotes, indexes, directions, bid_tree, ask_tree, 10.0, 0.0006,
+                        mode, timing, 3, 0.4, 0.6, candidates,
+                        include_risk_metrics=True,
+                    )
                     for identifier, target, loss, policy in candidates:
                         scalar_result = simulate(
                             quotes, indexes, directions, bid_tree, ask_tree, 10.0, 0.0006,
                             target, loss, mode, timing, 3, policy, 0.4, 0.6,
                         )
                         self.assert_parity(batch_results[(identifier, policy)], scalar_result)
+                        self.assertEqual(len(risk_results[(identifier, policy)]), 5)
+                        self.assert_parity(
+                            risk_results[(identifier, policy)],
+                            simulate(
+                                quotes, indexes, directions, bid_tree, ask_tree, 10.0, 0.0006,
+                                target, loss, mode, timing, 3, policy, 0.4, 0.6,
+                                include_risk_metrics=True,
+                            ),
+                        )
                         reference_result = simulate_martingale(
                             quotes, indexes, directions, bid_tree, ask_tree, 10.0, 0.0006,
                             None if target is None else target / 100.0,

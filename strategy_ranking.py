@@ -507,7 +507,8 @@ def simulate_martingale_batch(
     take_confirmation_snapshots: int = 0,
     stop_confirmation_snapshots: int = 0,
     order_rules: tuple[float, float, int, float, float] | None = None,
-) -> dict[tuple[str, str], tuple[float, int, int]]:
+    include_risk_metrics: bool = False,
+) -> dict[tuple[str, str], tuple[float, ...]]:
     """Run a complete martingale exit grid in one Python-to-Numba call."""
     from martingale import martingale_base_notional
     from numba_simulation import simulate_martingale_batch_numba
@@ -532,7 +533,7 @@ def simulate_martingale_batch(
     mode_id = {"simple": 0, "reverse": 1, "simple_profit": 2, "reverse_profit": 3}[mode]
     timing_id = 0 if timing == "immediate" else 1
     market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
-    pnls, order_counts, chain_counts, _, _ = simulate_martingale_batch_numba(
+    pnls, order_counts, chain_counts, max_drawdowns, worst_chains = simulate_martingale_batch_numba(
         quotes.bids, quotes.asks, bid_tree.maximum, bid_tree.minimum,
         ask_tree.maximum, ask_tree.minimum, bid_tree.size, bid_tree.length,
         signal_indexes, signal_shorts, start_balance, fee_rate, *market_rules, takes, stops,
@@ -543,8 +544,12 @@ def simulate_martingale_batch(
         take_confirmation_snapshots, stop_confirmation_snapshots,
     )
     return {
-        (identifier, policy): (float(pnl), int(order_count), int(chain_count))
-        for (identifier, _, _, policy), pnl, order_count, chain_count in zip(candidates, pnls, order_counts, chain_counts)
+        (identifier, policy): (
+            float(pnl), int(order_count), int(chain_count),
+            float(max_drawdown), float(worst_chain),
+        ) if include_risk_metrics else (float(pnl), int(order_count), int(chain_count))
+        for (identifier, _, _, policy), pnl, order_count, chain_count, max_drawdown, worst_chain
+        in zip(candidates, pnls, order_counts, chain_counts, max_drawdowns, worst_chains)
     }
 
 
@@ -1002,7 +1007,7 @@ def main() -> int:
                     })
                     continue
 
-                martingale_batch_results: dict[tuple[str, str], tuple[float, int]] = {}
+                martingale_batch_results: dict[tuple[str, str], tuple[float, ...]] = {}
                 if args.martingale_mode != "none":
                     martingale_batch_results = simulate_martingale_batch(
                         quotes, signals, shorts, bid_tree, ask_tree,
@@ -1011,7 +1016,7 @@ def main() -> int:
                         args.martingale_max_chain_loss, args.martingale_max_day_loss,
                         martingale_batch_candidates,
                         take_confirmation_snapshots, stop_confirmation_snapshots,
-                        order_rules,
+                        order_rules, include_risk_metrics=True,
                     )
 
                 checkpoint_path = None
@@ -1099,7 +1104,7 @@ def main() -> int:
                         args.martingale_mode,
                         1.0 if family in ("fixed", "loss") else None,
                     )
-                    best_by_policy: dict[str, list[tuple[float, str, str, int, int]]] = {
+                    best_by_policy: dict[str, list[tuple[float, str, str, int, int, float, float]]] = {
                         policy: [] for policy, _ in family_policies
                     }
 
@@ -1155,7 +1160,11 @@ def main() -> int:
                                     trade_count -= int(start_state[2])
                                 chain_count = trade_count
                             else:
-                                pnl, trade_count, chain_count = martingale_batch_results[(identifier, target_policy)]
+                                result = martingale_batch_results[(identifier, target_policy)]
+                                pnl, trade_count, chain_count = result[:3]
+                                max_drawdown, worst_chain = result[3:5]
+                            if args.martingale_mode == "none":
+                                max_drawdown = worst_chain = 0.0
                             independent_count = chain_count if args.martingale_mode != "none" else trade_count
                             if math.isfinite(pnl) and independent_count >= args.min_trades:
                                 profile_best[0] = max(profile_best[0], pnl)
@@ -1169,7 +1178,7 @@ def main() -> int:
                                         display = f"Stop Loss {loss_tenths_percent / 10:.1f}% от стартового баланса · без фиксации прибыли"
                                     else:
                                         display = f"Take Profit {target_tenths_percent / 10:.1f}% от стартового баланса · без фиксации убытка"
-                                    item = (pnl, ranked_id, display, trade_count, chain_count)
+                                    item = (pnl, ranked_id, display, trade_count, chain_count, max_drawdown, worst_chain)
                                     if len(best) < TOP_PER_GROUP:
                                         heapq.heappush(best, item)
                                     else:
@@ -1194,7 +1203,7 @@ def main() -> int:
                         best.sort(key=lambda current: (-current[0], current[1]))
                         group_label = label + (f" · {policy_label}" if policy_label else "")
                         items = []
-                        for pnl, ranked_id, display, trade_count, chain_count in best:
+                        for pnl, ranked_id, display, trade_count, chain_count, max_drawdown, worst_chain in best:
                             ranked_label = display + (f" · {policy_label}" if policy_label else "")
                             if take_confirmation_snapshots or stop_confirmation_snapshots:
                                 ranked_label += f" · TP {'через ' + str(take_confirmation_snapshots) + ' интервалов' if take_confirmation_snapshots else 'сразу'} / SL {'через ' + str(stop_confirmation_snapshots) + ' интервалов' if stop_confirmation_snapshots else 'сразу'}"
@@ -1210,6 +1219,12 @@ def main() -> int:
                             }
                             if args.martingale_mode != "none":
                                 item_result["chain_count"] = int(chain_count)
+                                item_result["max_drawdown"] = float(max_drawdown)
+                                item_result["worst_chain"] = float(worst_chain)
+                                item_result["label"] += (
+                                    f" · худшая цепочка {worst_chain:+.4f} USDT"
+                                    f" · просадка после цепочки {max_drawdown:.4f} USDT"
+                                )
                             items.append(item_result)
                         groups.append({
                             "label": group_label + f" · топ {min(TOP_PER_GROUP, len(best))} из {candidate_count}",
