@@ -44,6 +44,13 @@ def initialize_schema(connection: Any) -> None:
                 ask_size VARCHAR(80) NULL,
                 exchange_timestamp_ms BIGINT NULL,
                 received_at_utc DATETIME(3) NOT NULL,
+                quote_source VARCHAR(32) NOT NULL DEFAULT 'ticker',
+                candle_open_price VARCHAR(80) NULL,
+                candle_high_price VARCHAR(80) NULL,
+                candle_low_price VARCHAR(80) NULL,
+                candle_close_price VARCHAR(80) NULL,
+                base_volume VARCHAR(80) NULL,
+                quote_volume VARCHAR(80) NULL,
                 KEY idx_quote_symbol_time (category, symbol, received_at_utc)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
         )
@@ -72,7 +79,22 @@ def latest_snapshot_timestamp_ms(connection: Any, category: str, symbol: str) ->
         cursor.execute(
             """SELECT MAX(received_at_utc)
                FROM quote_snapshots
-               WHERE category = %s AND symbol = %s""",
+               WHERE category = %s AND symbol = %s AND quote_source = 'ticker'""",
+            (category, symbol),
+        )
+        row = cursor.fetchone()
+    if not row or row[0] is None:
+        return None
+    timestamp = row[0].replace(tzinfo=timezone.utc).timestamp()
+    return int(timestamp * 1000)
+
+
+def first_snapshot_timestamp_ms(connection: Any, category: str, symbol: str) -> int | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT MIN(received_at_utc)
+               FROM quote_snapshots
+               WHERE category = %s AND symbol = %s AND quote_source = 'ticker'""",
             (category, symbol),
         )
         row = cursor.fetchone()
@@ -124,6 +146,63 @@ def insert_historical_candles(
     return inserted
 
 
+def insert_historical_candle_snapshots(
+    connection: Any,
+    category: str,
+    symbol: str,
+    interval_name: str,
+    start_ms: int,
+    end_exclusive_ms: int,
+) -> int:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT candle_timestamp_ms, open_price, high_price, low_price,
+                      close_price, base_volume, quote_volume
+               FROM historical_candles
+               WHERE category = %s AND symbol = %s AND interval_name = %s
+                 AND candle_timestamp_ms >= %s AND candle_timestamp_ms < %s
+               ORDER BY candle_timestamp_ms""",
+            (category, symbol, interval_name, start_ms, end_exclusive_ms),
+        )
+        candles = cursor.fetchall()
+        if not candles:
+            return 0
+        cursor.execute(
+            """SELECT exchange_timestamp_ms
+               FROM quote_snapshots
+               WHERE category = %s AND symbol = %s
+                 AND quote_source = 'historical_candle_close'
+                 AND exchange_timestamp_ms >= %s AND exchange_timestamp_ms < %s""",
+            (category, symbol, start_ms, end_exclusive_ms),
+        )
+        existing = {int(row[0]) for row in cursor.fetchall() if row[0] is not None}
+        rows = []
+        for candle in candles:
+            timestamp_ms = int(candle[0])
+            if timestamp_ms in existing:
+                continue
+            candle_time = datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc).replace(tzinfo=None)
+            close = str(candle[4])
+            rows.append((
+                category, symbol, close, close, close, None, None, timestamp_ms, candle_time,
+                'historical_candle_close', *map(str, candle[1:]),
+            ))
+        if not rows:
+            return 0
+        cursor.executemany(
+            """INSERT INTO quote_snapshots (
+                   category, symbol, bid_price, ask_price, last_price, bid_size, ask_size,
+                   exchange_timestamp_ms, received_at_utc, quote_source,
+                   candle_open_price, candle_high_price, candle_low_price, candle_close_price,
+                   base_volume, quote_volume
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            rows,
+        )
+        inserted = cursor.rowcount
+    connection.commit()
+    return inserted
+
+
 def insert_snapshots(connection: Any, category: str, snapshots: list[dict[str, Any]], symbols: set[str]) -> int:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     by_symbol = {str(row.get("symbol", "")).upper(): row for row in snapshots}
@@ -150,8 +229,8 @@ def insert_snapshots(connection: Any, category: str, snapshots: list[dict[str, A
             cursor.executemany(
                 """INSERT INTO quote_snapshots (
                     category, symbol, bid_price, ask_price, last_price,
-                    bid_size, ask_size, exchange_timestamp_ms, received_at_utc
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    bid_size, ask_size, exchange_timestamp_ms, received_at_utc, quote_source
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'ticker')""",
                 rows,
             )
         connection.commit()

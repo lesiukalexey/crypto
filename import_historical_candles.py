@@ -17,7 +17,9 @@ from zoneinfo import ZoneInfo
 
 from database import (
     connect_mysql,
+    first_snapshot_timestamp_ms,
     insert_historical_candles,
+    insert_historical_candle_snapshots,
     latest_historical_candle_timestamp_ms,
     latest_snapshot_timestamp_ms,
 )
@@ -108,29 +110,44 @@ def main() -> int:
             start_ms // INTERVAL_MS * INTERVAL_MS,
             latest_saved_candle_ms + INTERVAL_MS if latest_saved_candle_ms is not None else start_ms // INTERVAL_MS * INTERVAL_MS,
         )
-        if import_start_ms > last_candle_ms:
+        if import_start_ms <= last_candle_ms:
+            page_start = import_start_ms
+            while page_start <= last_candle_ms:
+                page_last = min(page_start + (PAGE_CANDLES - 1) * INTERVAL_MS, last_candle_ms)
+                rows = fetch_page(category, symbol, page_start, page_last, args.timeout)
+                for row in rows:
+                    timestamp = int(row[0])
+                    if page_start <= timestamp <= page_last and timestamp <= last_candle_ms:
+                        candle_rows[timestamp] = row
+                page_start = page_last + INTERVAL_MS
+                time.sleep(0.06)
+        else:
             logging.info("No completed 1m candles are missing through the latest saved quote")
-            return 0
-        page_start = import_start_ms
-        while page_start <= last_candle_ms:
-            page_last = min(page_start + (PAGE_CANDLES - 1) * INTERVAL_MS, last_candle_ms)
-            rows = fetch_page(category, symbol, page_start, page_last, args.timeout)
-            for row in rows:
-                timestamp = int(row[0])
-                if page_start <= timestamp <= page_last and timestamp <= last_candle_ms:
-                    candle_rows[timestamp] = row
-            page_start = page_last + INTERVAL_MS
-            time.sleep(0.06)
 
         candles = [candle_rows[key] for key in sorted(candle_rows)]
         saved = insert_historical_candles(connection, category, symbol, INTERVAL, candles)
         first_time = datetime.fromtimestamp(int(candles[0][0]) / 1000, LOCAL_ZONE) if candles else None
         last_time = datetime.fromtimestamp(int(candles[-1][0]) / 1000, LOCAL_ZONE) if candles else None
         quote_time = datetime.fromtimestamp(latest_quote_ms / 1000, LOCAL_ZONE)
+        first_quote_ms = first_snapshot_timestamp_ms(connection, category, symbol)
+        if first_quote_ms is None:
+            logging.error("No live quote boundary found for %s (%s)", symbol, category)
+            return 2
+        before_live_minute_ms = first_quote_ms // INTERVAL_MS * INTERVAL_MS - INTERVAL_MS
+        quote_rows = insert_historical_candle_snapshots(
+            connection,
+            category,
+            symbol,
+            INTERVAL,
+            start_ms // INTERVAL_MS * INTERVAL_MS,
+            before_live_minute_ms + INTERVAL_MS,
+        )
         logging.info("Symbol: %s (%s)", symbol, category)
-        logging.info("Existing quote boundary: %s Europe/Kyiv", quote_time.isoformat(sep=" "))
-        logging.info("New candles inserted: %s", saved)
-        logging.info("Candle range: %s — %s Europe/Kyiv", first_time, last_time)
+        logging.info("Latest existing quote: %s Europe/Kyiv", quote_time.isoformat(sep=" "))
+        logging.info("Raw historical candles newly inserted: %s", saved)
+        if candles:
+            logging.info("Raw candle range fetched: %s — %s Europe/Kyiv", first_time, last_time)
+        logging.info("Candle-derived quote snapshots newly inserted before first live quote: %s", quote_rows)
         return 0
     except RuntimeError as exc:
         connection.rollback()

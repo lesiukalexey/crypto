@@ -869,7 +869,7 @@ def main() -> int:
                     cursor.execute(
                         """SELECT received_at_utc, bid_price, ask_price, last_price
                            FROM quote_snapshots
-                           WHERE category = %s AND symbol = %s AND id <= %s
+                           WHERE category = %s AND symbol = %s AND (id <= %s OR quote_source = 'historical_candle_close')
                              AND received_at_utc < %s
                            ORDER BY received_at_utc, id""",
                         (config["category"], args.symbol, args.max_id, end_utc),
@@ -878,7 +878,7 @@ def main() -> int:
                     cursor.execute(
                         """SELECT received_at_utc, bid_price, ask_price, last_price
                            FROM quote_snapshots
-                           WHERE category = %s AND symbol = %s AND id <= %s
+                           WHERE category = %s AND symbol = %s AND (id <= %s OR quote_source = 'historical_candle_close')
                              AND received_at_utc >= %s AND received_at_utc < %s
                            ORDER BY received_at_utc, id""",
                         (config["category"], args.symbol, args.max_id, start_utc, end_utc),

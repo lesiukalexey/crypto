@@ -481,7 +481,7 @@ def main() -> int:
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
         start_local = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV)
         start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
-        snapshot_filter = " OR ".join("(symbol = %s AND id <= %s)" for _ in max_ids)
+        snapshot_filter = " OR ".join("(symbol = %s AND (id <= %s OR quote_source = 'historical_candle_close'))" for _ in max_ids)
         quote_parameters: list[Any] = [config["category"], end_utc]
         if args.martingale_mode != "none":
             quote_parameters.append(start_utc)
@@ -491,7 +491,7 @@ def main() -> int:
         try:
             with connection.cursor(pymysql.cursors.DictCursor) as cursor:
                 quote_query = (
-                    "SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price "
+                    "SELECT id, symbol, received_at_utc, bid_price, ask_price, last_price, quote_source "
                     "FROM quote_snapshots WHERE category = %s AND received_at_utc < %s "
                     + ("AND received_at_utc >= %s " if args.martingale_mode != "none" else "")
                     + "AND ("
@@ -508,7 +508,7 @@ def main() -> int:
         rows_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in max_ids}
         for row in raw_rows:
             symbol = str(row["symbol"])
-            if symbol in max_ids and int(row["id"]) <= max_ids[symbol]:
+            if symbol in max_ids and (int(row["id"]) <= max_ids[symbol] or row["quote_source"] == "historical_candle_close"):
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
 

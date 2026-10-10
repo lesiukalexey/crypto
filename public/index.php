@@ -211,10 +211,10 @@ try {
         $snapshotNeedsRefresh = rankingSnapshotNeedsRefresh($pdo, $config['category'], $startUtc, $endUtc, $snapshotIds);
         $maxQuoteId = (int) ($snapshotIds[$symbol] ?? 0);
         if ($martingaleMode === 'none') {
-            $stmt = $pdo->prepare('SELECT id, received_at_utc, bid_price, ask_price, last_price FROM quote_snapshots WHERE category = ? AND symbol = ? AND id <= ? AND received_at_utc < ? ORDER BY received_at_utc, id');
+            $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc < ? ORDER BY received_at_utc, id");
             $stmt->execute([$config['category'], $symbol, $maxQuoteId, $endUtc]);
         } else {
-            $stmt = $pdo->prepare('SELECT id, received_at_utc, bid_price, ask_price, last_price FROM quote_snapshots WHERE category = ? AND symbol = ? AND id <= ? AND received_at_utc >= ? AND received_at_utc < ? ORDER BY received_at_utc, id');
+            $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc >= ? AND received_at_utc < ? ORDER BY received_at_utc, id");
             $stmt->execute([$config['category'], $symbol, $maxQuoteId, $startUtc, $endUtc]);
         }
         $rows = $stmt->fetchAll();
@@ -368,10 +368,12 @@ function epochMilliseconds(string $value): int { $time = new DateTimeImmutable($
 $series = ['bid_price' => ['name' => 'Bid', 'color' => '#42d6a4'], 'ask_price' => ['name' => 'Ask', 'color' => '#ff7188'], 'last_price' => ['name' => 'Last', 'color' => '#86a8ff']];
 $points = [];
 $visibleQuoteCount = 0;
+$hasHistoricalCandles = false;
 foreach ($rows as $row) {
     $time = (new DateTimeImmutable($row['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone);
     if ($time < $startDay || $time >= $dayAfterEnd) continue;
     $visibleQuoteCount++;
+    $hasHistoricalCandles = $hasHistoricalCandles || ($row['quote_source'] ?? 'ticker') === 'historical_candle_close';
     foreach ($series as $key => $meta) {
         $value = (float) $row[$key];
         if (is_finite($value)) $points[$key][] = ['t' => $time->getTimestamp() * 1000, 'v' => $value, 'label' => $row[$key]];
@@ -955,6 +957,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты и очищает очередь. 🧹 делает то же самое и дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head chart-info-line"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= $visibleQuoteCount ?> снимков</span><span class="chart-info-item"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
+<?php if ($hasHistoricalCandles): ?><p class="hint">Исторические минутные свечи: Bid, Ask и Last восстановлены по цене Close; биржевой спред в этих данных отсутствует.</p><?php endif; ?>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
 <div class="chart-display"><div class="chart-wrap"><svg id="chart" role="img" aria-label="График bid, ask и last для <?= h($symbol) ?>"></svg><div id="tooltip" aria-hidden="true"></div></div><nav class="chart-day-controls" id="chart-day-controls" aria-label="День на графике"><button class="chart-day-button" type="button" data-chart-day="" aria-pressed="true">Весь график</button></nav></div>
 <?php endif; ?></section>
