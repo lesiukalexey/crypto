@@ -16,7 +16,8 @@ function hedge_ranking_respond(array $payload, int $status = 200): never
 try {
     $root = dirname(__DIR__);
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
-    $symbols = enabledTickerSymbols($config);
+    $tickerSetId = trim((string) ($_GET['ticker_set'] ?? ''));
+    $symbols = selectedTickerSet($config, $tickerSetId)['symbols'];
     if (count($symbols) < 2) {
         hedge_ranking_respond(['status' => 'error', 'message' => 'Для рейтинга нужны минимум два тикера.'], 400);
     }

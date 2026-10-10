@@ -74,7 +74,7 @@ try {
     $snapshotIds = rankingSnapshotIds(
         $pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation,
     );
-    $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
+    $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config, trim((string) ($_GET['ticker_set'] ?? '')));
     $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
     $minTrades = $saveMode ? 3 : 1;
     $symbols = [];

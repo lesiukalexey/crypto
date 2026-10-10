@@ -92,7 +92,7 @@ try {
         respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
     }
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
-    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
+    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config, trim((string) ($_GET['ticker_set'] ?? '')));
     $keyParts = ['symbol-ranking-v17-futures-contract-quantity', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee, $entryConfig, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
     if ($martingaleMode !== 'none') {
         $keyParts[] = 'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1-bitget-contract-rules-v3-chain-metrics';

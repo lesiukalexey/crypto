@@ -94,7 +94,7 @@ try {
     // Ignore legacy URL snapshot_ids: all ranking types share one frozen
     // snapshot per date range and generation, even across browser tabs.
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
-    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
+    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config, trim((string) ($_GET['ticker_set'] ?? '')));
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $entryProfileCount = count($ranking['immediate_directions']);
     foreach ($ranking['entry_profiles'] as $entryProfile) {

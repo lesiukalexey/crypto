@@ -107,7 +107,7 @@ try {
         respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
     }
     $maxIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $generation);
-    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
+    $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config, trim((string) ($_GET['ticker_set'] ?? '')));
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $keyParts = [
         'portfolio-combination-details-v9-futures-cost-quantity', $generation, hash('sha256', $snapshotJson), $config['category'],

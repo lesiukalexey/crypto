@@ -26,8 +26,9 @@ try {
     $timezone = new DateTimeZone('Europe/Kyiv');
     $today = new DateTimeImmutable('today', $timezone);
     $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
-    if ($symbol === '' || !in_array($symbol, enabledTickerSymbols($config), true)) {
-        respond(['status' => 'error', 'message' => 'Этот тикер выключен в настройках или не настроен.'], 400);
+    $tickerSetId = trim((string) ($_GET['ticker_set'] ?? ''));
+    if ($symbol === '' || !in_array($symbol, selectedTickerSet($config, $tickerSetId)['symbols'], true)) {
+        respond(['status' => 'error', 'message' => 'Этот тикер не входит в выбранный список или выключен в настройках.'], 400);
     }
     $startValue = (string) ($_GET['start_day'] ?? $today->format('Y-m-d'));
     $endValue = (string) ($_GET['end_day'] ?? $startValue);
@@ -101,7 +102,7 @@ try {
         respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
     }
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
-    $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
+    $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config, $tickerSetId);
     $maxId = (int) ($snapshotIds[$symbol] ?? 0);
     $keyParts = ['ranking-v30-futures-contract-quantity', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
     array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));

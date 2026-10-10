@@ -29,10 +29,42 @@ function enabledTickerSymbols(array $config): array
     return $enabled;
 }
 
-function filterEnabledTickerSnapshotIds(array $snapshotIds, array $config): array
+function selectedTickerSet(array $config, ?string $setId = null): array
 {
+    $sets = loadQuoteSets($config);
+    $selected = null;
+    if ($setId !== null && $setId !== '') {
+        foreach ($sets as $set) {
+            if (is_array($set) && (string) ($set['id'] ?? '') === $setId) {
+                $selected = $set;
+                break;
+            }
+        }
+    }
+    if ($selected === null) {
+        foreach ($sets as $set) {
+            if (is_array($set) && (string) ($set['name'] ?? '') === 'Базовый список') {
+                $selected = $set;
+                break;
+            }
+        }
+    }
     $enabled = array_fill_keys(enabledTickerSymbols($config), true);
-    return array_intersect_key($snapshotIds, $enabled);
+    $members = is_array($selected['symbols'] ?? null) ? array_map('strval', $selected['symbols']) : [];
+    $symbols = array_values(array_intersect($members, array_keys($enabled)));
+    sort($symbols, SORT_STRING);
+    return [
+        'id' => (string) ($selected['id'] ?? ''),
+        'name' => (string) ($selected['name'] ?? 'Базовый список'),
+        'symbols' => $symbols,
+        'sets' => $sets,
+    ];
+}
+
+function filterEnabledTickerSnapshotIds(array $snapshotIds, array $config, ?string $setId = null): array
+{
+    $selected = array_fill_keys(selectedTickerSet($config, $setId)['symbols'], true);
+    return array_intersect_key($snapshotIds, $selected);
 }
 
 function saveTickerEnabledState(array $config, string $symbol, bool $enabled): array

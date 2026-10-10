@@ -6,7 +6,6 @@ require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-snapshot.php';
 require_once __DIR__ . '/ticker-settings-lib.php';
 $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
-$enabledSymbols = enabledTickerSymbols($config);
 $favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
 $favoriteView = false;
 $favorite = null;
@@ -26,6 +25,10 @@ if ($favoriteId !== '' && is_file($favoritesPath)) {
         }
     }
 }
+$tickerSetSelection = selectedTickerSet($config, trim((string) ($_GET['ticker_set'] ?? '')));
+$tickerSetId = $tickerSetSelection['id'];
+$tickerSetOptions = $tickerSetSelection['sets'];
+$enabledSymbols = $tickerSetSelection['symbols'];
 $rankingCacheDir = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-backtest-cache';
 $rankingGenerationPath = $rankingCacheDir . '/strategy-ranking-generation.txt';
 $rankingGeneration = is_file($rankingGenerationPath) ? trim((string) file_get_contents($rankingGenerationPath)) : 'initial';
@@ -109,7 +112,7 @@ $detailMarketAverage = is_numeric($_GET['detail_market_average'] ?? null) ? (flo
 $detailSupport = filter_var($_GET['detail_support'] ?? null, FILTER_VALIDATE_INT);
 $detailUniverseSize = filter_var($_GET['detail_universe_size'] ?? null, FILTER_VALIDATE_INT);
 $detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALIDATE_INT);
-$viewParams = ['symbol' => $symbol, 'start_day' => $startDayInput, 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent, 'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'slippage_bps' => $simulationCosts['slippage_bps']];
+$viewParams = ['symbol' => $symbol, 'ticker_set' => $tickerSetId, 'start_day' => $startDayInput, 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent, 'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'slippage_bps' => $simulationCosts['slippage_bps']];
 $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
 $isCurrentDay = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
@@ -216,7 +219,7 @@ try {
             $pdo, $rankingCacheDir, $config['category'], $startDayInput, $endDayInput,
             $startUtc, $endUtc, $rankingGeneration,
         );
-        $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
+        $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config, $tickerSetId);
         $maxQuoteId = (int) ($snapshotIds[$symbol] ?? 0);
         if ($martingaleMode === 'none') {
             $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc < ? ORDER BY received_at_utc, id");
@@ -1022,10 +1025,12 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
 .view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .reset-symbol-cache,.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings,.favorite-readonly .collector-status{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
+.ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><button class="collector-status" id="collector-status" type="button" data-status="unknown" aria-label="Загрузить данные для всех активных пар от последней сохранённой минуты" title="Нажмите, чтобы загрузить минутные данные всех активных пар от их последней сохранённой котировки до последней доступной минуты">Загружаю последнюю котировку…</button></div></header>
 <nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a></nav>
+<section class="panel ticker-set-panel" aria-label="Выбранный список тикеров"><label for="ticker-set-select">Выбранный список тикеров</label><select id="ticker-set-select" <?= $favoriteView ? 'disabled' : '' ?>><?php foreach ($tickerSetOptions as $tickerSet): ?><option value="<?= h((string) ($tickerSet['id'] ?? '')) ?>" <?= ($tickerSet['id'] ?? '') === $tickerSetId ? 'selected' : '' ?>><?= h((string) ($tickerSet['name'] ?? '')) ?></option><?php endforeach; ?></select><span class="small-note"><?= count($enabledSymbols) ?> активных тикеров в списке</span></section>
 <?php if ($favoriteView): ?><p class="favorite-readonly-note">Просмотр сохранённой стратегии «<?= h((string) ($favorite['name'] ?? $favoriteId)) ?>». Параметры доступны только для чтения. <a class="strategy-link" href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
 <?php if ($combinationDetail): ?>
 <section class="panel combination-detail" aria-labelledby="combination-detail-heading">
@@ -1045,6 +1050,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <?php if ($error !== null): ?><section class="panel error"><?= h($error) ?></section><?php endif; ?>
 <?php if ($martingaleOrderConstraintError !== null): ?><section class="panel error"><?= h($martingaleOrderConstraintError) ?></section><?php endif; ?>
 <section class="panel"><form class="filters<?= $favoriteView ? ' favorite-readonly' : '' ?>" method="get">
+<input type="hidden" name="ticker_set" value="<?= h($tickerSetId) ?>">
 <input type="hidden" name="ranking_generation" id="ranking-generation" value="<?= h($rankingGeneration) ?>">
 <?php if ($combinationDetail): ?>
 <?php foreach (['combination_detail' => '1', 'detail_entry_label' => $detailEntryLabel, 'detail_exit_label' => $detailExitLabel, 'detail_rank' => $detailRank !== false && $detailRank !== null ? (string) $detailRank : '', 'detail_ticker_pnl' => $detailTickerPnl !== null ? (string) $detailTickerPnl : '', 'detail_market_average' => $detailMarketAverage !== null ? (string) $detailMarketAverage : '', 'detail_support' => $detailSupport !== false && $detailSupport !== null ? (string) $detailSupport : '', 'detail_universe_size' => $detailUniverseSize !== false && $detailUniverseSize !== null ? (string) $detailUniverseSize : '', 'detail_trade_count' => $detailTradeCount !== false && $detailTradeCount !== null ? (string) $detailTradeCount : ''] as $detailName => $detailValue): ?><input type="hidden" name="<?= h($detailName) ?>" value="<?= h($detailValue) ?>"><?php endforeach; ?>
@@ -1182,6 +1188,13 @@ window.addEventListener('resize',()=>{W=H*svg.clientWidth/Math.max(1,svg.clientH
 </script><?php endif; ?>
 <script>
 const filtersForm = document.querySelector('.filters');
+const tickerSetSelect = document.querySelector('#ticker-set-select');
+tickerSetSelect?.addEventListener('change', () => {
+    const params = filtersForm ? new URLSearchParams(new FormData(filtersForm)) : new URLSearchParams(location.search);
+    params.set('ticker_set', tickerSetSelect.value);
+    params.delete('symbol');
+    location.href = location.pathname + '?' + params.toString();
+});
 const favoriteView = <?= $favoriteView ? 'true' : 'false' ?>;
 if (favoriteView && filtersForm) {
     filtersForm.querySelectorAll('select, input, button').forEach(control => { control.disabled = true; });

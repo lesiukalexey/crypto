@@ -18,7 +18,8 @@ try {
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $longSymbol = strtoupper(trim((string) ($_GET['long_symbol'] ?? '')));
     $shortSymbol = strtoupper(trim((string) ($_GET['short_symbol'] ?? '')));
-    $enabledSymbols = enabledTickerSymbols($config);
+    $tickerSetId = trim((string) ($_GET['ticker_set'] ?? ''));
+    $enabledSymbols = selectedTickerSet($config, $tickerSetId)['symbols'];
     if (!in_array($longSymbol, $enabledSymbols, true) || !in_array($shortSymbol, $enabledSymbols, true) || $longSymbol === $shortSymbol) {
         hedge_respond(['status' => 'error', 'message' => 'Выберите два разных тикера из списка настроенных инструментов.'], 400);
     }
