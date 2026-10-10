@@ -28,9 +28,11 @@ $tickerSetSelection = selectedTickerSet($config, trim((string) ($_GET['ticker_se
 $tickerSetId = $tickerSetSelection['id'];
 $tickerSetOptions = $tickerSetSelection['sets'];
 $symbols = $tickerSetSelection['symbols'];
+$startDayAuto = (string) ($_GET['start_day_auto'] ?? '') === '1'
+    || (!array_key_exists('start_day', $_GET) && !array_key_exists('day', $_GET));
 $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Kyiv'));
 $defaultStartDay = '2026-10-06';
-if (!array_key_exists('start_day', $_GET) && $symbols !== []) {
+if ($startDayAuto && $symbols !== []) {
     $db = $config['mysql'];
     $passwordEnv = (string) ($db['password_env'] ?? '');
     $password = $passwordEnv !== '' ? (getenv($passwordEnv) ?: '') : '';
@@ -58,7 +60,7 @@ if (!array_key_exists('start_day', $_GET) && $symbols !== []) {
         }
     }
 }
-$startDay = (string) ($_GET['start_day'] ?? $defaultStartDay);
+$startDay = $startDayAuto ? $defaultStartDay : (string) ($_GET['start_day'] ?? $_GET['day'] ?? $defaultStartDay);
 $endDay = (string) ($_GET['end_day'] ?? $today->format('Y-m-d'));
 $balance = (string) ($_GET['balance'] ?? '10');
 $fee = (string) ($_GET['fee'] ?? '0.06');
@@ -75,6 +77,7 @@ if (!in_array($shortSymbol, $symbols, true) || $shortSymbol === $longSymbol) {
 }
 $basicParams = $_GET;
 $basicParams['ticker_set'] = $tickerSetId;
+$basicParams['start_day_auto'] = $startDayAuto ? '1' : '0';
 unset($basicParams['long_symbol'], $basicParams['short_symbol'], $basicParams['pair']);
 $basicParams['start_day'] = $startDay;
 $basicParams['end_day'] = $endDay;
@@ -83,6 +86,7 @@ $basicParams['fee'] = $fee;
 $basicUrl = './?' . http_build_query($basicParams);
 $hedgeParams = $_GET;
 $hedgeParams['ticker_set'] = $tickerSetId;
+$hedgeParams['start_day_auto'] = $startDayAuto ? '1' : '0';
 $hedgeParams['start_day'] = $startDay;
 $hedgeParams['end_day'] = $endDay;
 $hedgeParams['balance'] = $balance;
@@ -112,6 +116,7 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <h1>Хеджирование между тикерами</h1>
 <section class="panel"><form class="filters" id="hedge-filters">
 <input type="hidden" name="ticker_set" value="<?= $h($tickerSetId) ?>">
+<input type="hidden" name="start_day_auto" value="<?= $startDayAuto ? '1' : '0' ?>">
 <label class="field pair-field">Пара: лонг / шорт<select name="pair" id="hedge-pair" required><?php if (count($symbols) < 2): ?><option value="" selected>В списке нужны минимум два активных тикера</option><?php else: foreach ($symbols as $long): foreach ($symbols as $short): if ($long === $short) continue; $value = $long . '|' . $short; ?><option value="<?= $h($value) ?>" <?= $long === $longSymbol && $short === $shortSymbol ? 'selected' : '' ?>>Лонг <?= $h($long) ?> / шорт <?= $h($short) ?></option><?php endforeach; endforeach; endif; ?></select><span class="small-note" id="pair-ranking-status" aria-live="polite">При открытии страницы рассчитываю доходность пар…</span></label>
 <?php if (!$favoriteView): ?><button type="button" id="add-hedge-favorite">☆ В избранное</button><?php endif; ?>
 <label class="field">С даты<input type="date" name="start_day" value="<?= $h($startDay) ?>" required></label>
@@ -127,6 +132,7 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 const form=document.querySelector('#hedge-filters'),pairSelect=document.querySelector('#hedge-pair'),statusNode=document.querySelector('#hedge-status'),summaryNode=document.querySelector('#hedge-summary'),chart=document.querySelector('#hedge-chart'),pointCount=document.querySelector('#hedge-point-count'),tooltip=document.querySelector('#tooltip'),ns='http://www.w3.org/2000/svg';
 const tickerSetSelect=document.querySelector('#ticker-set-select');
 tickerSetSelect?.addEventListener('change',()=>{const params=new URLSearchParams(location.search);params.set('ticker_set',tickerSetSelect.value);for(const key of ['pair','long_symbol','short_symbol','favorite_id'])params.delete(key);location.href=location.pathname+'?'+params.toString()});
+const startDayAutoInput=form.elements.namedItem('start_day_auto');
 const favoriteView=<?= $favoriteView ? 'true' : 'false' ?>,favoriteSymbolsDisabled=<?= $favoriteSymbolsDisabled ? 'true' : 'false' ?>,favoriteId=<?= json_encode($favoriteId, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>,favoriteSavedParams=<?= json_encode($favorite['params'] ?? new stdClass(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
 if(favoriteView)form.querySelectorAll('select,input,button').forEach(control=>control.disabled=true);
 const palette={long_index:'#42d6a4',short_index:'#ff7188',equity_index:'#86a8ff'};
@@ -216,5 +222,5 @@ function render(data){
 async function loadData(){if(!pairSelect.value){summaryNode.hidden=true;statusNode.textContent='В выбранном списке нет двух активных тикеров для хеджирования.';return}if(favoriteSymbolsDisabled){statusNode.textContent='Один из тикеров сохранённой пары не входит в список.';statusNode.classList.add('error');return}const [longSymbol,shortSymbol]=pairSelect.value.split('|'),params=new URLSearchParams(new FormData(form));if(favoriteView)for(const[key,value]of Object.entries(favoriteSavedParams))params.set(key,String(value));params.delete('pair');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);const url=new URL('hedge-data.php',location.href);url.search=params.toString();statusNode.textContent='Загружаю и сопоставляю снимки…';statusNode.classList.remove('error');chart.replaceChildren();try{const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'}),data=await response.json();if(!response.ok||data.status==='error')throw new Error(data.message||'Не удалось загрузить данные пары');if(data.status!=='ready'){render(data);return}render(data);const next=new URL(location.href);for(const[key,value]of params)next.searchParams.set(key,value);next.searchParams.set('pair',pairSelect.value);next.searchParams.set('chart_view',chartView);if(favoriteView)next.searchParams.set('favorite_id',favoriteId);history.replaceState(null,'',next);const basicParams=new URLSearchParams(location.search);for(const key of ['long_symbol','short_symbol','pair','favorite_id','chart_view'])basicParams.delete(key);for(const key of ['start_day','end_day','balance','fee'])basicParams.set(key,params.get(key));document.querySelector('.view-nav a[href^="./?"]').href='./?'+basicParams.toString()}catch(error){summaryNode.hidden=true;statusNode.textContent=error.message;statusNode.classList.add('error')}}
 function setChartView(nextView){chartView=nextView;chartModeButtons.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartView===chartView)));const next=new URL(location.href);next.searchParams.set('chart_view',chartView);history.replaceState(null,'',next);if(window.currentHedgeData)render(window.currentHedgeData)}
 chartModeButtons.forEach(button=>button.addEventListener('click',()=>setChartView(button.dataset.chartView)));
-form.addEventListener('submit',event=>{event.preventDefault();loadPairRanking();loadData()});form.addEventListener('change',event=>{if(event.target===pairSelect){loadData();return}loadPairRanking();loadData()});window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});if(!favoriteView)loadPairRanking();loadData();
+form.addEventListener('submit',event=>{event.preventDefault();loadPairRanking();loadData()});form.addEventListener('change',event=>{if(event.target.name==='start_day'){startDayAutoInput.value='0';const next=new URL(location.href);next.searchParams.set('start_day',event.target.value);next.searchParams.set('start_day_auto','0');history.replaceState(null,'',next)}if(event.target===pairSelect){loadData();return}loadPairRanking();loadData()});window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});if(!favoriteView)loadPairRanking();loadData();
 </script></body></html>

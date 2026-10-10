@@ -69,6 +69,9 @@ $error = $rankingError;
 $timezone = new DateTimeZone('Europe/Kyiv');
 $today = new DateTimeImmutable('today', $timezone);
 $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
+$startDayAuto = array_key_exists('start_day_auto', $_GET)
+    ? (string) $_GET['start_day_auto'] === '1'
+    : !array_key_exists('start_day', $_GET) && !array_key_exists('day', $_GET);
 $startDayInput = (string) ($_GET['start_day'] ?? $_GET['day'] ?? '2026-10-06');
 $endDayInput = (string) ($_GET['end_day'] ?? $_GET['day'] ?? $today->format('Y-m-d'));
 $defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThresholdsTenthsPercent, true)
@@ -112,7 +115,7 @@ $detailMarketAverage = is_numeric($_GET['detail_market_average'] ?? null) ? (flo
 $detailSupport = filter_var($_GET['detail_support'] ?? null, FILTER_VALIDATE_INT);
 $detailUniverseSize = filter_var($_GET['detail_universe_size'] ?? null, FILTER_VALIDATE_INT);
 $detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALIDATE_INT);
-$viewParams = ['symbol' => $symbol, 'ticker_set' => $tickerSetId, 'start_day' => $startDayInput, 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent, 'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'slippage_bps' => $simulationCosts['slippage_bps']];
+$viewParams = ['symbol' => $symbol, 'ticker_set' => $tickerSetId, 'start_day' => $startDayInput, 'start_day_auto' => $startDayAuto ? '1' : '0', 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent, 'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'slippage_bps' => $simulationCosts['slippage_bps']];
 $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
 $isCurrentDay = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
@@ -1051,6 +1054,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <?php if ($martingaleOrderConstraintError !== null): ?><section class="panel error"><?= h($martingaleOrderConstraintError) ?></section><?php endif; ?>
 <section class="panel"><form class="filters<?= $favoriteView ? ' favorite-readonly' : '' ?>" method="get">
 <input type="hidden" name="ticker_set" value="<?= h($tickerSetId) ?>">
+<input type="hidden" name="start_day_auto" value="<?= $startDayAuto ? '1' : '0' ?>">
 <input type="hidden" name="ranking_generation" id="ranking-generation" value="<?= h($rankingGeneration) ?>">
 <?php if ($combinationDetail): ?>
 <?php foreach (['combination_detail' => '1', 'detail_entry_label' => $detailEntryLabel, 'detail_exit_label' => $detailExitLabel, 'detail_rank' => $detailRank !== false && $detailRank !== null ? (string) $detailRank : '', 'detail_ticker_pnl' => $detailTickerPnl !== null ? (string) $detailTickerPnl : '', 'detail_market_average' => $detailMarketAverage !== null ? (string) $detailMarketAverage : '', 'detail_support' => $detailSupport !== false && $detailSupport !== null ? (string) $detailSupport : '', 'detail_universe_size' => $detailUniverseSize !== false && $detailUniverseSize !== null ? (string) $detailUniverseSize : '', 'detail_trade_count' => $detailTradeCount !== false && $detailTradeCount !== null ? (string) $detailTradeCount : ''] as $detailName => $detailValue): ?><input type="hidden" name="<?= h($detailName) ?>" value="<?= h($detailValue) ?>"><?php endforeach; ?>
@@ -1241,8 +1245,14 @@ function syncViewNavigation() {
     if (hedgeLink) hedgeLink.href = 'hedging.php?' + values.toString();
 }
 syncViewNavigation();
-filtersForm?.addEventListener('input', syncViewNavigation);
-filtersForm?.addEventListener('change', syncViewNavigation);
+filtersForm?.addEventListener('input', event => {
+    if (event.target.name === 'start_day') filtersForm.elements.namedItem('start_day_auto').value = '0';
+    syncViewNavigation();
+});
+filtersForm?.addEventListener('change', event => {
+    if (event.target.name === 'start_day') filtersForm.elements.namedItem('start_day_auto').value = '0';
+    syncViewNavigation();
+});
 const rankingGenerationInput = document.querySelector('#ranking-generation');
 const saveModeToggle = document.querySelector('#save-mode-toggle');
 const saveModeValue = document.querySelector('#save-mode-value');
