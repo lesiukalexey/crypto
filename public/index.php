@@ -108,7 +108,6 @@ $detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALID
 $viewParams = ['symbol' => $symbol, 'start_day' => $startDayInput, 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent];
 $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
 $isCurrentDay = false;
-$snapshotNeedsRefresh = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
 if (!preg_match($decimalPattern, $startingBalance) || (float) $startingBalance <= 0 || (float) $startingBalance > 1000000000) {
     $error = 'Стартовый баланс должен быть больше 0 и не превышать 1 000 000 000 USDT.';
@@ -208,7 +207,6 @@ try {
             $startUtc, $endUtc, $rankingGeneration,
         );
         $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
-        $snapshotNeedsRefresh = rankingSnapshotNeedsRefresh($pdo, $config['category'], $startUtc, $endUtc, $snapshotIds);
         $maxQuoteId = (int) ($snapshotIds[$symbol] ?? 0);
         if ($martingaleMode === 'none') {
             $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc < ? ORDER BY received_at_utc, id");
@@ -847,6 +845,8 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 :root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1200px;margin:0 auto;padding:42px 24px}.eyebrow{color:#8ea5ff;text-transform:uppercase;letter-spacing:.13em;font-size:12px;font-weight:700}h1{font-size:clamp(26px,4vw,40px);margin:5px 0 16px;letter-spacing:-.04em}.collector-status{display:inline-flex;align-items:center;gap:9px;margin:0 0 22px;padding:7px 11px;border:1px solid #34415e;border-radius:999px;background:#0c1222;color:#b7c1d5;font-size:13px}.collector-status:before{content:"";width:9px;height:9px;border-radius:50%;background:#8995ad;box-shadow:0 0 0 3px #8995ad22}.collector-status[data-status="active"]{color:#a8f0cf;border-color:#28654f}.collector-status[data-status="active"]:before{background:#42d6a4;box-shadow:0 0 0 3px #42d6a422}.collector-status[data-status="delayed"]{color:#ffe0a1;border-color:#705b2e}.collector-status[data-status="delayed"]:before{background:#f4c15f;box-shadow:0 0 0 3px #f4c15f22}.collector-status[data-status="stopped"],.collector-status[data-status="unknown"]{color:#ffb3bf;border-color:#733b49}.collector-status[data-status="stopped"]:before,.collector-status[data-status="unknown"]:before{background:#ff7188;box-shadow:0 0 0 3px #ff718822}.panel{background:color-mix(in srgb,var(--panel) 95%,transparent);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px;box-shadow:0 18px 50px #0003}.filters{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.field{display:grid;gap:7px;color:var(--muted);font-size:13px;font-weight:600}select,input,button{font:inherit;color:var(--text);background:#0c1222;border:1px solid #34415e;border-radius:10px;padding:11px 13px;min-width:190px}button{background:#607df4;border:0;font-weight:700;cursor:pointer;min-width:130px}button:hover{background:#7890ff}.hint{color:var(--muted);margin:15px 0 0;font-size:13px}.chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}.chart-head h2{font-size:17px;margin:0}.count{color:var(--muted);font-size:13px}.legend{display:flex;gap:18px;color:#b7c1d5;font-size:13px;margin:14px 0}.legend span{display:inline-flex;gap:7px;align-items:center}.dot{width:9px;height:9px;border-radius:50%}#chart{width:100%;height:clamp(180px,34vh,300px);display:block;overflow:visible}.chart-wrap{position:relative}.chart-panel-sticky{position:sticky;top:10px;z-index:5;background:#131a2d;box-shadow:0 12px 32px #0009}#tooltip{position:absolute;z-index:2;display:none;min-width:180px;padding:10px 12px;border:1px solid #394765;border-radius:10px;background:#0b1020f2;box-shadow:0 10px 30px #0008;pointer-events:none;font-size:12px;white-space:nowrap}#tooltip .tip-time{color:#dce5ff;font-weight:700;margin-bottom:5px}#tooltip .tip-row{display:flex;justify-content:space-between;gap:18px;font-variant-numeric:tabular-nums}#tooltip b{font-weight:700}.empty{display:grid;place-items:center;min-height:230px;color:var(--muted);text-align:center}.error{border-color:#733b49;color:#ffb3bf}.footer{color:var(--muted);font-size:12px;margin:0 4px}#results{padding-bottom:12px}#results .footer{margin:7px 4px 0}@media(max-width:600px){.wrap{padding:25px 14px}.panel{padding:16px}select,input{width:100%}.field{width:100%}button{width:100%}#chart{height:clamp(150px,27vh,220px)}.chart-panel-sticky{top:4px}.chart-head{align-items:flex-start;flex-direction:column}}
 .filters .field select,.filters .field input{min-width:150px}.strategy-link{color:#a9b9ff;text-decoration:none}.strategy-link:hover{text-decoration:underline}.summary{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 16px}.stat{flex:1;min-width:150px;background:#0c1222;border:1px solid var(--line);border-radius:12px;padding:13px 15px}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums}.table-wrap{overflow:auto;border-radius:10px}table{width:100%;min-width:1000px;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}th,td{text-align:right;padding:11px 10px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:#aab5cb;font-size:11px;text-transform:uppercase;letter-spacing:.04em;background:#0d1425;position:sticky;top:0}th:first-child,td:first-child,td.reason{text-align:left}.trade-positive td{background:#123126;color:#b9f2dc}.trade-negative td{background:#351e2a;color:#ffd0d5}.trade-open-positive td{background:#06291d;color:#83e8b8}.trade-open-negative td{background:#290810;color:#ff929d}.trade-flat td{background:#222b3d}.trade-positive td:first-child,.trade-open-positive td:first-child{box-shadow:inset 3px 0 #48d6a4}.trade-negative td:first-child,.trade-open-negative td:first-child{box-shadow:inset 3px 0 #ff7788}.trade-row{cursor:crosshair}.trade-row:hover td,.trade-row:focus td{filter:brightness(1.22)}.small-note{font-size:12px;color:var(--muted);margin:12px 0 0}.loss{color:#ff7788}.gain{color:#48d6a4}
 .refresh-symbols{display:grid;place-items:center;flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:20px;line-height:1}.refresh-symbols.is-loading{cursor:progress;background:#273653}.refresh-progress{position:relative;display:grid;place-items:center;width:34px;height:34px;font-size:9px;font-weight:700;font-variant-numeric:tabular-nums}.refresh-progress:before{position:absolute;inset:1px;border:2px solid #52617d;border-top-color:#a9b9ff;border-radius:50%;content:"";animation:ranking-spin .8s linear infinite}.refresh-progress-value{position:relative;z-index:1}@keyframes ranking-spin{to{transform:rotate(360deg)}}
+.history-import-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.history-import-button{min-width:0;min-height:42px;padding:9px 12px;white-space:nowrap;font-size:13px}.history-import-button:disabled{cursor:progress;opacity:.65}.history-import-status{flex-basis:100%;min-height:0;margin:0;color:var(--muted);font-size:12px}.history-import-status:empty{display:none}.history-import-status[data-status="error"]{color:#ff9eaa}.history-import-status[data-status="ready"]{color:#a8f0cf}
+.date-refresh-row{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.date-refresh-row>.field{flex:0 0 190px}.date-refresh-row>.history-import-status{flex-basis:100%}
 .refresh-today-snapshot[hidden]{display:none}.refresh-today-snapshot:disabled{cursor:progress;opacity:.65}
 .page-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.page-heading .eyebrow{white-space:nowrap}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}.collector-status{margin:0;white-space:nowrap}.save-mode-toggle{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.save-mode-toggle input{position:absolute;opacity:0;width:1px;height:1px;min-width:0}.save-mode-switch{position:relative;width:38px;height:22px;border:1px solid #52617d;border-radius:999px;background:#263149;transition:.2s}.save-mode-switch:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#b7c1d5;transition:.2s}.save-mode-toggle input:checked+.save-mode-switch{background:#176647;border-color:#42d6a4}.save-mode-toggle input:checked+.save-mode-switch:after{transform:translateX(16px);background:#42d6a4}.save-mode-toggle input:focus-visible+.save-mode-switch{outline:2px solid #8ea5ff;outline-offset:2px}.save-mode-detail{color:var(--muted);font-weight:400}@media(max-width:700px){.page-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.header-actions{justify-content:flex-start}}
 .wrap{max-width:none;padding-left:20px;padding-right:20px;padding-bottom:12px}.chart-wrap{container-type:inline-size}#chart{height:clamp(400px,27vw,440px)}.chart-head.chart-info-line{justify-content:flex-start;align-items:center;gap:18px;min-width:0;overflow-x:auto;white-space:nowrap;scrollbar-width:thin}.chart-info-line h2,.chart-info-line .count,.chart-info-item{flex:0 0 auto;white-space:nowrap}.chart-info-line h2{font-size:16px}.chart-info-item{display:inline-flex;align-items:center;gap:7px;color:#b7c1d5;font-size:13px}.chart-info-item .dot{flex:0 0 9px}.chart-info-item .session-marker{width:9px;height:9px;border:1px solid #48536c;border-radius:2px;background:#080d19;flex:0 0 9px}@media(max-width:600px){#chart{height:clamp(320px,58vw,360px)}.wrap{padding-bottom:10px}.chart-head.chart-info-line{align-items:center;flex-direction:row;gap:14px}}
@@ -904,7 +904,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>">
 <div class="symbol-select-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><select name="symbol" id="symbol-select" required><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></div><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов" title="Сбросить кэш рейтингов">🧹</button></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
-<div class="symbol-select-row date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="refresh-symbols refresh-today-snapshot" type="button" id="refresh-today-snapshot" aria-label="Обновить данные до выбранной даты" title="Подтянуть новые данные до выбранной даты в график и расчёты" <?= $snapshotNeedsRefresh ? '' : 'hidden' ?>>↻</button></div>
+<div class="date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><div class="history-import-actions"><button class="history-import-button" type="button" id="import-selected-symbol" data-import-scope="symbol" title="Скачать минутные свечи выбранной пары из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты">↻ <?= h($symbol) ?></button><button class="history-import-button" type="button" id="import-all-active-symbols" data-import-scope="all" title="Скачать минутные свечи всех активных пар из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты">↻ Все активные пары</button></div><p class="history-import-status" id="history-import-status" data-status="" role="status" aria-live="polite"></p></div>
 
 <section class="entry-strategy-group" aria-labelledby="entry-strategy-heading"><h2 class="entry-strategy-heading" id="entry-strategy-heading">Стратегия входа</h2><div class="entry-strategy-fields">
 <label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
@@ -1118,7 +1118,6 @@ async function loadCachedTickerBestResults() {
     } catch (_) {}
 }
 const refreshSymbolsButton = document.querySelector('#refresh-symbols');
-const refreshTodaySnapshotButton = document.querySelector('#refresh-today-snapshot');
 const resetSymbolCacheButton = document.querySelector('#reset-symbol-cache');
 const stopCalculationQueueButton = document.querySelector('#stop-calculation-queue');
 const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel');
@@ -1141,30 +1140,113 @@ const calculationQueueActive = document.querySelector('#calculation-queue-active
 const calculationQueueWaiting = document.querySelector('#calculation-queue-waiting');
 const calculationQueueUpdated = document.querySelector('#calculation-queue-updated');
 const endDayInput = filtersForm.elements.namedItem('end_day');
-refreshTodaySnapshotButton?.addEventListener('click', async () => {
+const historyImportStatus = document.querySelector('#history-import-status');
+const selectedSymbolImportButton = document.querySelector('#import-selected-symbol');
+const allSymbolsImportButton = document.querySelector('#import-all-active-symbols');
+const historyImportButtons = [selectedSymbolImportButton, allSymbolsImportButton].filter(Boolean);
+const historyImportJobStorageKey = 'bitget-history-import-job-v1';
+const historyImportResultStorageKey = 'bitget-history-import-result-v1';
+function updateHistoryImportLabels() {
+    if (!selectedSymbolImportButton) return;
+    selectedSymbolImportButton.textContent = '↻ ' + (symbolSelect.value || 'Выбранная пара');
+    const start = filtersForm.elements.namedItem('start_day').value;
+    const end = endDayInput.value;
+    selectedSymbolImportButton.title = `Скачать минутные свечи ${symbolSelect.value} из Bitget за период ${start} — ${end} включительно, сохранить в БД и обновить график и расчёты. Для пропущенных минут Close свечи используется как цена.`;
+    if (allSymbolsImportButton) allSymbolsImportButton.title = `Скачать минутные свечи всех активных пар из Bitget за период ${start} — ${end} включительно, сохранить в БД и обновить график и расчёты. Для пропущенных минут Close свечи используется как цена.`;
+}
+updateHistoryImportLabels();
+symbolSelect.addEventListener('change', updateHistoryImportLabels);
+filtersForm.elements.namedItem('start_day').addEventListener('change', updateHistoryImportLabels);
+endDayInput.addEventListener('change', updateHistoryImportLabels);
+const savedImportResult = sessionStorage.getItem(historyImportResultStorageKey);
+if (savedImportResult && historyImportStatus) {
+    try {
+        const result = JSON.parse(savedImportResult);
+        historyImportStatus.dataset.status = result.status || '';
+        historyImportStatus.textContent = result.message || '';
+    } catch (_) {}
+    sessionStorage.removeItem(historyImportResultStorageKey);
+}
+const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+function renderHistoryImportProgress(status) {
+    historyImportStatus.dataset.status = status.status || 'running';
+    let message = status.message || 'Загружаю исторические свечи…';
+    if (status.status === 'running') message += ` · ${status.progress || 0}%`;
+    if (Number.isFinite(Number(status.snapshots_inserted))) message += ` · в БД добавлено минут: ${Number(status.snapshots_inserted).toLocaleString('ru-RU')}`;
+    historyImportStatus.textContent = message;
+}
+async function pollHistoryImport(jobId, importRequest) {
+    historyImportButtons.forEach(button => { button.disabled = true; });
+    try {
+        while (true) {
+            await sleep(1200);
+            const response = await fetch('import-candles.php?job_id=' + encodeURIComponent(jobId), {headers:{Accept:'application/json'}, cache:'no-store'});
+            const status = await response.json();
+            if (!response.ok || status.status === 'error') throw new Error(status.message || 'Не удалось загрузить историю.');
+            renderHistoryImportProgress(status);
+            if (status.status !== 'ready' && status.status !== 'partial') continue;
+
+            const refreshBody = new URLSearchParams({start_day: importRequest.start_day, end_day: importRequest.end_day});
+            const refreshResponse = await fetch('refresh-current-day-snapshot.php', {method:'POST', body:refreshBody, headers:{Accept:'application/json'}, cache:'no-store'});
+            const refreshResult = await refreshResponse.json();
+            if (!refreshResponse.ok || refreshResult.status !== 'ready') throw new Error(refreshResult.message || 'Свечи загружены, но не удалось обновить срез расчётов.');
+            symbolSelect.value = importRequest.symbol;
+            filtersForm.elements.namedItem('start_day').value = importRequest.start_day;
+            endDayInput.value = importRequest.end_day;
+            document.querySelector('#symbol-sort-mode').value = 'profit';
+            const imported = Number(status.snapshots_inserted || 0).toLocaleString('ru-RU');
+            let message = `Загрузка завершена. В БД добавлено минут для графика и расчётов: ${imported}.`;
+            if (status.status === 'partial') message += ' Ошибки у пар: ' + (status.failures || []).map(item => item.symbol).join(', ') + '.';
+            sessionStorage.setItem(historyImportResultStorageKey, JSON.stringify({status: status.status, message}));
+            sessionStorage.removeItem(historyImportJobStorageKey);
+            filtersForm.requestSubmit();
+            return;
+        }
+    } catch (error) {
+        sessionStorage.removeItem(historyImportJobStorageKey);
+        historyImportStatus.dataset.status = 'error';
+        historyImportStatus.textContent = error.message || 'Не удалось загрузить историю из Bitget.';
+        historyImportButtons.forEach(button => { button.disabled = false; });
+    }
+}
+async function startHistoryImport(scope) {
     if (!filtersForm.checkValidity()) {
         filtersForm.reportValidity();
         return;
     }
-    refreshTodaySnapshotButton.disabled = true;
-    refreshTodaySnapshotButton.textContent = '…';
+    updateHistoryImportLabels();
+    const request = {
+        scope,
+        symbol: symbolSelect.value,
+        start_day: filtersForm.elements.namedItem('start_day').value,
+        end_day: endDayInput.value,
+    };
+    historyImportButtons.forEach(button => { button.disabled = true; });
+    historyImportStatus.dataset.status = 'running';
+    historyImportStatus.textContent = scope === 'all'
+        ? 'Отправляю запрос на загрузку всех активных пар…'
+        : `Отправляю запрос на загрузку ${request.symbol}…`;
     try {
-        const response = await fetch('refresh-current-day-snapshot.php', {
-            method: 'POST',
-            body: new FormData(filtersForm),
-            headers: {Accept: 'application/json'},
-            cache: 'no-store',
+        const response = await fetch('import-candles.php', {
+            method: 'POST', body: new URLSearchParams(request),
+            headers: {'Content-Type':'application/x-www-form-urlencoded', Accept:'application/json'}, cache:'no-store',
         });
         const result = await response.json();
-        if (!response.ok || result.status !== 'ready') throw new Error(result.message || 'Не удалось обновить данные.');
-        document.querySelector('#symbol-sort-mode').value = 'profit';
-        filtersForm.requestSubmit();
+        if (!response.ok || !result.job_id) throw new Error(result.message || 'Не удалось запустить загрузку истории.');
+        sessionStorage.setItem(historyImportJobStorageKey, JSON.stringify({job_id: result.job_id, request}));
+        pollHistoryImport(result.job_id, request);
     } catch (error) {
-        window.alert(error.message || 'Не удалось обновить данные.');
-        refreshTodaySnapshotButton.disabled = false;
-        refreshTodaySnapshotButton.textContent = '↻';
+        historyImportStatus.dataset.status = 'error';
+        historyImportStatus.textContent = error.message || 'Не удалось запустить загрузку истории.';
+        historyImportButtons.forEach(button => { button.disabled = false; });
     }
-});
+}
+selectedSymbolImportButton?.addEventListener('click', () => startHistoryImport('symbol'));
+allSymbolsImportButton?.addEventListener('click', () => startHistoryImport('all'));
+try {
+    const savedImportJob = JSON.parse(sessionStorage.getItem(historyImportJobStorageKey) || 'null');
+    if (savedImportJob?.job_id && savedImportJob?.request) pollHistoryImport(savedImportJob.job_id, savedImportJob.request);
+} catch (_) { sessionStorage.removeItem(historyImportJobStorageKey); }
 function createElapsedTimer(element, label) {
     let currentLabel = label;
     let startedAt = null;
