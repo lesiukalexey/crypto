@@ -99,7 +99,7 @@ if ($martingaleAttempts === false || $martingaleAttempts < 2 || $martingaleAttem
 $defaultFixedValue = (int) ($rankingRanges['fixed_tp']['values_basis_points'][0] ?? 10);
 $defaultExitConfig = 'fixed:' . $defaultFixedValue . ':' . $defaultFixedValue;
 $exitConfig = (string) ($_GET['exit_config'] ?? $defaultExitConfig);
-$selectTopRankedResult = (string) ($_GET['select_top_ranked_result'] ?? '0') === '1';
+$selectTopRankedResult = (string) ($_GET['select_top_ranked_result'] ?? (!array_key_exists('entry_config', $_GET) ? '1' : '0')) === '1';
 $martingaleTargetPolicy = 'scaled';
 if (preg_match('/:(scaled|fixed)$/', $exitConfig, $policyMatch)) {
     $martingaleTargetPolicy = $policyMatch[1];
@@ -139,11 +139,7 @@ $momentumLookback = $isImmediateEntry ? 0 : $entrySelection['window'];
 $momentumThresholdTenthsPercent = $isImmediateEntry ? 0 : $entrySelection['threshold_tenths_percent'];
 $momentumThreshold = $momentumThresholdTenthsPercent / 10;
 $entryFamilyPrefix = $entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−');
-$entryLoadingLabel = $isImmediateEntry
-    ? 'Загружаю рейтинг входов…'
-    : $entryFamilyPrefix . number_format($momentumThreshold, 1, '.', '') . '% от баланса за ' . $momentumLookback . ' снимков'
-        . ($entrySignalMode === 'within' ? ' · внутри' : '')
-        . ($entryDirectionMode === 'reverse' ? ' · против движения' : '');
+$entryLoadingLabel = 'Загружаю рейтинг порогов входа…';
 $profitTarget = bcdiv($startingBalance, '1000', 24);
 $lossThreshold = bcsub('0', $profitTarget, 24);
 if (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
