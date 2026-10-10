@@ -109,7 +109,7 @@ try {
     $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $keyParts = [
-        'portfolio-combination-details-v7-canonical-ledger', $generation, hash('sha256', $snapshotJson), $config['category'],
+        'portfolio-combination-details-v8-chain-risk', $generation, hash('sha256', $snapshotJson), $config['category'],
         $startValue, $endValue, $balance, $fee, $minTrades, $entryConfig, $originalExitConfig,
         $ranking['worker'], $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ];

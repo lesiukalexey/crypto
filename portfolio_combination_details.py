@@ -207,6 +207,8 @@ def main() -> int:
             pnl: float | None = None
             trade_count = 0
             chain_count = 0
+            max_drawdown: float | None = None
+            worst_chain: float | None = None
             if args.martingale_mode == "none":
                 simulation = portfolio_engine.simulate_symbol_entry(
                     (symbol, selected_entry, True),
@@ -244,12 +246,21 @@ def main() -> int:
                             args.martingale_max_chain_loss,
                             args.martingale_max_day_loss,
                             order_rules=contract_rules_by_symbol.get(symbol),
+                            include_risk_metrics=True,
                         )
                         pnl, trade_count = simulation_result[:2]
                         chain_count = int(simulation_result[2]) if len(simulation_result) > 2 else trade_count
+                        max_drawdown = float(simulation_result[3]) if len(simulation_result) > 3 else None
+                        worst_chain = float(simulation_result[4]) if len(simulation_result) > 4 else None
                         if trade_count == 0:
                             pnl = None
-            tickers.append({"symbol": symbol, "pnl": pnl, "trade_count": trade_count, "chain_count": chain_count})
+                            max_drawdown = None
+                            worst_chain = None
+            tickers.append({
+                "symbol": symbol, "pnl": pnl, "trade_count": trade_count,
+                "chain_count": chain_count, "max_drawdown": max_drawdown,
+                "worst_chain": worst_chain,
+            })
 
         write_json(result_path, {
             "status": "ready",

@@ -516,8 +516,11 @@ def simulate_martingale_numba(
     day_ids: np.ndarray,
     take_confirmation_snapshots: int,
     stop_confirmation_snapshots: int,
-) -> tuple[float, int, int]:
+) -> tuple[float, int, int, float, float]:
     balance = start_balance
+    equity_peak = start_balance
+    max_drawdown = 0.0
+    worst_chain = np.inf
     signal_cursor = 0
     closed_orders = 0
     chains_started = 0
@@ -527,7 +530,7 @@ def simulate_martingale_numba(
     has_take = not np.isnan(take_profit)
     has_stop = not np.isnan(stop_loss)
     if base_notional <= 0.0:
-        return 0.0, 0, 0
+        return 0.0, 0, 0, 0.0, 0.0
 
     while balance > 0.0 and signal_cursor < len(signal_indexes):
         entry_index = signal_indexes[signal_cursor]
@@ -551,10 +554,11 @@ def simulate_martingale_numba(
             quantity_places, min_order_notional, max_market_order_quantity,
         )
         if not order_valid:
-            return np.nan, 0, 0
+            return np.nan, 0, 0, 0.0, 0.0
         if notional <= 0.0:
             break
 
+        chain_start_balance = balance
         leg_prices = np.empty(attempts, dtype=np.float64)
         leg_quantities = np.empty(attempts, dtype=np.float64)
         leg_fees = np.empty(attempts, dtype=np.float64)
@@ -750,7 +754,7 @@ def simulate_martingale_numba(
                             quantity_places, min_order_notional, max_market_order_quantity,
                         )
                         if not order_valid:
-                            return np.nan, 0, 0
+                            return np.nan, 0, 0, 0.0, 0.0
                         if add_price > 0.0:
                             leg_prices[leg_count] = add_price
                             leg_quantities[leg_count] = add_quantity
@@ -785,7 +789,7 @@ def simulate_martingale_numba(
                             quantity_places, min_order_notional, max_market_order_quantity,
                         )
                         if not order_valid:
-                            return np.nan, 0, 0
+                            return np.nan, 0, 0, 0.0, 0.0
                         if next_price > 0.0:
                             entry_index = next_index
                             position_notional = actual_next_notional
@@ -829,7 +833,7 @@ def simulate_martingale_numba(
                             quantity_places, min_order_notional, max_market_order_quantity,
                         )
                         if not order_valid:
-                            return np.nan, 0, 0
+                            return np.nan, 0, 0, 0.0, 0.0
                         if reverse_price > 0.0:
                             is_short = reverse_short
                             entry_index = next_index
@@ -851,7 +855,18 @@ def simulate_martingale_numba(
                 signal_cursor = _upper_bound(signal_indexes, signal_cursor, exit_index)
                 break
 
-    return balance - start_balance, closed_orders, chains_started
+        chain_result = balance - chain_start_balance
+        if chain_result < worst_chain:
+            worst_chain = chain_result
+        if balance > equity_peak:
+            equity_peak = balance
+        drawdown = equity_peak - balance
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+
+    if chains_started == 0:
+        worst_chain = 0.0
+    return balance - start_balance, closed_orders, chains_started, max_drawdown, worst_chain
 
 
 @njit(cache=True)
@@ -885,13 +900,15 @@ def simulate_martingale_batch_numba(
     day_ids: np.ndarray,
     take_confirmation_snapshots: int,
     stop_confirmation_snapshots: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Evaluate an exit grid in one compiled call using the exact scalar kernel."""
     pnls = np.empty(len(take_profits), dtype=np.float64)
     closed_orders = np.empty(len(take_profits), dtype=np.int64)
     chains = np.empty(len(take_profits), dtype=np.int64)
+    max_drawdowns = np.empty(len(take_profits), dtype=np.float64)
+    worst_chains = np.empty(len(take_profits), dtype=np.float64)
     for index in range(len(take_profits)):
-        pnl, order_count, chain_count = simulate_martingale_numba(
+        pnl, order_count, chain_count, max_drawdown, worst_chain = simulate_martingale_numba(
             bids, asks, bid_maximum, bid_minimum, ask_maximum, ask_minimum,
             tree_size, tree_length, signal_indexes, signal_shorts,
             start_balance, fee_rate, min_order_quantity, quantity_step, quantity_places,
@@ -903,4 +920,6 @@ def simulate_martingale_batch_numba(
         pnls[index] = pnl
         closed_orders[index] = order_count
         chains[index] = chain_count
-    return pnls, closed_orders, chains
+        max_drawdowns[index] = max_drawdown
+        worst_chains[index] = worst_chain
+    return pnls, closed_orders, chains, max_drawdowns, worst_chains

@@ -429,7 +429,8 @@ def simulate(
     take_confirmation_snapshots: int = 0,
     stop_confirmation_snapshots: int = 0,
     order_rules: tuple[float, float, int, float, float] | None = None,
-) -> tuple[float, int] | tuple[float, int, int]:
+    include_risk_metrics: bool = False,
+) -> tuple[float, int] | tuple[float, int, int, float, float]:
     indexes = signal_indexes if isinstance(signal_indexes, np.ndarray) else np.asarray(signal_indexes, dtype=np.int64)
     shorts = signal_shorts if isinstance(signal_shorts, np.ndarray) else np.asarray(signal_shorts, dtype=np.bool_)
     # TP/SL candidates are tenths of one percent of the starting balance.
@@ -445,7 +446,7 @@ def simulate(
         if martingale_target_policy not in ("scaled", "fixed"):
             raise ValueError("Invalid martingale exit target policy")
         market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
-        pnl, order_count, _ = simulate_martingale_numba(
+        pnl, order_count, chain_count, max_drawdown, worst_chain = simulate_martingale_numba(
             quotes.bids, quotes.asks,
             bid_tree.maximum, bid_tree.minimum, ask_tree.maximum, ask_tree.minimum,
             bid_tree.size, bid_tree.length, indexes, shorts,
@@ -464,6 +465,8 @@ def simulate(
             quotes.local_days,
             take_confirmation_snapshots, stop_confirmation_snapshots,
         )
+        if include_risk_metrics:
+            return pnl, order_count, chain_count, max_drawdown, worst_chain
         return pnl, order_count
 
     from numba_simulation import simulate_numba
@@ -529,7 +532,7 @@ def simulate_martingale_batch(
     mode_id = {"simple": 0, "reverse": 1, "simple_profit": 2, "reverse_profit": 3}[mode]
     timing_id = 0 if timing == "immediate" else 1
     market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
-    pnls, order_counts, chain_counts = simulate_martingale_batch_numba(
+    pnls, order_counts, chain_counts, _, _ = simulate_martingale_batch_numba(
         quotes.bids, quotes.asks, bid_tree.maximum, bid_tree.minimum,
         ask_tree.maximum, ask_tree.minimum, bid_tree.size, bid_tree.length,
         signal_indexes, signal_shorts, start_balance, fee_rate, *market_rules, takes, stops,

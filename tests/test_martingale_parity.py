@@ -96,6 +96,31 @@ class MartingaleParityTests(unittest.TestCase):
                     self.assertTrue(np.isnan(rejected[0]))
                     self.assertEqual(rejected[1], 0)
 
+    def test_risk_metrics_report_chain_loss_and_balance_drawdown(self):
+        prices = np.asarray([10.0, 8.0])
+        quotes = QuoteArrays(prices, prices, prices, np.arange(len(prices), dtype=np.float64))
+        result = simulate(
+            quotes, [0], [False], PriceTree(quotes.bids), PriceTree(quotes.asks),
+            10.0, 0.0, None, None, "simple", "immediate", 2, "scaled",
+            include_risk_metrics=True,
+        )
+        self.assertEqual(result[1:3], (1, 1))
+        self.assertAlmostEqual(result[3], 1.0, delta=1e-12)
+        self.assertAlmostEqual(result[4], -1.0, delta=1e-12)
+
+        winning_prices = np.asarray([10.0, 12.0])
+        winning_quotes = QuoteArrays(
+            winning_prices, winning_prices, winning_prices,
+            np.arange(len(winning_prices), dtype=np.float64),
+        )
+        winning = simulate(
+            winning_quotes, [0], [False], PriceTree(winning_quotes.bids), PriceTree(winning_quotes.asks),
+            10.0, 0.0, None, None, "simple", "immediate", 2, "scaled",
+            include_risk_metrics=True,
+        )
+        self.assertAlmostEqual(winning[4], 1.0, delta=1e-12)
+        self.assertAlmostEqual(winning[3], 0.0, delta=1e-12)
+
     def test_all_martingale_variants_match_on_fixed_quote_fixture(self):
         prices = [10, 8, 8.5, 9, 10.5, 10, 9, 8.5, 8, 9, 10.5, 10.5, 11, 10, 9, 10, 11, 12]
         indexes = [0, 2, 4, 6, 8, 10, 12, 14, 16]
