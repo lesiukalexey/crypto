@@ -28,30 +28,14 @@ try {
     }
 
     $latestUtc = new DateTimeImmutable($latest, new DateTimeZone('UTC'));
-    $ageSeconds = max(0, time() - $latestUtc->getTimestamp());
-    $interval = max(1, (float) ($config['poll_interval_seconds'] ?? 60));
-    $activeThreshold = max(180, (int) ceil($interval * 3));
-    $delayedThreshold = max(600, (int) ceil($interval * 10));
-    if ($ageSeconds <= $activeThreshold) {
-        $status = 'active';
-        $label = 'Сбор котировок работает';
-    } elseif ($ageSeconds <= $delayedThreshold) {
-        $status = 'delayed';
-        $label = 'Котировки поступают с задержкой';
-    } else {
-        $status = 'stopped';
-        $label = 'Новых котировок давно нет';
-    }
-
     $latestKyiv = $latestUtc->setTimezone(new DateTimeZone('Europe/Kyiv'))->format('d.m.Y H:i:s');
     echo json_encode([
-        'status' => $status,
-        'label' => $label,
+        'status' => 'latest',
+        'label' => 'Последняя котировка: ' . $latestKyiv,
         'latest' => $latestKyiv,
-        'age_seconds' => $ageSeconds,
-        'title' => 'Последний снимок: ' . $latestKyiv . ' · ' . $ageSeconds . ' сек. назад',
+        'title' => 'Максимальное время котировки в базе данных: ' . $latestKyiv . ' (Europe/Kyiv)',
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 } catch (Throwable) {
     http_response_code(503);
-    echo json_encode(['status' => 'unknown', 'label' => 'Не удалось проверить сборщик'], JSON_UNESCAPED_UNICODE);
+    echo json_encode(['status' => 'unknown', 'label' => 'Не удалось загрузить время котировки'], JSON_UNESCAPED_UNICODE);
 }

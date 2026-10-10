@@ -870,7 +870,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .reset-symbol-cache,.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
 </style>
 </head><body><main class="wrap">
-<header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Проверяем свежесть котировок">Проверка сборщика…</div></div></header>
+<header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Загружаю последнее время котировки">Загружаю последнюю котировку…</div></div></header>
 <nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a></nav>
 <?php if ($favoriteView): ?><p class="favorite-readonly-note">Просмотр сохранённой стратегии «<?= h((string) ($favorite['name'] ?? $favoriteId)) ?>». Параметры доступны только для чтения. <a class="strategy-link" href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
 <?php if ($combinationDetail): ?>
@@ -2332,11 +2332,11 @@ async function refreshCollectorStatus() {
         const response = await fetch('collector-status.php', {headers:{Accept:'application/json'}, cache:'no-store'});
         const status = await response.json();
         collectorStatus.dataset.status = status.status || 'unknown';
-        collectorStatus.textContent = status.label || 'Не удалось проверить сборщик';
+        collectorStatus.textContent = status.label || 'Не удалось загрузить время котировки';
         collectorStatus.title = status.title || status.label || 'Статус сборщика недоступен';
     } catch (_) {
         collectorStatus.dataset.status = 'unknown';
-        collectorStatus.textContent = 'Не удалось проверить сборщик';
+        collectorStatus.textContent = 'Не удалось загрузить время котировки';
         collectorStatus.title = 'Проверьте доступность базы данных';
     }
 }
