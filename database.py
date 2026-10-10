@@ -154,6 +154,8 @@ def insert_historical_candle_snapshots(
     start_ms: int,
     end_exclusive_ms: int,
 ) -> int:
+    start_time = datetime.fromtimestamp(start_ms / 1000, timezone.utc).replace(tzinfo=None)
+    end_time = datetime.fromtimestamp(end_exclusive_ms / 1000, timezone.utc).replace(tzinfo=None)
     with connection.cursor() as cursor:
         cursor.execute(
             """SELECT candle_timestamp_ms, open_price, high_price, low_price,
@@ -176,10 +178,21 @@ def insert_historical_candle_snapshots(
             (category, symbol, start_ms, end_exclusive_ms),
         )
         existing = {int(row[0]) for row in cursor.fetchall() if row[0] is not None}
+        cursor.execute(
+            """SELECT received_at_utc
+               FROM quote_snapshots
+               WHERE category = %s AND symbol = %s AND quote_source = 'ticker'
+                 AND received_at_utc >= %s AND received_at_utc < %s""",
+            (category, symbol, start_time, end_time),
+        )
+        ticker_minutes = {
+            int(row[0].replace(tzinfo=timezone.utc).timestamp() * 1000) // 60_000
+            for row in cursor.fetchall()
+        }
         rows = []
         for candle in candles:
             timestamp_ms = int(candle[0])
-            if timestamp_ms in existing:
+            if timestamp_ms in existing or timestamp_ms // 60_000 in ticker_minutes:
                 continue
             candle_time = datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc).replace(tzinfo=None)
             close = str(candle[4])

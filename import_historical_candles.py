@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill Bitget historical candles through the latest stored quote snapshot."""
+"""Backfill Bitget historical candles and fill missing quote-snapshot minutes."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import argparse
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path("config.json"), help="JSON config file")
     parser.add_argument("--symbol", required=True, help="One symbol from config.json")
     parser.add_argument("--start-date", default="2026-10-01", help="Local calendar date in Europe/Kyiv")
+    parser.add_argument("--end-date", help="Inclusive local calendar end date in Europe/Kyiv; also selects the snapshot backfill range")
     parser.add_argument("--timeout", type=float, default=15.0, help="HTTP timeout in seconds")
     return parser.parse_args()
 
@@ -87,6 +88,12 @@ def main() -> int:
             raise ValueError(f"Symbol {symbol} is not configured in {args.config}")
         start_dt = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=LOCAL_ZONE)
         start_ms = int(start_dt.timestamp() * 1000)
+        requested_end_exclusive_ms = None
+        if args.end_date:
+            end_dt = datetime.strptime(args.end_date, "%Y-%m-%d").replace(tzinfo=LOCAL_ZONE)
+            if end_dt < start_dt:
+                raise ValueError("End date must be on or after the start date")
+            requested_end_exclusive_ms = int((end_dt + timedelta(days=1)).timestamp() * 1000)
         mysql_config = config["mysql"]
         mysql_config.setdefault("password_env", "BITGET_DB_PASSWORD")
         connection = connect_mysql(mysql_config)
@@ -100,8 +107,10 @@ def main() -> int:
             logging.error("No timestamped quote snapshots found for %s (%s)", symbol, category)
             return 2
         last_candle_ms = latest_quote_ms // INTERVAL_MS * INTERVAL_MS - INTERVAL_MS
+        if requested_end_exclusive_ms is not None:
+            last_candle_ms = min(last_candle_ms, requested_end_exclusive_ms - INTERVAL_MS)
         if last_candle_ms < start_ms:
-            logging.error("Latest saved quote for %s is earlier than the requested start date", symbol)
+            logging.error("No completed 1m candles are available in the requested date range for %s", symbol)
             return 2
 
         candle_rows: dict[int, list[str]] = {}
@@ -133,21 +142,25 @@ def main() -> int:
         if first_quote_ms is None:
             logging.error("No live quote boundary found for %s (%s)", symbol, category)
             return 2
-        before_live_minute_ms = first_quote_ms // INTERVAL_MS * INTERVAL_MS - INTERVAL_MS
+        if requested_end_exclusive_ms is None:
+            before_live_minute_ms = first_quote_ms // INTERVAL_MS * INTERVAL_MS - INTERVAL_MS
+            snapshot_end_exclusive_ms = before_live_minute_ms + INTERVAL_MS
+        else:
+            snapshot_end_exclusive_ms = requested_end_exclusive_ms
         quote_rows = insert_historical_candle_snapshots(
             connection,
             category,
             symbol,
             INTERVAL,
             start_ms // INTERVAL_MS * INTERVAL_MS,
-            before_live_minute_ms + INTERVAL_MS,
+            snapshot_end_exclusive_ms,
         )
         logging.info("Symbol: %s (%s)", symbol, category)
         logging.info("Latest existing quote: %s Europe/Kyiv", quote_time.isoformat(sep=" "))
         logging.info("Raw historical candles newly inserted: %s", saved)
         if candles:
             logging.info("Raw candle range fetched: %s — %s Europe/Kyiv", first_time, last_time)
-        logging.info("Candle-derived quote snapshots newly inserted before first live quote: %s", quote_rows)
+        logging.info("Candle-derived quote snapshots newly inserted for requested date range: %s", quote_rows)
         return 0
     except RuntimeError as exc:
         connection.rollback()
