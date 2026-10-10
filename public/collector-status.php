@@ -28,11 +28,17 @@ try {
     }
 
     $latestUtc = new DateTimeImmutable($latest, new DateTimeZone('UTC'));
-    $latestKyiv = $latestUtc->setTimezone(new DateTimeZone('Europe/Kyiv'))->format('d.m.Y H:i:s');
+    $kyiv = new DateTimeZone('Europe/Kyiv');
+    $nowUtc = new DateTimeImmutable('now', new DateTimeZone('UTC'));
+    $ageSeconds = max(0, $nowUtc->getTimestamp() - $latestUtc->getTimestamp());
+    $sameKyivDay = $latestUtc->setTimezone($kyiv)->format('Y-m-d') === $nowUtc->setTimezone($kyiv)->format('Y-m-d');
+    $status = $ageSeconds > 86400 ? 'stale-red' : ($ageSeconds >= 3600 || !$sameKyivDay ? 'stale-green' : 'fresh-yellow');
+    $latestKyiv = $latestUtc->setTimezone($kyiv)->format('d.m.Y H:i:s');
     echo json_encode([
-        'status' => 'latest',
+        'status' => $status,
         'label' => 'Последняя котировка: ' . $latestKyiv,
         'latest' => $latestKyiv,
+        'age_seconds' => $ageSeconds,
         'title' => 'Максимальное время котировки в базе данных: ' . $latestKyiv . ' (Europe/Kyiv)',
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 } catch (Throwable) {
