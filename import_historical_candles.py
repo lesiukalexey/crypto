@@ -225,6 +225,7 @@ def main() -> int:
                 continue
             symbol_pages = math.ceil(max(0, end_exclusive_ms - start_ms) / (PAGE_CANDLES * INTERVAL_MS))
             completed_pages_for_symbol = [0]
+            symbol_totals = {"symbol_candles_received": 0, "symbol_candles_inserted": 0, "symbol_snapshots_inserted": 0}
 
             def on_page(
                 page_number: int,
@@ -236,6 +237,9 @@ def main() -> int:
                 totals["candles_received"] += page_received
                 totals["candles_inserted"] += page_inserted
                 totals["snapshots_inserted"] += page_snapshots
+                symbol_totals["symbol_candles_received"] += page_received
+                symbol_totals["symbol_candles_inserted"] += page_inserted
+                symbol_totals["symbol_snapshots_inserted"] += page_snapshots
                 completed_pages_for_symbol[0] = page_number
                 current_pages = page_offset + page_number
                 overall_progress = round(current_pages * 100 / max(1, total_pages), 2)
@@ -246,7 +250,7 @@ def main() -> int:
                     "start_day": "per-symbol latest" if args.from_latest else args.start_date,
                     "end_day": end_date_value, "symbol_count": len(symbols),
                     "completed_symbols": symbol_index - 1, "current_symbol": symbol,
-                    "current_page": page_number, "symbol_pages": page_count, **totals,
+                    "current_page": page_number, "symbol_pages": page_count, **symbol_totals, **totals,
                     "message": f"{symbol}: страница {page_number} из {page_count}",
                 })
 
@@ -254,7 +258,8 @@ def main() -> int:
                 "status": "running", "progress": round(page_offset * 100 / max(1, total_pages), 2),
                 "start_day": "per-symbol latest" if args.from_latest else args.start_date,
                 "end_day": end_date_value, "symbol_count": len(symbols),
-                "completed_symbols": symbol_index - 1, "current_symbol": symbol, **totals,
+                "completed_symbols": symbol_index - 1, "current_symbol": symbol,
+                **symbol_totals, **totals,
                 "message": f"Загружаю {symbol} ({symbol_index}/{len(symbols)})…",
             })
 

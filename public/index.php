@@ -1207,9 +1207,21 @@ function renderHistoryImportProgress(status) {
             ? Number(status.symbol_progress)
             : Number(status.current_page || 0) * 100 / Math.max(1, Number(status.symbol_pages || 1));
         message += ` · по паре ${symbolProgress.toLocaleString('ru-RU', {maximumFractionDigits:1})}% · всего ${overall}%`;
-        if (Number.isFinite(Number(status.candles_received))) message += ` · получено свечей: ${Number(status.candles_received).toLocaleString('ru-RU')}`;
+        if (Number.isFinite(Number(status.candles_received))) {
+            const received = Number(status.candles_received).toLocaleString('ru-RU');
+            const pairReceived = Number(status.symbol_candles_received);
+            message += Number.isFinite(pairReceived)
+                ? ` · свечей получено: ${pairReceived.toLocaleString('ru-RU')} по ${status.current_symbol} / ${received} всего`
+                : ` · свечей получено всего: ${received}`;
+        }
     }
-    if (Number.isFinite(Number(status.snapshots_inserted))) message += ` · в БД добавлено минут: ${Number(status.snapshots_inserted).toLocaleString('ru-RU')}`;
+    if (Number.isFinite(Number(status.snapshots_inserted))) {
+        const totalSnapshots = Number(status.snapshots_inserted).toLocaleString('ru-RU');
+        const pairSnapshots = Number(status.symbol_snapshots_inserted);
+        message += Number.isFinite(pairSnapshots)
+            ? ` · добавлено минутных котировок в БД: ${pairSnapshots.toLocaleString('ru-RU')} по ${status.current_symbol} / ${totalSnapshots} всего за загрузку`
+            : ` · добавлено минутных котировок в БД всего за загрузку: ${totalSnapshots}`;
+    }
     historyImportStatus.textContent = message;
 }
 async function pollHistoryImport(jobId, importRequest) {
@@ -1232,7 +1244,7 @@ async function pollHistoryImport(jobId, importRequest) {
             endDayInput.value = importRequest.end_day;
             document.querySelector('#symbol-sort-mode').value = 'profit';
             const imported = Number(status.snapshots_inserted || 0).toLocaleString('ru-RU');
-            let message = `Загрузка завершена. В БД добавлено минут для графика и расчётов: ${imported}.`;
+            let message = `Загрузка завершена. Минутных котировок добавлено в БД для графика и расчётов: ${imported}.`;
             if (status.status === 'partial') message += ' Ошибки у пар: ' + (status.failures || []).map(item => item.symbol).join(', ') + '.';
             sessionStorage.setItem(historyImportResultStorageKey, JSON.stringify({status: status.status, message}));
             sessionStorage.removeItem(historyImportJobStorageKey);
