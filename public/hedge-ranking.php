@@ -64,7 +64,7 @@ try {
     $statement = $pdo->prepare(
         'SELECT received_at_utc, bid_price, ask_price FROM quote_snapshots '
         . 'WHERE category = ? AND symbol = ? AND received_at_utc >= ? AND received_at_utc < ? '
-        . 'ORDER BY received_at_utc, id LIMIT 25001'
+        . 'ORDER BY received_at_utc, id LIMIT 100001'
     );
 
     $quotesBySymbol = [];
@@ -72,7 +72,7 @@ try {
         $statement->execute([$config['category'], $symbol, $startUtc, $endUtc]);
         $rows = [];
         while (($row = $statement->fetch()) !== false) {
-            if (count($rows) === 25000) {
+            if (count($rows) === 100000) {
                 hedge_ranking_respond([
                     'status' => 'error',
                     'message' => 'Для ранжирования пар выбрано слишком много снимков. Сузьте диапазон дат и повторите расчёт.',

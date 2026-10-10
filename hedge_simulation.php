@@ -12,25 +12,24 @@ function simulate_cross_hedge(
     float $feeRate,
     int $maxQuoteAgeSeconds = 120,
 ): array {
-    $quoteTimes = [];
-    foreach ([$longRows, $shortRows] as $rows) {
-        foreach ($rows as $row) {
-            $quoteTimes[] = hedge_timestamp_ms($row);
-        }
-    }
-    sort($quoteTimes, SORT_NUMERIC);
-    $quoteTimes = array_values(array_unique($quoteTimes));
     $longIndex = -1;
     $shortIndex = -1;
     $longCursor = 0;
     $shortCursor = 0;
     $entry = null;
     $points = [];
+    $lastPoint = null;
+    $alignedPoints = 0;
+    $chartPointLimit = 3600;
     $allocation = $startingBalance / 2.0;
     $longNotional = $allocation / (1.0 + $feeRate);
     $shortNotional = $allocation / (1.0 + $feeRate);
 
-    foreach ($quoteTimes as $timestampMs) {
+    while (isset($longRows[$longCursor]) || isset($shortRows[$shortCursor])) {
+        $timestampMs = min(
+            isset($longRows[$longCursor]) ? hedge_timestamp_ms($longRows[$longCursor]) : PHP_INT_MAX,
+            isset($shortRows[$shortCursor]) ? hedge_timestamp_ms($shortRows[$shortCursor]) : PHP_INT_MAX,
+        );
         while (isset($longRows[$longCursor]) && hedge_timestamp_ms($longRows[$longCursor]) <= $timestampMs) {
             $longIndex = $longCursor++;
         }
@@ -69,7 +68,7 @@ function simulate_cross_hedge(
         $longPnl = $longGross - $entry['long_entry_fee'] - $longExitFee;
         $shortPnl = $shortGross - $entry['short_entry_fee'] - $shortExitFee;
         $netPnl = $longPnl + $shortPnl;
-        $points[] = [
+        $point = [
             't' => $timestampMs,
             'long_index' => 100.0 * $longBid / $entry['long_ask'],
             'short_index' => 100.0 * (1.0 + ($entry['short_bid'] - $shortAsk) / $entry['short_bid']),
@@ -82,13 +81,25 @@ function simulate_cross_hedge(
             'long_close' => $longBid,
             'short_close' => $shortAsk,
         ];
+        $lastPoint = $point;
+        $alignedPoints++;
+        $points[] = $point;
+        // Keep enough points for the chart while allowing long date ranges.
+        if (count($points) > $chartPointLimit) {
+            $points = array_values(array_filter(
+                $points,
+                static fn (array $_point, int $index): bool => $index % 2 === 0,
+                ARRAY_FILTER_USE_BOTH,
+            ));
+        }
     }
 
     if ($entry === null || $points === []) {
         return ['entry' => null, 'points' => [], 'summary' => null];
     }
 
-    $last = $points[count($points) - 1];
+    $last = $lastPoint;
+    $points[count($points) - 1] = $last;
     return [
         'entry' => $entry,
         'points' => $points,
@@ -108,7 +119,7 @@ function simulate_cross_hedge(
             ) * $feeRate,
             'entry_time_ms' => $entry['timestamp_ms'],
             'last_aligned_time_ms' => $last['t'],
-            'aligned_points' => count($points),
+            'aligned_points' => $alignedPoints,
         ],
     ];
 }
