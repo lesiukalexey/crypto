@@ -1174,7 +1174,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <p class="small-note">Для каждого параметра можно добавить несколько диапазонов. Внутри каждого задайте «от», «до» и шаг; граничные значения включаются.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 <p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Для исполнения используются действующие правила контракта Bitget (плечо 1×, шаг количества, минимумы и максимум рыночной заявки), комиссия за market/taker и указанное проскальзывание. К историческим сделкам применяются текущие правила контракта. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
 <section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты и очищает очередь. 🧹 делает то же самое и дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
-<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><section class="ranking-history" id="portfolio-ranking-history" aria-live="polite"><h3 class="ranking-history-title">Сохранённые общие рейтинги</h3><p class="ranking-history-status">Откройте вкладку, чтобы загрузить список расчётов для выбранного списка тикеров.</p></section><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
+<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><section class="ranking-history" id="portfolio-ranking-history" aria-live="polite" hidden><h3 class="ranking-history-title">Сохранённые общие рейтинги</h3><p class="ranking-history-status">Откройте вкладку, чтобы загрузить список расчётов для выбранного списка тикеров.</p></section><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head chart-info-line"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count" title="<?= $visibleQuoteCount ?> исходных снимков; <?= $chartPointCount ?> точек в графике"><?= $visibleQuoteCount ?> снимков<?php if ($chartPointCount < $visibleQuoteCount): ?> · график <?= $chartPointCount ?><?php endif; ?></span><span class="chart-info-item"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
 <?php if ($hasHistoricalCandles): ?><p class="hint">Исторические минутные свечи: Bid, Ask и Last восстановлены по цене Close; биржевой спред в этих данных отсутствует.</p><?php endif; ?>
 <?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
@@ -1363,13 +1363,22 @@ const rankingCollapseToggle = document.querySelector('#ranking-collapse-toggle')
 let portfolioRankingCollapsed = true;
 let portfolioRankingHistorySetId = '';
 let portfolioRankingHistoryRequest = 0;
+let portfolioRankingExactCacheReady = false;
+let portfolioRankingCacheChecked = false;
+let portfolioRankingCacheLookupPromise = null;
 function setPortfolioRankingCollapsed(collapsed) {
     portfolioRankingCollapsed = collapsed;
     portfolioRankingContent.hidden = collapsed;
     rankingCollapseToggle?.setAttribute('aria-expanded', String(!collapsed));
     rankingCollapseToggle?.setAttribute('aria-label', collapsed ? 'Развернуть общий рейтинг' : 'Свернуть общий рейтинг');
     rankingCollapseToggle?.setAttribute('title', collapsed ? 'Развернуть общий рейтинг' : 'Свернуть общий рейтинг');
-    if (!collapsed) loadPortfolioRankingHistory();
+    if (!collapsed) {
+        ensurePortfolioRankingCacheChecked().then((matched) => {
+            if (portfolioRankingCollapsed) return;
+            if (matched) portfolioRankingHistory.hidden = true;
+            else loadPortfolioRankingHistory();
+        });
+    }
 }
 rankingCollapseToggle?.addEventListener('click', () => setPortfolioRankingCollapsed(!portfolioRankingCollapsed));
 setPortfolioRankingCollapsed(portfolioRankingCollapsed);
@@ -1729,6 +1738,10 @@ function resetRefreshButton(title = 'Рассчитать общие лучши�
 }
 function resetPortfolioRankingForRelevantFilterChange() {
     portfolioRankingRequestVersion++;
+    portfolioRankingExactCacheReady = false;
+    portfolioRankingCacheChecked = false;
+    portfolioRankingHistorySetId = '';
+    portfolioRankingHistory.hidden = true;
     portfolioRankingTimer.finish();
     symbolSortMode.value = '';
     resetRefreshButton('Пересчитать рейтинг для измененных фильтров');
@@ -2553,9 +2566,14 @@ function portfolioRankingDiagnosticsText(ranking) {
     portfolioRankingDiagnostics.textContent = lines.join('\n');
 }
 async function loadPortfolioRankingHistory(force = false) {
+    if (await ensurePortfolioRankingCacheChecked()) {
+        portfolioRankingHistory.hidden = true;
+        return;
+    }
     const tickerSet = filtersForm.querySelector('[name="ticker_set"]')?.value || '';
     if (!force && tickerSet !== '' && portfolioRankingHistorySetId === tickerSet) return;
     portfolioRankingHistorySetId = tickerSet;
+    portfolioRankingHistory.hidden = false;
     const requestId = ++portfolioRankingHistoryRequest;
     portfolioRankingHistory.replaceChildren();
     const title = document.createElement('h3');
@@ -2572,6 +2590,16 @@ async function loadPortfolioRankingHistory(force = false) {
         if (requestId !== portfolioRankingHistoryRequest) return;
         if (!response.ok || payload.status !== 'ready') throw new Error(payload.message || 'Не удалось загрузить сохранённые расчёты.');
         const rankings = Array.isArray(payload.rankings) ? payload.rankings : [];
+        const selectedStartDay = filtersForm.elements.namedItem('start_day')?.value || '';
+        const selectedEndDay = filtersForm.elements.namedItem('end_day')?.value || '';
+        const sameRangeLegacy = rankings.find((item) => item.legacy
+            && item.start_day === selectedStartDay
+            && item.end_day === selectedEndDay);
+        if (sameRangeLegacy) {
+            portfolioRankingHistory.hidden = true;
+            await loadPortfolioRanking({savedCacheKey: sameRangeLegacy.cache_key, autoMatchedLegacy: true});
+            return;
+        }
         if (rankings.length === 0) {
             status.textContent = `Для списка «${payload.ticker_set?.name || 'выбранный список'}» пока нет сохранённых общих рейтингов.`;
             return;
@@ -2619,7 +2647,20 @@ async function loadPortfolioRankingHistory(force = false) {
         status.textContent = error.message || 'Не удалось загрузить сохранённые общие рейтинги.';
     }
 }
-async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = ''} = {}) {
+async function ensurePortfolioRankingCacheChecked() {
+    if (portfolioRankingExactCacheReady) return true;
+    if (portfolioRankingCacheChecked) return false;
+    if (!portfolioRankingCacheLookupPromise) {
+        portfolioRankingCacheLookupPromise = loadPortfolioRanking({cachedOnly: true})
+            .then(() => {
+                portfolioRankingCacheChecked = true;
+                return portfolioRankingExactCacheReady;
+            })
+            .finally(() => { portfolioRankingCacheLookupPromise = null; });
+    }
+    return portfolioRankingCacheLookupPromise;
+}
+async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', autoMatchedLegacy = false} = {}) {
     const requestVersion = ++portfolioRankingRequestVersion;
     const showingSavedResult = savedCacheKey !== '';
     portfolioRankingTimer.reset();
@@ -2653,6 +2694,8 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = ''} = {
             if (requestVersion !== portfolioRankingRequestVersion) return;
             if (!response.ok || ranking.status === 'error') throw new Error(ranking.message || 'Не удалось рассчитать общий рейтинг');
             if (cachedOnly && ranking.status === 'missing') {
+                portfolioRankingExactCacheReady = false;
+                portfolioRankingCacheChecked = true;
                 portfolioRankingStatus.textContent = 'Сохранённый общий рейтинг для выбранного периода и параметров не найден. Нажмите ↻, чтобы запустить расчёт.';
                 return;
             }
@@ -2680,6 +2723,11 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = ''} = {
             return;
         }
         if (ranking.status !== 'ready') throw new Error(ranking.message || 'Общий рейтинг пока недоступен');
+        if (!showingSavedResult) {
+            portfolioRankingExactCacheReady = true;
+            portfolioRankingCacheChecked = true;
+            portfolioRankingHistory.hidden = true;
+        }
         if (!cachedOnly || sawPending) setPortfolioRankingCollapsed(false);
         portfolioRankingContent.hidden = portfolioRankingCollapsed;
         const canLinkCurrentSettings = !showingSavedResult;
@@ -2755,7 +2803,9 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = ''} = {
                 + ' тикерам с данными за период; пары без подходящей выборки учитываются как 0. SAVE MODE требует минимум '
                 + ranking.min_trades + (ranking.min_trades === 1 ? ' сделку.' : ' сделки.');
         if (showingSavedResult && ranking.history_legacy) {
-            portfolioRankingStatus.textContent += ' Параметры старого расчёта не были сохранены; они перечислены как неизвестные в списке истории.';
+            portfolioRankingStatus.textContent += autoMatchedLegacy
+                ? ' Диапазон дат и список тикеров совпадают с текущими; параметры старого расчёта не сохранились, поэтому подтвердить их совпадение нельзя.'
+                : ' Параметры старого расчёта не были сохранены; они указаны как неизвестные в списке истории.';
         }
         portfolioRankingDiagnosticsText(ranking);
         const tickerResults = (ranking.ticker_leaders || []).map(item => ({
@@ -2855,7 +2905,7 @@ updateMartingaleInitialNotional();
 if (!favoriteView && symbolSortMode.value === 'profit') {
     loadPortfolioRanking();
 } else if (!favoriteView) {
-    loadPortfolioRanking({cachedOnly: true});
+    ensurePortfolioRankingCacheChecked();
 }
 if (!favoriteView) {
     loadCachedTickerBestResults();
