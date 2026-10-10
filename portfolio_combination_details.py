@@ -114,10 +114,11 @@ def main() -> int:
         contract_rules_by_symbol = {}
         if args.martingale_mode != "none":
             contract_specs = load_contract_specs(config["category"])
-            contract_rules_by_symbol = {
-                symbol: numba_market_order_rules(spec, leverage=1.0)
-                for symbol, spec in contract_specs.items()
-            }
+            for contract_symbol in max_ids:
+                contract = contract_specs.get(contract_symbol)
+                if contract is None:
+                    raise RuntimeError(f"Bitget contract rules are unavailable for {contract_symbol}")
+                contract_rules_by_symbol[contract_symbol] = numba_market_order_rules(contract, leverage=1.0)
         end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
         start_utc = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV).astimezone(timezone.utc).replace(tzinfo=None)
