@@ -75,25 +75,26 @@ class MartingaleParityTests(unittest.TestCase):
         prices = np.asarray([10.0, 10.0, 10.0])
         quotes = QuoteArrays(prices, prices, prices, np.arange(len(prices), dtype=np.float64))
         bid_tree, ask_tree = PriceTree(quotes.bids), PriceTree(quotes.asks)
-        common = (quotes, [0], [False], bid_tree, ask_tree, 10.0, 0.0, None, None,
-                  "simple_profit", "immediate", 2, "scaled", None, None)
+        # Cover simple/reverse loss and profit variants at a 5 USDT exact minimum.
+        for mode in ("simple", "reverse", "simple_profit", "reverse_profit"):
+            common = (quotes, [0], [False], bid_tree, ask_tree, 10.0, 0.0, None, None,
+                      mode, "immediate", 2, "scaled", None, None)
+            with self.subTest(mode=mode, valid=True):
+                valid = simulate(*common, order_rules=(0.5, 0.1, 1, 5.0, 0.0))
+                self.assertEqual(valid[1], 1)
+                self.assertAlmostEqual(float(valid[0]), 0.0, delta=1e-12)
 
-        # A 5 USDT first order is placeable at the exact contract minimum.
-        valid = simulate(*common, order_rules=(0.5, 0.1, 1, 5.0, 0.0))
-        self.assertEqual(valid[1], 1)
-        self.assertAlmostEqual(float(valid[0]), 0.0, delta=1e-12)
-
-        # Reject when any independent contract bound makes the first attempt impossible.
-        for rules in (
-            (0.5, 0.1, 1, 5.01, 0.0),  # minimum notional
-            (0.51, 0.1, 2, 5.0, 0.0),  # minimum quantity after rounding
-            (0.1, 0.3, 1, 5.0, 0.0),  # quantity step rounds below minimum notional
-            (0.1, 0.1, 1, 5.0, 0.49),  # market-order maximum
-        ):
-            with self.subTest(rules=rules):
-                rejected = simulate(*common, order_rules=rules)
-                self.assertTrue(np.isnan(rejected[0]))
-                self.assertEqual(rejected[1], 0)
+            # Reject when any independent contract bound makes the first attempt impossible.
+            for rules in (
+                (0.5, 0.1, 1, 5.01, 0.0),  # minimum notional
+                (0.51, 0.1, 2, 5.0, 0.0),  # minimum quantity after rounding
+                (0.1, 0.3, 1, 5.0, 0.0),  # quantity step rounds below minimum notional
+                (0.1, 0.1, 1, 5.0, 0.49),  # market-order maximum
+            ):
+                with self.subTest(mode=mode, rules=rules):
+                    rejected = simulate(*common, order_rules=rules)
+                    self.assertTrue(np.isnan(rejected[0]))
+                    self.assertEqual(rejected[1], 0)
 
     def test_all_martingale_variants_match_on_fixed_quote_fixture(self):
         prices = [10, 8, 8.5, 9, 10.5, 10, 9, 8.5, 8, 9, 10.5, 10.5, 11, 10, 9, 10, 11, 12]
