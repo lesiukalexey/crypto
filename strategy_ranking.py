@@ -24,6 +24,7 @@ import pymysql
 
 from app import load_config
 from contract_rules import load_contract_specs, numba_market_order_rules
+from futures_costs import load_historical_funding_rates
 from database import connect_mysql
 from martingale import martingale_base_notional
 from ranking_checkpoints import STATE_DTYPE, daily_quote_boundaries, dated_state_checkpoint_path, has_dated_state_checkpoint, load_best_state_checkpoint, load_exact_state_checkpoint, write_state_checkpoint
@@ -121,6 +122,9 @@ class QuoteArrays:
     lasts: np.ndarray
     timestamps: np.ndarray
     local_days: np.ndarray | None = None
+    funding_quote_indexes: np.ndarray | None = None
+    funding_mark_prices: np.ndarray | None = None
+    funding_rates: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.bids = np.asarray(self.bids, dtype=np.float64)
@@ -135,12 +139,31 @@ class QuoteArrays:
             )
         else:
             self.local_days = np.asarray(self.local_days, dtype=np.int32)
+        self.funding_quote_indexes = np.asarray(self.funding_quote_indexes if self.funding_quote_indexes is not None else [], dtype=np.int64)
+        self.funding_mark_prices = np.asarray(self.funding_mark_prices if self.funding_mark_prices is not None else [], dtype=np.float64)
+        self.funding_rates = np.asarray(self.funding_rates if self.funding_rates is not None else [], dtype=np.float64)
+
+    def set_funding_rates(self, rates: list[tuple[float, float]], mark_prices: np.ndarray) -> None:
+        if len(rates) == 0:
+            self.funding_quote_indexes = np.empty(0, dtype=np.int64)
+            self.funding_mark_prices = np.empty(0, dtype=np.float64)
+            self.funding_rates = np.empty(0, dtype=np.float64)
+            return
+        event_times = np.fromiter((timestamp for timestamp, _ in rates), dtype=np.float64, count=len(rates))
+        quote_indexes = np.searchsorted(self.timestamps, event_times, side="left")
+        valid = quote_indexes < len(self.timestamps)
+        self.funding_quote_indexes = quote_indexes[valid].astype(np.int64)
+        self.funding_mark_prices = np.asarray(mark_prices, dtype=np.float64)[self.funding_quote_indexes]
+        self.funding_rates = np.fromiter((rate for _, rate in rates), dtype=np.float64, count=len(rates))[valid]
 
     @classmethod
-    def from_rows(cls, rows: list[dict[str, Any]]) -> "QuoteArrays":
+    def from_rows(cls, rows: list[dict[str, Any]], slippage_bps: float = 0.0) -> "QuoteArrays":
+        if not math.isfinite(slippage_bps) or slippage_bps < 0 or slippage_bps >= 10_000:
+            raise ValueError("Slippage must be from 0 to 9,999.9999 basis points")
+        adverse = slippage_bps / 10_000
         return cls(
-            np.fromiter((float(row["bid_price"]) for row in rows), dtype=np.float64, count=len(rows)),
-            np.fromiter((float(row["ask_price"]) for row in rows), dtype=np.float64, count=len(rows)),
+            np.fromiter((float(row["bid_price"]) * (1 - adverse) for row in rows), dtype=np.float64, count=len(rows)),
+            np.fromiter((float(row["ask_price"]) * (1 + adverse) for row in rows), dtype=np.float64, count=len(rows)),
             np.fromiter((float(row["last_price"]) for row in rows), dtype=np.float64, count=len(rows)),
             np.fromiter((row["received_at_utc"].replace(tzinfo=timezone.utc).timestamp() for row in rows), dtype=np.float64, count=len(rows)),
         )
@@ -450,7 +473,9 @@ def simulate(
             quotes.bids, quotes.asks,
             bid_tree.maximum, bid_tree.minimum, ask_tree.maximum, ask_tree.minimum,
             bid_tree.size, bid_tree.length, indexes, shorts,
-            start_balance, fee_rate, *market_rules,
+            start_balance, fee_rate,
+            quotes.funding_quote_indexes, quotes.funding_mark_prices, quotes.funding_rates,
+            *market_rules,
             np.nan if take_profit_amount is None else take_profit_amount,
             np.nan if stop_loss_amount is None else -stop_loss_amount,
             martingale_base_notional(
@@ -471,6 +496,7 @@ def simulate(
 
     from numba_simulation import simulate_numba
 
+    market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
     return simulate_numba(
         quotes.bids,
         quotes.asks,
@@ -484,6 +510,10 @@ def simulate(
         shorts,
         start_balance,
         fee_rate,
+        *market_rules,
+        quotes.funding_quote_indexes,
+        quotes.funding_mark_prices,
+        quotes.funding_rates,
         np.nan if take_profit_amount is None else take_profit_amount,
         np.nan if stop_loss_amount is None else stop_loss_amount,
         take_confirmation_snapshots, stop_confirmation_snapshots,
@@ -536,7 +566,9 @@ def simulate_martingale_batch(
     pnls, order_counts, chain_counts, max_drawdowns, worst_chains = simulate_martingale_batch_numba(
         quotes.bids, quotes.asks, bid_tree.maximum, bid_tree.minimum,
         ask_tree.maximum, ask_tree.minimum, bid_tree.size, bid_tree.length,
-        signal_indexes, signal_shorts, start_balance, fee_rate, *market_rules, takes, stops,
+        signal_indexes, signal_shorts, start_balance, fee_rate,
+        quotes.funding_quote_indexes, quotes.funding_mark_prices, quotes.funding_rates,
+        *market_rules, takes, stops,
         base_notionals, mode_id, timing_id, attempts, policies,
         np.nan if max_chain_loss is None else max_chain_loss,
         np.nan if max_day_loss is None else max_day_loss,
@@ -587,6 +619,7 @@ def simulate_standard_checkpoint(
     checkpoint: tuple[float, int, int, int, bool],
     take_confirmation_snapshots: int = 0,
     stop_confirmation_snapshots: int = 0,
+    order_rules: tuple[float, float, int, float, float] | None = None,
 ) -> tuple[float, int, tuple[float, int, int, int, bool]]:
     """Resume a non-martingale simulation from its last closed-trade boundary."""
     from numba_simulation import simulate_standard_stateful_numba
@@ -595,6 +628,7 @@ def simulate_standard_checkpoint(
     shorts = signal_shorts if isinstance(signal_shorts, np.ndarray) else np.asarray(signal_shorts, dtype=np.bool_)
     take_profit_amount = None if take_profit is None else start_balance * take_profit / 1000.0
     stop_loss_amount = None if stop_loss is None else start_balance * stop_loss / 1000.0
+    market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
     pnl, trade_count, balance, signal_from, open_entry_index, open_is_short = simulate_standard_stateful_numba(
         quotes.bids,
         quotes.asks,
@@ -608,6 +642,10 @@ def simulate_standard_checkpoint(
         shorts,
         start_balance,
         fee_rate,
+        *market_rules,
+        quotes.funding_quote_indexes,
+        quotes.funding_mark_prices,
+        quotes.funding_rates,
         np.nan if take_profit_amount is None else take_profit_amount,
         np.nan if stop_loss_amount is None else stop_loss_amount,
         float(checkpoint[0]),
@@ -635,6 +673,7 @@ def simulate_standard_checkpoint_days(
     checkpoint: tuple[float, int, int, int, bool],
     take_confirmation_snapshots: int = 0,
     stop_confirmation_snapshots: int = 0,
+    order_rules: tuple[float, float, int, float, float] | None = None,
 ) -> tuple[float, int, tuple[float, int, int, int, bool], list[tuple[float, int, int, int, bool]]]:
     """Resume once through the range and capture each supplied day boundary."""
     from numba_simulation import simulate_standard_stateful_days_numba
@@ -643,10 +682,12 @@ def simulate_standard_checkpoint_days(
     shorts = signal_shorts if isinstance(signal_shorts, np.ndarray) else np.asarray(signal_shorts, dtype=np.bool_)
     take_profit_amount = None if take_profit is None else start_balance * take_profit / 1000.0
     stop_loss_amount = None if stop_loss is None else start_balance * stop_loss / 1000.0
+    market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
     values = simulate_standard_stateful_days_numba(
         quotes.bids, quotes.asks,
         bid_tree.maximum, bid_tree.minimum, ask_tree.maximum, ask_tree.minimum,
-        bid_tree.size, indexes, shorts, start_balance, fee_rate,
+        bid_tree.size, indexes, shorts, start_balance, fee_rate, *market_rules,
+        quotes.funding_quote_indexes, quotes.funding_mark_prices, quotes.funding_rates,
         np.nan if take_profit_amount is None else take_profit_amount,
         np.nan if stop_loss_amount is None else stop_loss_amount,
         np.asarray(day_quote_counts, dtype=np.int64),
@@ -671,6 +712,7 @@ def finalize_standard_checkpoints(
     start_balance: float,
     fee_rate: float,
     checkpoints: list[tuple[float, int, int, int, bool]] | np.ndarray,
+    order_rules: tuple[float, float, int, float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Mark saved states at the same quote endpoint without replaying the tree."""
     if len(checkpoints) == 0:
@@ -688,16 +730,27 @@ def finalize_standard_checkpoints(
     pnls = closed_balance - start_balance
     open_mask = open_indexes >= 0
     if np.any(open_mask):
+        min_qty, step, places, min_notional, max_qty = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
         indexes = open_indexes[open_mask]
         is_short = open_shorts[open_mask]
         entry_prices = np.where(is_short, quotes.bids[indexes], quotes.asks[indexes])
         exit_prices = np.where(is_short, quotes.asks[-1], quotes.bids[-1])
-        net_ratios = np.where(
-            is_short,
-            (entry_prices * (1.0 - fee_rate) - exit_prices * (1.0 + fee_rate)) / (entry_prices * (1.0 + fee_rate)),
-            (exit_prices * (1.0 - fee_rate) - entry_prices * (1.0 + fee_rate)) / (entry_prices * (1.0 + fee_rate)),
-        )
-        pnls[open_mask] = closed_balance[open_mask] + start_balance * net_ratios - start_balance
+        available_notionals = np.minimum(start_balance, closed_balance[open_mask] / (1 + fee_rate))
+        quantities = np.floor((available_notionals / entry_prices) / step + 1e-10) * step if step > 0 else available_notionals / entry_prices
+        if step > 0:
+            quantities = np.floor(quantities * (10 ** places) + 1e-8) / (10 ** places)
+        notionals = quantities * entry_prices
+        feasible = (quantities >= min_qty) & (notionals >= min_notional) & ((max_qty <= 0) | (quantities <= max_qty))
+        net = np.where(is_short, quantities * (entry_prices * (1 - fee_rate) - exit_prices * (1 + fee_rate)), quantities * (exit_prices * (1 - fee_rate) - entry_prices * (1 + fee_rate)))
+        net[~feasible] = np.nan
+        pnls[open_mask] = closed_balance[open_mask] + net - start_balance
+        if len(quotes.funding_quote_indexes):
+            open_rows = np.flatnonzero(open_mask)
+            for local_index, (row, entry_index, short, entry_price) in enumerate(zip(open_rows, indexes, is_short, entry_prices)):
+                quantity = quantities[local_index]
+                accrued = (quotes.funding_quote_indexes > entry_index) & (quotes.funding_quote_indexes < len(quotes))
+                sign = 1.0 if short else -1.0
+                pnls[row] += sign * quantity * float(np.sum(quotes.funding_mark_prices[accrued] * quotes.funding_rates[accrued]))
         trade_counts[open_mask] += 1
     return pnls, trade_counts
 
@@ -708,10 +761,11 @@ def standard_range_results(
     fee_rate: float,
     start_states: np.ndarray | None,
     end_states: np.ndarray,
+    order_rules: tuple[float, float, int, float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Aggregate canonical closed trades by close day and mark one end-open trade."""
     end_pnls, end_trade_counts = finalize_standard_checkpoints(
-        quotes, start_balance, fee_rate, end_states,
+        quotes, start_balance, fee_rate, end_states, order_rules,
     )
     if start_states is None:
         return end_pnls, end_trade_counts
@@ -828,6 +882,8 @@ def main() -> int:
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
     parser.add_argument("--martingale-max-chain-loss", type=float, default=0.0)
     parser.add_argument("--martingale-max-day-loss", type=float, default=0.0)
+    parser.add_argument("--include-funding", choices=("0", "1"), default="1")
+    parser.add_argument("--slippage-bps", type=float, default=0.0)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
@@ -871,13 +927,11 @@ def main() -> int:
             return 0
     try:
         config = load_config(Path(__file__).with_name("config.json"))
-        order_rules = None
-        if args.martingale_mode != "none":
-            contract_specs = load_contract_specs(config["category"])
-            contract = contract_specs.get(args.symbol)
-            if contract is None:
-                raise RuntimeError(f"Bitget contract rules are unavailable for {args.symbol}")
-            order_rules = numba_market_order_rules(contract, leverage=1.0)
+        contract_specs = load_contract_specs(config["category"])
+        contract = contract_specs.get(args.symbol)
+        if contract is None:
+            raise RuntimeError(f"Bitget contract rules are unavailable for {args.symbol}")
+        order_rules = numba_market_order_rules(contract, leverage=1.0)
         connection = connect_mysql(config["mysql"])
         try:
             end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
@@ -906,7 +960,16 @@ def main() -> int:
                 rows = cursor.fetchall()
         finally:
             connection.close()
-        quotes = QuoteArrays.from_rows(rows)
+        quotes = QuoteArrays.from_rows(rows, args.slippage_bps)
+        if args.include_funding == "1" and len(quotes):
+            funding_rows = load_historical_funding_rates(
+                config["category"], args.symbol, float(quotes.timestamps[0]), float(quotes.timestamps[-1]),
+            )
+            mark_prices = np.fromiter(
+                ((float(row["bid_price"]) + float(row["ask_price"])) / 2 for row in rows),
+                dtype=np.float64, count=len(rows),
+            )
+            quotes.set_funding_rates(funding_rows, mark_prices)
         del rows
         source_day = (
             datetime.fromtimestamp(float(quotes.timestamps[0]), timezone.utc)
@@ -941,6 +1004,7 @@ def main() -> int:
         checkpoint_state = {
             "args": args,
             "category": config["category"],
+            "order_rules": order_rules,
             "checkpoint_root": args.cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-state-v1",
         }
         checkpoint_group_ids = saved_standard_group_ids(exit_profiles) if args.martingale_mode == "none" else []
@@ -1055,7 +1119,7 @@ def main() -> int:
                             if range_start_states is None:
                                 raise RuntimeError(f"Missing canonical range-start checkpoint for {range_start_day}")
                         saved_pnls, saved_trades = standard_range_results(
-                            quotes, args.balance, fee_rate, range_start_states, previous_states,
+                            quotes, args.balance, fee_rate, range_start_states, previous_states, order_rules,
                         )
                         groups, best_pnl = rank_saved_standard_results(
                             saved_pnls, saved_trades, args.min_trades,
@@ -1132,6 +1196,7 @@ def main() -> int:
                                         day_quote_counts_to_capture,
                                         previous_state,
                                         take_confirmation_snapshots, stop_confirmation_snapshots,
+                                        order_rules,
                                     )
                                     for index, (day, _) in enumerate(boundaries_to_capture):
                                         states_by_day[day][state_index] = day_states[index]
@@ -1141,6 +1206,7 @@ def main() -> int:
                                         quotes, signals, shorts, bid_tree, ask_tree,
                                         args.balance, fee_rate, target, loss, previous_state,
                                         take_confirmation_snapshots, stop_confirmation_snapshots,
+                                        order_rules,
                                     )
                                 next_states.append(next_state)
                                 if range_start_day is not None:

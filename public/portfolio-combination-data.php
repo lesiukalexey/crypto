@@ -16,6 +16,7 @@ function respond(array $payload, int $status = 200): never
 
 try {
     $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
+    $simulationCosts = rankingSimulationCosts($_GET);
     $root = dirname(__DIR__);
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $entryDefaults = json_decode((string) file_get_contents($root . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
@@ -109,11 +110,13 @@ try {
     $maxIds = filterEnabledTickerSnapshotIds($maxIds, $config);
     $snapshotJson = json_encode($maxIds, JSON_THROW_ON_ERROR);
     $keyParts = [
-        'portfolio-combination-details-v8-chain-risk', $generation, hash('sha256', $snapshotJson), $config['category'],
+        'portfolio-combination-details-v9-futures-cost-quantity', $generation, hash('sha256', $snapshotJson), $config['category'],
         $startValue, $endValue, $balance, $fee, $minTrades, $entryConfig, $originalExitConfig,
         $ranking['worker'], $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ];
     array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
+    array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
+    array_push($keyParts, ...rankingContractRulesIdentity($config['category'], array_keys($maxIds)));
     $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
     $resultPath = $cacheDir . '/combination-' . $key . '.json';
     $statusPath = $cacheDir . '/combination-' . $key . '.status.json';
@@ -154,6 +157,8 @@ try {
                 . ' --martingale-attempts ' . escapeshellarg((string) $martingaleAttempts)
                 . ' --martingale-max-chain-loss ' . escapeshellarg($martingaleRiskLimits['max_chain_loss'])
                 . ' --martingale-max-day-loss ' . escapeshellarg($martingaleRiskLimits['max_day_loss'])
+                . ' --include-funding ' . escapeshellarg($simulationCosts['include_funding'] ? '1' : '0')
+                . ' --slippage-bps ' . escapeshellarg($simulationCosts['slippage_bps'])
                 . ' >/dev/null 2>&1 &';
             exec($command);
         }

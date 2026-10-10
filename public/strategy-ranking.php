@@ -17,6 +17,7 @@ function respond(array $payload, int $status = 200): never
 
 try {
     $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
+    $simulationCosts = rankingSimulationCosts($_GET);
     $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $entryProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
     $exitProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '/exit_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
@@ -102,8 +103,10 @@ try {
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config);
     $maxId = (int) ($snapshotIds[$symbol] ?? 0);
-    $keyParts = ['ranking-v29-martingale-chain-risk-metrics', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
+    $keyParts = ['ranking-v30-futures-contract-quantity', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
     array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
+    array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
+    array_push($keyParts, ...rankingContractRulesIdentity($config['category'], [$symbol]));
     $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration);
     if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
     $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
@@ -191,6 +194,8 @@ try {
                 . ' --martingale-attempts ' . escapeshellarg((string) $martingaleAttempts)
                 . ' --martingale-max-chain-loss ' . escapeshellarg($martingaleRiskLimits['max_chain_loss'])
                 . ' --martingale-max-day-loss ' . escapeshellarg($martingaleRiskLimits['max_day_loss'])
+                . ' --include-funding ' . escapeshellarg($simulationCosts['include_funding'] ? '1' : '0')
+                . ' --slippage-bps ' . escapeshellarg($simulationCosts['slippage_bps'])
                 . ' >> ' . escapeshellarg($logPath) . ' 2>&1 < /dev/null &';
             exec($command);
             flock($lock, LOCK_UN);

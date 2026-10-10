@@ -99,12 +99,15 @@ def _find_delayed_standard_exit(
     asks: np.ndarray,
     entry_index: int,
     is_short: bool,
-    start_balance: float,
+    quantity: float,
     fee_rate: float,
     take_profit: float,
     stop_loss: float,
     take_confirmation_snapshots: int,
     stop_confirmation_snapshots: int,
+    funding_event_indexes: np.ndarray,
+    funding_mark_prices: np.ndarray,
+    funding_rates: np.ndarray,
 ) -> tuple[int, bool]:
     has_take = not np.isnan(take_profit)
     has_stop = not np.isnan(stop_loss)
@@ -115,9 +118,13 @@ def _find_delayed_standard_exit(
         entry_price = bids[entry_index] if is_short else asks[entry_index]
         exit_price = asks[index] if is_short else bids[index]
         if is_short:
-            net = start_balance * (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+            net = quantity * (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate))
         else:
-            net = start_balance * (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+            net = quantity * (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate))
+        net += _standard_funding_cashflow(
+            entry_index, index, quantity, is_short,
+            funding_event_indexes, funding_mark_prices, funding_rates,
+        )
         take_condition = has_take and net >= take_profit
         stop_condition = has_stop and net <= -stop_loss
         if take_condition and due_take < 0:
@@ -138,6 +145,157 @@ def _find_delayed_standard_exit(
 
 
 @njit(cache=True)
+def _standard_funding_cashflow(
+    entry_index: int,
+    exit_index: int,
+    quantity: float,
+    is_short: bool,
+    event_indexes: np.ndarray,
+    mark_prices: np.ndarray,
+    rates: np.ndarray,
+) -> float:
+    cashflow = 0.0
+    for event_index in range(len(event_indexes)):
+        quote_index = event_indexes[event_index]
+        if quote_index > exit_index:
+            break
+        if quote_index > entry_index:
+            amount = quantity * mark_prices[event_index] * rates[event_index]
+            cashflow += amount if is_short else -amount
+    return cashflow
+
+
+@njit(cache=True)
+def _find_funded_standard_exit(
+    bids: np.ndarray, bid_maximum: np.ndarray, bid_minimum: np.ndarray,
+    asks: np.ndarray, ask_maximum: np.ndarray, ask_minimum: np.ndarray,
+    tree_size: int, tree_length: int, entry_index: int, entry_price: float,
+    quantity: float, entry_fee: float, is_short: bool, fee_rate: float,
+    take_profit: float, stop_loss: float, event_indexes: np.ndarray,
+    mark_prices: np.ndarray, rates: np.ndarray,
+) -> tuple[int, int]:
+    first_take = -1
+    first_stop = -1
+    accrued = 0.0
+    start = entry_index + 1
+    event = 0
+    while event < len(event_indexes) and event_indexes[event] <= entry_index:
+        event += 1
+    while event < len(event_indexes):
+        boundary = event_indexes[event]
+        if boundary >= tree_length:
+            break
+        if boundary > start:
+            if is_short:
+                take_price = (entry_price * quantity - entry_fee + accrued - take_profit) / (quantity * (1.0 + fee_rate))
+                stop_price = (entry_price * quantity - entry_fee + accrued + stop_loss) / (quantity * (1.0 + fee_rate))
+                take = _first_le(ask_minimum, tree_size, tree_length, start, take_price) if not np.isnan(take_profit) else -1
+                stop = _first_ge(ask_maximum, tree_size, tree_length, start, stop_price) if not np.isnan(stop_loss) else -1
+            else:
+                take_price = (entry_price * quantity + entry_fee + take_profit - accrued) / (quantity * (1.0 - fee_rate))
+                stop_price = (entry_price * quantity + entry_fee - stop_loss - accrued) / (quantity * (1.0 - fee_rate))
+                take = _first_ge(bid_maximum, tree_size, tree_length, start, take_price) if not np.isnan(take_profit) else -1
+                stop = _first_le(bid_minimum, tree_size, tree_length, start, stop_price) if not np.isnan(stop_loss) else -1
+            if take >= 0 and take < boundary and (first_take < 0 or take < first_take): first_take = take
+            if stop >= 0 and stop < boundary and (first_stop < 0 or stop < first_stop): first_stop = stop
+        while event < len(event_indexes) and event_indexes[event] == boundary:
+            amount = quantity * mark_prices[event] * rates[event]
+            accrued += amount if is_short else -amount
+            event += 1
+        start = boundary
+    if start < tree_length:
+        if is_short:
+            take_price = (entry_price * quantity - entry_fee + accrued - take_profit) / (quantity * (1.0 + fee_rate))
+            stop_price = (entry_price * quantity - entry_fee + accrued + stop_loss) / (quantity * (1.0 + fee_rate))
+            take = _first_le(ask_minimum, tree_size, tree_length, start, take_price) if not np.isnan(take_profit) else -1
+            stop = _first_ge(ask_maximum, tree_size, tree_length, start, stop_price) if not np.isnan(stop_loss) else -1
+        else:
+            take_price = (entry_price * quantity + entry_fee + take_profit - accrued) / (quantity * (1.0 - fee_rate))
+            stop_price = (entry_price * quantity + entry_fee - stop_loss - accrued) / (quantity * (1.0 - fee_rate))
+            take = _first_ge(bid_maximum, tree_size, tree_length, start, take_price) if not np.isnan(take_profit) else -1
+            stop = _first_le(bid_minimum, tree_size, tree_length, start, stop_price) if not np.isnan(stop_loss) else -1
+        if take >= 0 and (first_take < 0 or take < first_take): first_take = take
+        if stop >= 0 and (first_stop < 0 or stop < first_stop): first_stop = stop
+    return first_take, first_stop
+
+
+@njit(cache=True)
+def _martingale_funding_cashflow(
+    exit_index: int, leg_count: int, leg_entry_indexes: np.ndarray,
+    leg_quantities: np.ndarray, is_short: bool, event_indexes: np.ndarray,
+    mark_prices: np.ndarray, rates: np.ndarray,
+) -> float:
+    cashflow = 0.0
+    for event in range(len(event_indexes)):
+        quote_index = event_indexes[event]
+        if quote_index > exit_index:
+            break
+        for leg in range(leg_count):
+            if quote_index > leg_entry_indexes[leg]:
+                amount = leg_quantities[leg] * mark_prices[event] * rates[event]
+                cashflow += amount if is_short else -amount
+    return cashflow
+
+
+@njit(cache=True)
+def _find_funded_martingale_exit(
+    bids: np.ndarray, bid_maximum: np.ndarray, bid_minimum: np.ndarray,
+    asks: np.ndarray, ask_maximum: np.ndarray, ask_minimum: np.ndarray,
+    tree_size: int, tree_length: int, entry_index: int, search_start: int, total_quantity: float,
+    entry_cost: float, entry_fees: float, is_short: bool, fee_rate: float,
+    take_profit: float, stop_loss: float, leg_count: int,
+    leg_entry_indexes: np.ndarray, leg_quantities: np.ndarray,
+    event_indexes: np.ndarray, mark_prices: np.ndarray, rates: np.ndarray,
+) -> tuple[int, int]:
+    first_take = -1
+    first_stop = -1
+    start = max(entry_index + 1, search_start)
+    accrued = _martingale_funding_cashflow(
+        start - 1, leg_count, leg_entry_indexes, leg_quantities, is_short,
+        event_indexes, mark_prices, rates,
+    )
+    for event in range(len(event_indexes)):
+        boundary = event_indexes[event]
+        if boundary < start:
+            continue
+        if boundary >= tree_length:
+            break
+        if boundary > start:
+            if is_short:
+                take_price = (entry_cost - entry_fees + accrued - take_profit) / (total_quantity * (1.0 + fee_rate))
+                stop_price = (entry_cost - entry_fees + accrued - stop_loss) / (total_quantity * (1.0 + fee_rate))
+                take = _first_le(ask_minimum, tree_size, tree_length, start, take_price) if not np.isnan(take_profit) else -1
+                stop = _first_ge(ask_maximum, tree_size, tree_length, start, stop_price) if not np.isnan(stop_loss) else -1
+            else:
+                take_price = (entry_cost + entry_fees + take_profit - accrued) / (total_quantity * (1.0 - fee_rate))
+                stop_price = (entry_cost + entry_fees + stop_loss - accrued) / (total_quantity * (1.0 - fee_rate))
+                take = _first_ge(bid_maximum, tree_size, tree_length, start, take_price) if not np.isnan(take_profit) else -1
+                stop = _first_le(bid_minimum, tree_size, tree_length, start, stop_price) if not np.isnan(stop_loss) else -1
+            if take >= 0 and take < boundary and (first_take < 0 or take < first_take): first_take = take
+            if stop >= 0 and stop < boundary and (first_stop < 0 or stop < first_stop): first_stop = stop
+        amount = 0.0
+        for leg in range(leg_count):
+            if boundary > leg_entry_indexes[leg]:
+                amount += leg_quantities[leg] * mark_prices[event] * rates[event]
+        accrued += amount if is_short else -amount
+        start = boundary
+    if start < tree_length:
+        if is_short:
+            take_price = (entry_cost - entry_fees + accrued - take_profit) / (total_quantity * (1.0 + fee_rate))
+            stop_price = (entry_cost - entry_fees + accrued - stop_loss) / (total_quantity * (1.0 + fee_rate))
+            take = _first_le(ask_minimum, tree_size, tree_length, start, take_price) if not np.isnan(take_profit) else -1
+            stop = _first_ge(ask_maximum, tree_size, tree_length, start, stop_price) if not np.isnan(stop_loss) else -1
+        else:
+            take_price = (entry_cost + entry_fees + take_profit - accrued) / (total_quantity * (1.0 - fee_rate))
+            stop_price = (entry_cost + entry_fees + stop_loss - accrued) / (total_quantity * (1.0 - fee_rate))
+            take = _first_ge(bid_maximum, tree_size, tree_length, start, take_price) if not np.isnan(take_profit) else -1
+            stop = _first_le(bid_minimum, tree_size, tree_length, start, stop_price) if not np.isnan(stop_loss) else -1
+        if take >= 0 and (first_take < 0 or take < first_take): first_take = take
+        if stop >= 0 and (first_stop < 0 or stop < first_stop): first_stop = stop
+    return first_take, first_stop
+
+
+@njit(cache=True)
 def _find_delayed_martingale_exit(
     bids: np.ndarray,
     asks: np.ndarray,
@@ -151,6 +309,12 @@ def _find_delayed_martingale_exit(
     stop_loss: float,
     take_confirmation_snapshots: int,
     stop_confirmation_snapshots: int,
+    leg_entry_indexes: np.ndarray,
+    leg_quantities: np.ndarray,
+    leg_count: int,
+    funding_event_indexes: np.ndarray,
+    funding_mark_prices: np.ndarray,
+    funding_rates: np.ndarray,
 ) -> tuple[int, int]:
     has_take = not np.isnan(take_profit)
     has_stop = not np.isnan(stop_loss)
@@ -162,6 +326,10 @@ def _find_delayed_martingale_exit(
             net = entry_cost - total_quantity * exit_price - entry_fees - total_quantity * exit_price * fee_rate
         else:
             net = total_quantity * exit_price - entry_cost - entry_fees - total_quantity * exit_price * fee_rate
+        net += _martingale_funding_cashflow(
+            index, leg_count, leg_entry_indexes, leg_quantities, is_short,
+            funding_event_indexes, funding_mark_prices, funding_rates,
+        )
         take_condition = has_take and net >= take_profit
         stop_condition = has_stop and net <= stop_loss
         if take_condition and due_take < 0:
@@ -193,6 +361,14 @@ def simulate_numba(
     signal_shorts: np.ndarray,
     start_balance: float,
     fee_rate: float,
+    min_order_quantity: float,
+    quantity_step: float,
+    quantity_places: int,
+    min_order_notional: float,
+    max_market_order_quantity: float,
+    funding_event_indexes: np.ndarray,
+    funding_mark_prices: np.ndarray,
+    funding_rates: np.ndarray,
     take_profit: float,
     stop_loss: float,
     take_confirmation_snapshots: int,
@@ -214,29 +390,26 @@ def simulate_numba(
         entry_price = bids[entry_index] if is_short else asks[entry_index]
         if entry_price <= 0.0:
             continue
+        quantity, actual_notional, order_valid = _market_order_quantity(
+            min(start_balance, balance / (1.0 + fee_rate)), entry_price, min_order_quantity,
+            quantity_step, quantity_places, min_order_notional, max_market_order_quantity,
+        )
+        if not order_valid:
+            return np.nan, 0
 
-        first_take = -1
-        first_stop = -1
-        if is_short:
-            if has_take and take_profit < start_balance:
-                take_price = entry_price * (inverse_fee_factor - take_profit / start_balance)
-                first_take = _first_le(ask_minimum, tree_size, tree_length, entry_index + 1, take_price)
-            if has_stop:
-                stop_price = entry_price * (inverse_fee_factor + stop_loss / start_balance)
-                first_stop = _first_ge(ask_maximum, tree_size, tree_length, entry_index + 1, stop_price)
-        else:
-            if has_take:
-                take_price = entry_price * fee_factor * (1.0 + take_profit / start_balance)
-                first_take = _first_ge(bid_maximum, tree_size, tree_length, entry_index + 1, take_price)
-            if has_stop and stop_loss < start_balance:
-                stop_price = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
-                first_stop = _first_le(bid_minimum, tree_size, tree_length, entry_index + 1, stop_price)
+        first_take, first_stop = _find_funded_standard_exit(
+            bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
+            tree_size, tree_length, entry_index, entry_price, quantity,
+            actual_notional * fee_rate, is_short, fee_rate, take_profit, stop_loss,
+            funding_event_indexes, funding_mark_prices, funding_rates,
+        )
 
         delayed_crossing = False
         if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
             delayed_exit, delayed_crossing = _find_delayed_standard_exit(
-                bids, asks, entry_index, is_short, start_balance, fee_rate,
+                bids, asks, entry_index, is_short, quantity, fee_rate,
                 take_profit, stop_loss, take_confirmation_snapshots, stop_confirmation_snapshots,
+                funding_event_indexes, funding_mark_prices, funding_rates,
             )
             first_take = delayed_exit
             first_stop = -1
@@ -253,10 +426,13 @@ def simulate_numba(
 
         exit_price = asks[exit_index] if is_short else bids[exit_index]
         if is_short:
-            net_ratio = (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+            net_ratio = (entry_price * quantity * (1.0 - fee_rate) - exit_price * quantity * (1.0 + fee_rate))
         else:
-            net_ratio = (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
-        balance += start_balance * net_ratio
+            net_ratio = (exit_price * quantity * (1.0 - fee_rate) - entry_price * quantity * (1.0 + fee_rate))
+        balance += net_ratio + _standard_funding_cashflow(
+            entry_index, exit_index, quantity,
+            is_short, funding_event_indexes, funding_mark_prices, funding_rates,
+        )
         trades_closed += 1
 
         if not has_crossing:
@@ -280,6 +456,14 @@ def simulate_standard_stateful_numba(
     signal_shorts: np.ndarray,
     start_balance: float,
     fee_rate: float,
+    min_order_quantity: float,
+    quantity_step: float,
+    quantity_places: int,
+    min_order_notional: float,
+    max_market_order_quantity: float,
+    funding_event_indexes: np.ndarray,
+    funding_mark_prices: np.ndarray,
+    funding_rates: np.ndarray,
     take_profit: float,
     stop_loss: float,
     closed_balance: float,
@@ -290,7 +474,7 @@ def simulate_standard_stateful_numba(
     take_confirmation_snapshots: int,
     stop_confirmation_snapshots: int,
 ) -> tuple[float, int, float, int, int, bool]:
-    """Resume a fixed-initial-stake run, retaining any open position at the boundary."""
+    """Resume a run with stake capped by initial and available balance."""
     balance = closed_balance
     count = tree_length
     fee_factor = (1.0 + fee_rate) / (1.0 - fee_rate)
@@ -305,25 +489,24 @@ def simulate_standard_stateful_numba(
         first_take = -1
         first_stop = -1
         entry_price = bids[open_index] if open_short else asks[open_index]
-        if open_short:
-            if has_take and take_profit < start_balance:
-                target = entry_price * (inverse_fee_factor - take_profit / start_balance)
-                first_take = _first_le(ask_minimum, tree_size, count, open_index + 1, target)
-            if has_stop:
-                target = entry_price * (inverse_fee_factor + stop_loss / start_balance)
-                first_stop = _first_ge(ask_maximum, tree_size, count, open_index + 1, target)
-        else:
-            if has_take:
-                target = entry_price * fee_factor * (1.0 + take_profit / start_balance)
-                first_take = _first_ge(bid_maximum, tree_size, count, open_index + 1, target)
-            if has_stop and stop_loss < start_balance:
-                target = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
-                first_stop = _first_le(bid_minimum, tree_size, count, open_index + 1, target)
+        quantity, actual_notional, order_valid = _market_order_quantity(
+            min(start_balance, balance / (1.0 + fee_rate)), entry_price, min_order_quantity,
+            quantity_step, quantity_places, min_order_notional, max_market_order_quantity,
+        )
+        if not order_valid:
+            return np.nan, 0, balance, max(0, signal_from), -1, False
+        first_take, first_stop = _find_funded_standard_exit(
+            bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
+            tree_size, count, open_index, entry_price, quantity,
+            actual_notional * fee_rate, open_short, fee_rate, take_profit, stop_loss,
+            funding_event_indexes, funding_mark_prices, funding_rates,
+        )
 
         if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
             delayed_exit, _ = _find_delayed_standard_exit(
-                bids, asks, open_index, open_short, start_balance, fee_rate,
+                bids, asks, open_index, open_short, quantity, fee_rate,
                 take_profit, stop_loss, take_confirmation_snapshots, stop_confirmation_snapshots,
+                funding_event_indexes, funding_mark_prices, funding_rates,
             )
             first_take, first_stop = delayed_exit, -1
 
@@ -335,11 +518,18 @@ def simulate_standard_stateful_numba(
             else:
                 exit_index = first_stop
             exit_price = asks[exit_index] if open_short else bids[exit_index]
+            quantity, actual_notional, _ = _market_order_quantity(
+                min(start_balance, balance / (1.0 + fee_rate)), entry_price, min_order_quantity,
+                quantity_step, quantity_places, min_order_notional, max_market_order_quantity,
+            )
             if open_short:
-                net_ratio = (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+                net_ratio = entry_price * quantity * (1.0 - fee_rate) - exit_price * quantity * (1.0 + fee_rate)
             else:
-                net_ratio = (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
-            balance += start_balance * net_ratio
+                net_ratio = exit_price * quantity * (1.0 - fee_rate) - entry_price * quantity * (1.0 + fee_rate)
+            balance += net_ratio + _standard_funding_cashflow(
+                open_index, exit_index, quantity,
+                open_short, funding_event_indexes, funding_mark_prices, funding_rates,
+            )
             closed_trades += 1
             open_index = -1
             signal_cursor = _lower_bound(signal_indexes, signal_cursor, exit_index + 1)
@@ -352,28 +542,25 @@ def simulate_standard_stateful_numba(
         entry_price = bids[entry_index] if is_short else asks[entry_index]
         if entry_price <= 0.0:
             continue
+        quantity, actual_notional, order_valid = _market_order_quantity(
+            min(start_balance, balance / (1.0 + fee_rate)), entry_price, min_order_quantity,
+            quantity_step, quantity_places, min_order_notional, max_market_order_quantity,
+        )
+        if not order_valid:
+            return np.nan, 0, balance, max(0, signal_from), -1, False
 
-        first_take = -1
-        first_stop = -1
-        if is_short:
-            if has_take and take_profit < start_balance:
-                target = entry_price * (inverse_fee_factor - take_profit / start_balance)
-                first_take = _first_le(ask_minimum, tree_size, count, entry_index + 1, target)
-            if has_stop:
-                target = entry_price * (inverse_fee_factor + stop_loss / start_balance)
-                first_stop = _first_ge(ask_maximum, tree_size, count, entry_index + 1, target)
-        else:
-            if has_take:
-                target = entry_price * fee_factor * (1.0 + take_profit / start_balance)
-                first_take = _first_ge(bid_maximum, tree_size, count, entry_index + 1, target)
-            if has_stop and stop_loss < start_balance:
-                target = entry_price * fee_factor * (1.0 - stop_loss / start_balance)
-                first_stop = _first_le(bid_minimum, tree_size, count, entry_index + 1, target)
+        first_take, first_stop = _find_funded_standard_exit(
+            bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
+            tree_size, count, entry_index, entry_price, quantity,
+            actual_notional * fee_rate, is_short, fee_rate, take_profit, stop_loss,
+            funding_event_indexes, funding_mark_prices, funding_rates,
+        )
 
         if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
             delayed_exit, _ = _find_delayed_standard_exit(
-                bids, asks, entry_index, is_short, start_balance, fee_rate,
+                bids, asks, entry_index, is_short, quantity, fee_rate,
                 take_profit, stop_loss, take_confirmation_snapshots, stop_confirmation_snapshots,
+                funding_event_indexes, funding_mark_prices, funding_rates,
             )
             first_take, first_stop = delayed_exit, -1
 
@@ -389,11 +576,18 @@ def simulate_standard_stateful_numba(
             break
 
         exit_price = asks[exit_index] if is_short else bids[exit_index]
+        quantity, actual_notional, _ = _market_order_quantity(
+            min(start_balance, balance / (1.0 + fee_rate)), entry_price, min_order_quantity,
+            quantity_step, quantity_places, min_order_notional, max_market_order_quantity,
+        )
         if is_short:
-            net_ratio = (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+            net_ratio = entry_price * quantity * (1.0 - fee_rate) - exit_price * quantity * (1.0 + fee_rate)
         else:
-            net_ratio = (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
-        balance += start_balance * net_ratio
+            net_ratio = exit_price * quantity * (1.0 - fee_rate) - entry_price * quantity * (1.0 + fee_rate)
+        balance += net_ratio + _standard_funding_cashflow(
+            entry_index, exit_index, quantity,
+            is_short, funding_event_indexes, funding_mark_prices, funding_rates,
+        )
         closed_trades += 1
         signal_cursor = _lower_bound(signal_indexes, signal_cursor, exit_index + 1)
         signal_from = exit_index + 1
@@ -401,11 +595,18 @@ def simulate_standard_stateful_numba(
     if open_index >= 0 and count > 0:
         entry_price = bids[open_index] if open_short else asks[open_index]
         exit_price = asks[count - 1] if open_short else bids[count - 1]
+        quantity, actual_notional, _ = _market_order_quantity(
+            min(start_balance, balance / (1.0 + fee_rate)), entry_price, min_order_quantity,
+            quantity_step, quantity_places, min_order_notional, max_market_order_quantity,
+        )
         if open_short:
-            net_ratio = (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
+            net_ratio = entry_price * quantity * (1.0 - fee_rate) - exit_price * quantity * (1.0 + fee_rate)
         else:
-            net_ratio = (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate)) / (entry_price * (1.0 + fee_rate))
-        marked_balance = balance + start_balance * net_ratio
+            net_ratio = exit_price * quantity * (1.0 - fee_rate) - entry_price * quantity * (1.0 + fee_rate)
+        marked_balance = balance + net_ratio + _standard_funding_cashflow(
+            open_index, count - 1, quantity,
+            open_short, funding_event_indexes, funding_mark_prices, funding_rates,
+        )
         return marked_balance - start_balance, closed_trades + 1, balance, max(0, signal_from), open_index, open_short
 
     return balance - start_balance, closed_trades, balance, max(0, count - 1, signal_from), -1, False
@@ -424,6 +625,14 @@ def simulate_standard_stateful_days_numba(
     signal_shorts: np.ndarray,
     start_balance: float,
     fee_rate: float,
+    min_order_quantity: float,
+    quantity_step: float,
+    quantity_places: int,
+    min_order_notional: float,
+    max_market_order_quantity: float,
+    funding_event_indexes: np.ndarray,
+    funding_mark_prices: np.ndarray,
+    funding_rates: np.ndarray,
     take_profit: float,
     stop_loss: float,
     day_quote_counts: np.ndarray,
@@ -455,7 +664,10 @@ def simulate_standard_stateful_days_numba(
         result = simulate_standard_stateful_numba(
             bids, asks, bid_maximum, bid_minimum, ask_maximum, ask_minimum,
             tree_size, quote_count, signal_indexes[:signal_count], signal_shorts[:signal_count],
-            start_balance, fee_rate, take_profit, stop_loss,
+            start_balance, fee_rate, min_order_quantity, quantity_step,
+            quantity_places, min_order_notional, max_market_order_quantity,
+            funding_event_indexes, funding_mark_prices,
+            funding_rates, take_profit, stop_loss,
             current_balance, current_signal_from, current_closed_trades,
             current_open_index, current_open_short, take_confirmation_snapshots, stop_confirmation_snapshots,
         )
@@ -499,6 +711,9 @@ def simulate_martingale_numba(
     signal_shorts: np.ndarray,
     start_balance: float,
     fee_rate: float,
+    funding_event_indexes: np.ndarray,
+    funding_mark_prices: np.ndarray,
+    funding_rates: np.ndarray,
     min_order_quantity: float,
     quantity_step: float,
     quantity_places: int,
@@ -561,9 +776,11 @@ def simulate_martingale_numba(
         chain_start_balance = balance
         leg_prices = np.empty(attempts, dtype=np.float64)
         leg_quantities = np.empty(attempts, dtype=np.float64)
+        leg_entry_indexes = np.empty(attempts, dtype=np.int64)
         leg_fees = np.empty(attempts, dtype=np.float64)
         leg_prices[0] = price
         leg_quantities[0] = quantity
+        leg_entry_indexes[0] = entry_index
         leg_fees[0] = actual_notional * fee_rate
         leg_count = 1
         chains_started += 1
@@ -596,11 +813,22 @@ def simulate_martingale_numba(
                 first_take = _first_ge(bid_maximum, tree_size, tree_length, entry_index + 1, take_price) if has_take else -1
                 first_stop = _first_le(bid_minimum, tree_size, tree_length, entry_index + 1, stop_price) if has_stop else -1
 
+            first_take, first_stop = _find_funded_martingale_exit(
+                bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
+                tree_size, tree_length, entry_index, entry_index + 1, total_quantity, entry_cost,
+                entry_fees, is_short, fee_rate, target_amount,
+                stop_amount if has_stop else np.nan, leg_count,
+                leg_entry_indexes, leg_quantities, funding_event_indexes,
+                funding_mark_prices, funding_rates,
+            )
+
             if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
                 first_take, first_stop = _find_delayed_martingale_exit(
                     bids, asks, entry_index, is_short, total_quantity, entry_cost,
                     entry_fees, fee_rate, target_amount,
                     stop_amount if has_stop else np.nan, take_confirmation_snapshots, stop_confirmation_snapshots,
+                    leg_entry_indexes, leg_quantities, leg_count,
+                    funding_event_indexes, funding_mark_prices, funding_rates,
                 )
 
             has_crossing = first_take >= 0 or first_stop >= 0
@@ -609,12 +837,14 @@ def simulate_martingale_numba(
                 remaining_chain_risk = max_chain_loss + chain_realized_pnl
                 if remaining_chain_risk <= 0.0:
                     first_risk = entry_index + 1
-                elif is_short:
-                    risk_price = (entry_cost - entry_fees + remaining_chain_risk) / (total_quantity * (1.0 + fee_rate))
-                    first_risk = _first_ge(ask_maximum, tree_size, tree_length, entry_index + 1, risk_price)
                 else:
-                    risk_price = (entry_cost + entry_fees - remaining_chain_risk) / (total_quantity * (1.0 - fee_rate))
-                    first_risk = _first_le(bid_minimum, tree_size, tree_length, entry_index + 1, risk_price)
+                    _, first_risk = _find_funded_martingale_exit(
+                        bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
+                        tree_size, tree_length, entry_index, entry_index + 1, total_quantity, entry_cost,
+                        entry_fees, is_short, fee_rate, np.nan, -remaining_chain_risk,
+                        leg_count, leg_entry_indexes, leg_quantities,
+                        funding_event_indexes, funding_mark_prices, funding_rates,
+                    )
             if first_take >= 0 and first_stop >= 0:
                 exit_index = min(first_take, first_stop)
             elif first_take >= 0:
@@ -638,12 +868,13 @@ def simulate_martingale_numba(
                     if remaining_day_risk <= 0.0:
                         first_day_risk = day_start
                         break
-                    if is_short:
-                        day_risk_price = (entry_cost - entry_fees + remaining_day_risk) / (total_quantity * (1.0 + fee_rate))
-                        candidate_day_risk = _first_ge(ask_maximum, tree_size, tree_length, day_start, day_risk_price)
-                    else:
-                        day_risk_price = (entry_cost + entry_fees - remaining_day_risk) / (total_quantity * (1.0 - fee_rate))
-                        candidate_day_risk = _first_le(bid_minimum, tree_size, tree_length, day_start, day_risk_price)
+                    _, candidate_day_risk = _find_funded_martingale_exit(
+                        bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
+                        tree_size, segment_end + 1, entry_index, day_start, total_quantity,
+                        entry_cost, entry_fees, is_short, fee_rate, np.nan,
+                        -remaining_day_risk, leg_count, leg_entry_indexes, leg_quantities,
+                        funding_event_indexes, funding_mark_prices, funding_rates,
+                    )
                     if candidate_day_risk >= day_start and candidate_day_risk <= segment_end:
                         first_day_risk = candidate_day_risk
                         break
@@ -656,6 +887,10 @@ def simulate_martingale_numba(
                 net = entry_cost - total_quantity * exit_quote - entry_fees - total_quantity * exit_quote * fee_rate
             else:
                 net = total_quantity * exit_quote - entry_cost - entry_fees - total_quantity * exit_quote * fee_rate
+            net += _martingale_funding_cashflow(
+                exit_index, leg_count, leg_entry_indexes, leg_quantities, is_short,
+                funding_event_indexes, funding_mark_prices, funding_rates,
+            )
 
             transition_on_profit = mode >= 2
             trigger_transition = (
@@ -707,6 +942,10 @@ def simulate_martingale_numba(
                                     net = entry_cost - total_quantity * candidate_quote - entry_fees - total_quantity * candidate_quote * fee_rate
                                 else:
                                     net = total_quantity * candidate_quote - entry_cost - entry_fees - total_quantity * candidate_quote * fee_rate
+                                net += _martingale_funding_cashflow(
+                                    next_index, leg_count, leg_entry_indexes, leg_quantities, is_short,
+                                    funding_event_indexes, funding_mark_prices, funding_rates,
+                                )
                                 available = max(0.0, balance + net - position_notional)
                                 add_notional = min(requested, available / (1.0 + fee_rate))
                                 found_signal = True
@@ -719,6 +958,10 @@ def simulate_martingale_numba(
                                     take_net = entry_cost - total_quantity * end_quote - entry_fees - total_quantity * end_quote * fee_rate
                                 else:
                                     take_net = total_quantity * end_quote - entry_cost - entry_fees - total_quantity * end_quote * fee_rate
+                                take_net += _martingale_funding_cashflow(
+                                    first_take, leg_count, leg_entry_indexes, leg_quantities, is_short,
+                                    funding_event_indexes, funding_mark_prices, funding_rates,
+                                )
                                 balance += take_net
                                 daily_pnl += chain_realized_pnl + take_net
                                 closed_orders += leg_count
@@ -730,6 +973,10 @@ def simulate_martingale_numba(
                                 end_net = entry_cost - total_quantity * end_quote - entry_fees - total_quantity * end_quote * fee_rate
                             else:
                                 end_net = total_quantity * end_quote - entry_cost - entry_fees - total_quantity * end_quote * fee_rate
+                            end_net += _martingale_funding_cashflow(
+                                count - 1, leg_count, leg_entry_indexes, leg_quantities, is_short,
+                                funding_event_indexes, funding_mark_prices, funding_rates,
+                            )
                             balance += end_net
                             closed_orders += leg_count
                             leg_count = 0
@@ -741,6 +988,10 @@ def simulate_martingale_numba(
                                 take_net = entry_cost - total_quantity * take_quote - entry_fees - total_quantity * take_quote * fee_rate
                             else:
                                 take_net = total_quantity * take_quote - entry_cost - entry_fees - total_quantity * take_quote * fee_rate
+                            take_net += _martingale_funding_cashflow(
+                                first_take, leg_count, leg_entry_indexes, leg_quantities, is_short,
+                                funding_event_indexes, funding_mark_prices, funding_rates,
+                            )
                             balance += take_net
                             daily_pnl += chain_realized_pnl + take_net
                             closed_orders += leg_count
@@ -758,6 +1009,7 @@ def simulate_martingale_numba(
                         if add_price > 0.0:
                             leg_prices[leg_count] = add_price
                             leg_quantities[leg_count] = add_quantity
+                            leg_entry_indexes[leg_count] = next_index
                             leg_fees[leg_count] = actual_add_notional * fee_rate
                             leg_count += 1
                             position_notional += actual_add_notional
@@ -795,6 +1047,7 @@ def simulate_martingale_numba(
                             position_notional = actual_next_notional
                             leg_prices[0] = next_price
                             leg_quantities[0] = next_quantity
+                            leg_entry_indexes[0] = next_index
                             leg_fees[0] = actual_next_notional * fee_rate
                             leg_count = 1
                             stage += 1
@@ -840,6 +1093,7 @@ def simulate_martingale_numba(
                             position_notional = actual_reverse_notional
                             leg_prices[0] = reverse_price
                             leg_quantities[0] = reverse_quantity
+                            leg_entry_indexes[0] = next_index
                             leg_fees[0] = actual_reverse_notional * fee_rate
                             leg_count = 1
                             stage += 1
@@ -883,6 +1137,9 @@ def simulate_martingale_batch_numba(
     signal_shorts: np.ndarray,
     start_balance: float,
     fee_rate: float,
+    funding_event_indexes: np.ndarray,
+    funding_mark_prices: np.ndarray,
+    funding_rates: np.ndarray,
     min_order_quantity: float,
     quantity_step: float,
     quantity_places: int,
@@ -911,7 +1168,8 @@ def simulate_martingale_batch_numba(
         pnl, order_count, chain_count, max_drawdown, worst_chain = simulate_martingale_numba(
             bids, asks, bid_maximum, bid_minimum, ask_maximum, ask_minimum,
             tree_size, tree_length, signal_indexes, signal_shorts,
-            start_balance, fee_rate, min_order_quantity, quantity_step, quantity_places,
+            start_balance, fee_rate, funding_event_indexes, funding_mark_prices, funding_rates,
+            min_order_quantity, quantity_step, quantity_places,
             min_order_notional, max_market_order_quantity, take_profits[index], stop_losses[index],
             base_notionals[index], mode, timing, attempts,
             target_policies[index], max_chain_loss, max_day_loss, day_ids,

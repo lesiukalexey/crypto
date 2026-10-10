@@ -48,10 +48,12 @@ def daily_quote_boundaries(timestamps: np.ndarray, start_day: str, end_day: str)
 def state_checkpoint_path(state: dict[str, Any], symbol: str, entry_id: str) -> Path:
     args = state["args"]
     key = hashlib.sha256(json.dumps([
-        "portfolio-closed-state-v6-canonical-ledger",
+        "portfolio-closed-state-v7-futures-costs-order-rules",
         state["category"], symbol, args.balance, args.fee_percent,
         args.ranking_params, args.martingale_mode,
-        args.martingale_timing, args.martingale_attempts, entry_id,
+        args.martingale_timing, args.martingale_attempts,
+        getattr(args, "include_funding", "1"), getattr(args, "slippage_bps", 0.0),
+        state.get("order_rules"), entry_id,
     ], separators=(",", ":")).encode("utf-8")).hexdigest()
     return state["checkpoint_root"] / key[:2] / f"{key}.bin.z"
 
@@ -79,7 +81,7 @@ def dated_state_checkpoint_path(state: dict[str, Any], symbol: str, entry_id: st
 
 def dated_state_checkpoint_candidates(state: dict[str, Any], symbol: str, entry_id: str, end_day: str) -> list[Path]:
     day = date.fromisoformat(end_day).strftime("%Y%m%d")
-    bases = [state_checkpoint_path(state, symbol, entry_id), *legacy_state_checkpoint_paths(state, symbol, entry_id)]
+    bases = [state_checkpoint_path(state, symbol, entry_id)]
     return [base.with_name(f"{base.name.removesuffix('.bin.z')}-{day}.bin.z") for base in bases]
 
 
@@ -105,7 +107,7 @@ def load_best_state_checkpoint(
     state: dict[str, Any], symbol: str, entry_id: str,
     end_day: str, quotes: Any, expected_records: int,
 ) -> tuple[np.ndarray, int, str] | None:
-    bases = [state_checkpoint_path(state, symbol, entry_id), *legacy_state_checkpoint_paths(state, symbol, entry_id)]
+    bases = [state_checkpoint_path(state, symbol, entry_id)]
     candidates = []
     for base in bases:
         stem = base.name.removesuffix(".bin.z")
@@ -127,8 +129,14 @@ def load_best_state_checkpoint(
 
 def quote_prefix_fingerprint(quotes: Any, count: int) -> str:
     digest = hashlib.sha256()
+    digest.update(b"bitget-shared-futures-costs-order-rules-v1\0")
     for values in (quotes.bids, quotes.asks, quotes.lasts, quotes.timestamps):
         digest.update(np.ascontiguousarray(values[:count], dtype=np.float64).view(np.uint8))
+    if getattr(quotes, "funding_quote_indexes", None) is not None:
+        mask = quotes.funding_quote_indexes < count
+        digest.update(np.ascontiguousarray(quotes.funding_quote_indexes[mask], dtype=np.int64).view(np.uint8))
+        digest.update(np.ascontiguousarray(quotes.funding_mark_prices[mask], dtype=np.float64).view(np.uint8))
+        digest.update(np.ascontiguousarray(quotes.funding_rates[mask], dtype=np.float64).view(np.uint8))
     return digest.hexdigest()
 
 

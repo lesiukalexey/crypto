@@ -8,6 +8,8 @@ function h(string $value): string
 
 $query = $_GET;
 $query['combination_detail'] = '1';
+$includeFunding = (string) ($query['include_funding'] ?? '1') !== '0';
+$slippageBps = (string) ($query['slippage_bps'] ?? '0');
 $endpoint = 'portfolio-combination-data.php?' . http_build_query($query);
 $martingaleActive = in_array((string) ($query['martingale_mode'] ?? 'none'), ['simple', 'reverse', 'simple_profit', 'reverse_profit'], true);
 $comparisonQuery = $query;
@@ -40,6 +42,7 @@ $exitLabel = trim((string) ($_GET['exit_label'] ?? $_GET['exit_config'] ?? 'Take
 <h1>Итог выбранной комбинации по каждому тикеру</h1>
 <dl class="pair"><div><dt>Лучший порог входа</dt><dd><?= h($entryLabel) ?></dd></div><div><dt>TakeProfit &amp; StopLoss</dt><dd><?= h($exitLabel) ?></dd></div></dl>
 <p>Период: <?= h((string) ($query['start_day'] ?? '')) ?> — <?= h((string) ($query['end_day'] ?? '')) ?> · стартовый баланс: <?= h((string) ($query['balance'] ?? '10')) ?> USDT · комиссия: <?= h((string) ($query['fee'] ?? '0.06')) ?>% за сторону.</p>
+<p class="status">Затраты: funding <?= $includeFunding ? 'включён по историческим ставкам Bitget' : 'отключён' ?> · проскальзывание <?= h($slippageBps) ?> б.п. на каждую сторону. Используются действующие правила количества Bitget; для прошлого нет архива правил контракта. В истории снимков нет mark price, поэтому для funding используется midpoint первой котировки после settlement.</p>
 <?php if ($martingaleActive): ?><button id="compare-no-martingale" type="button" data-endpoint="<?= h($comparisonEndpoint) ?>" disabled>Сравнить с вариантом без мартингейла</button><p class="status" id="comparison-status" role="status" aria-live="polite" hidden></p><div class="pair"><label>Проверочный период · с даты<input type="date" id="validation-start" value="<?= h($validationStartValue) ?>"></label><label>Проверочный период · по дату<input type="date" id="validation-end" value="<?= h($validationEndValue) ?>"></label></div><button id="run-out-of-sample" type="button" data-endpoint="<?= h($endpoint) ?>" disabled>Проверить на отложенном периоде</button><p class="status" id="out-of-sample-status" role="status" aria-live="polite" hidden></p><div class="table-wrap" id="out-of-sample-results" hidden><table><thead><tr><th>Тикер</th><th>Обучающий период · PnL</th><th>Отложенный период · PnL</th><th class="numeric">Цепочек</th><th class="numeric">Худшая цепочка</th><th class="numeric">Просадка</th></tr></thead><tbody></tbody></table></div><?php endif; ?>
 <p class="status" id="status" role="status" aria-live="polite">Подготавливаю результаты по тикерам…</p>
 <div class="table-wrap"><table><thead><tr><th>Тикер</th><th>Порог входа</th><th>TakeProfit &amp; StopLoss</th><th class="numeric">Итог тикера</th><th class="numeric">Ордеров</th><th class="numeric">Цепочек</th><th class="numeric">Худшая цепочка</th><th class="numeric">Просадка</th><th class="numeric comparison-column" hidden>Без мартингейла · итог</th><th class="numeric comparison-column" hidden>Без мартингейла · сделок</th><th class="numeric comparison-column" hidden>Разница</th></tr></thead><tbody id="results"></tbody></table></div>

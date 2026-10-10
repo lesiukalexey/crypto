@@ -16,6 +16,7 @@ function respondCachedSymbols(array $payload, int $status = 200): never
 
 try {
     $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
+    $simulationCosts = rankingSimulationCosts($_GET);
     $root = dirname(__DIR__);
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $entryProfiles = json_decode((string) file_get_contents($root . '/entry_profiles.json'), true, 512, JSON_THROW_ON_ERROR);
@@ -79,14 +80,13 @@ try {
     $symbols = [];
     foreach ($snapshotIds as $symbol => $_maxId) {
         $keyParts = [
-            'ranking-v29-martingale-chain-risk-metrics', $generation, $config['category'], $symbol,
+            'ranking-v30-futures-contract-quantity', $generation, $config['category'], $symbol,
             $startValue, $endValue, $balance, $fee, $minTrades, $ranking,
             $martingaleMode, $martingaleTiming, $martingaleAttempts,
         ];
         if ($martingaleMode !== 'none') {
-        $keyParts[] = 'martingale-negative-stop-v1-balance-cap-v1-risk-usdt-v1-independent-chains-v1-bitget-contract-rules-v2';
-        $keyParts[] = $martingaleRiskLimits;
-    }
+            array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
+        }
         $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $generation);
         if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
         $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
@@ -99,6 +99,8 @@ try {
             if (!is_array($entry) || !is_numeric($entry['best_pnl'] ?? null)) continue;
             if ($best === null || (float) $entry['best_pnl'] > (float) $best['best_pnl']) $best = $entry;
         }
+        array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
+        array_push($keyParts, ...rankingContractRulesIdentity($config['category'], [$symbol]));
         if ($best !== null) {
             $symbols[] = [
                 'symbol' => (string) $symbol,

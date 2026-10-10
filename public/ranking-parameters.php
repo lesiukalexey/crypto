@@ -123,6 +123,28 @@ function rankingMartingaleRiskLimits(array $query): array
     return $limits;
 }
 
+function rankingSimulationCosts(array $query): array
+{
+    $fundingRaw = $query['include_funding'] ?? '1';
+    if (!in_array((string) $fundingRaw, ['0', '1'], true)) {
+        throw new InvalidArgumentException('Учитывать funding можно только как Да или Нет.');
+    }
+    $slippage = $query['slippage_bps'] ?? '0';
+    if (!is_string($slippage) && !is_int($slippage) && !is_float($slippage)) {
+        throw new InvalidArgumentException('Проскальзывание задаётся числом в базисных пунктах.');
+    }
+    $slippage = trim((string) $slippage);
+    if (!preg_match('/^\d{1,4}(?:\.\d{1,4})?$/', $slippage) || (float) $slippage >= 10000) {
+        throw new InvalidArgumentException('Проскальзывание должно быть от 0 до 9 999,9999 б.п.');
+    }
+    return ['include_funding' => (string) $fundingRaw === '1', 'slippage_bps' => $slippage];
+}
+
+function rankingSimulationCostsIdentity(array $costs): array
+{
+    return ['shared-futures-cost-model-v2-contract-quantity-v1', $costs['include_funding'], $costs['slippage_bps']];
+}
+
 function rankingMartingaleCacheIdentity(string $mode, array $riskLimits): array
 {
     if ($mode === 'none') return [];
@@ -135,7 +157,7 @@ function rankingMartingaleCacheIdentity(string $mode, array $riskLimits): array
 function rankingCurrentBitgetContract(string $productType, string $symbol): array
 {
     if (!in_array($productType, ['USDT-FUTURES', 'USDC-FUTURES', 'COIN-FUTURES'], true)) {
-        throw new RuntimeException('Ограничения мартингейла настроены только для бессрочных фьючерсов Bitget.');
+        throw new RuntimeException('Проверка рыночных ордеров настроена только для бессрочных фьючерсов Bitget.');
     }
     $safeType = strtolower((string) preg_replace('/[^a-z0-9-]/i', '', $productType));
     $root = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-contract-specs';
@@ -182,6 +204,110 @@ function rankingCurrentBitgetContract(string $productType, string $symbol): arra
         $contract = $cache['contracts'][$symbol] ?? null;
         if (!is_array($contract)) throw new RuntimeException('Bitget не вернул текущие правила для ' . $symbol . '.');
         return $contract;
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+}
+
+function rankingFundingDecimal(int|float|string $value): string
+{
+    if (!is_numeric($value) || !is_finite((float) $value)) throw new RuntimeException('Bitget вернул некорректную ставку funding.');
+    // BCMath does not accept exponent notation. Keep API strings exact where
+    // possible, and expand legacy float cache values to a plain decimal.
+    $decimal = (string) $value;
+    if (stripos($decimal, 'e') !== false) $decimal = number_format((float) $value, 16, '.', '');
+    if (str_contains($decimal, '.')) $decimal = rtrim(rtrim($decimal, '0'), '.');
+    if ($decimal === '' || $decimal === '-0') return '0';
+    return $decimal;
+}
+
+function rankingContractRulesIdentity(string $productType, array $symbols): array
+{
+    $fields = ['symbolStatus', 'minTradeUSDT', 'minTradeNum', 'sizeMultiplier', 'volumePlace', 'maxMarketOrderQty', 'minLever', 'maxLever'];
+    $rules = [];
+    $symbols = array_values(array_unique(array_map('strval', $symbols)));
+    sort($symbols, SORT_STRING);
+    foreach ($symbols as $symbol) {
+        if ($symbol === '') continue;
+        $contract = rankingCurrentBitgetContract($productType, $symbol);
+        $rules[$symbol] = [];
+        foreach ($fields as $field) $rules[$symbol][$field] = (string) $contract[$field];
+    }
+    return ['current-bitget-order-rules-v1', hash('sha256', json_encode($rules, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES))];
+}
+
+function rankingHistoricalFundingRates(string $productType, string $symbol, int $startMilliseconds, int $endMilliseconds): array
+{
+    $safe = strtolower((string) preg_replace('/[^a-z0-9-]/i', '', $productType . '-' . $symbol));
+    $root = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-funding-rates';
+    if (!is_dir($root) && !mkdir($root, 0700, true) && !is_dir($root)) {
+        throw new RuntimeException('Не удалось подготовить кэш истории funding Bitget.');
+    }
+    $path = $root . '/' . $safe . '.json';
+    $lock = fopen($path . '.lock', 'c');
+    if ($lock === false || !flock($lock, LOCK_EX)) throw new RuntimeException('Не удалось заблокировать кэш funding Bitget.');
+    try {
+        $cache = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
+        $covered = is_array($cache) && is_array($cache['rates'] ?? null)
+            && (int) ($cache['fetched_at'] ?? 0) >= time() - 21600
+            && (int) ($cache['first_timestamp'] ?? PHP_INT_MAX) <= intdiv($startMilliseconds, 1000)
+            && ((int) ($cache['last_timestamp'] ?? 0) >= intdiv($endMilliseconds, 1000)
+                || (int) ($cache['latest_request_time'] ?? 0) >= intdiv($endMilliseconds, 1000));
+        if (!$covered) {
+            $rates = [];
+            $page = 1;
+            $first = PHP_INT_MAX;
+            $last = 0;
+            $latestRequestTime = 0;
+            while ($page <= 100) {
+                $url = 'https://api.bitget.com/api/v2/mix/market/history-fund-rate?' . http_build_query([
+                    'symbol' => $symbol, 'productType' => $productType, 'pageSize' => 100, 'pageNo' => $page,
+                ]);
+                $curl = curl_init($url);
+                curl_setopt_array($curl, [CURLOPT_RETURNTRANSFER => true, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => 15, CURLOPT_USERAGENT => 'BitgetHistoricalReplay/1.0']);
+                $body = curl_exec($curl);
+                $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+                $curlError = curl_error($curl);
+                curl_close($curl);
+                if (!is_string($body) || $status !== 200) throw new RuntimeException('Не удалось получить историю funding Bitget: ' . ($curlError !== '' ? $curlError : 'HTTP ' . $status));
+                $payload = json_decode($body, true);
+                if (!is_array($payload) || ($payload['code'] ?? null) !== '00000' || !is_array($payload['data'] ?? null)) throw new RuntimeException('Bitget вернул некорректную историю funding.');
+                $latestRequestTime = max($latestRequestTime, intdiv((int) ($payload['requestTime'] ?? 0), 1000));
+                $data = $payload['data'];
+                if ($data === []) break;
+                $oldestInPage = PHP_INT_MAX;
+                foreach ($data as $item) {
+                    if (!is_array($item) || !isset($item['fundingTime'], $item['fundingRate']) || !is_numeric($item['fundingTime']) || !is_numeric($item['fundingRate'])) throw new RuntimeException('Bitget вернул неполную запись funding.');
+                    $time = (int) $item['fundingTime'];
+                    $rate = rankingFundingDecimal((string) $item['fundingRate']);
+                    $rates[$time] = $rate;
+                    $first = min($first, intdiv($time, 1000));
+                    $last = max($last, intdiv($time, 1000));
+                    $oldestInPage = min($oldestInPage, $time);
+                }
+                if ($oldestInPage <= $startMilliseconds) break;
+                if (count($data) < 100) break;
+                $page++;
+            }
+            if ($page > 100) throw new RuntimeException('История funding Bitget превысила 100 страниц.');
+            if ($rates === [] || $first > intdiv($startMilliseconds, 1000)
+                || ($last < intdiv($endMilliseconds, 1000) && $latestRequestTime < intdiv($endMilliseconds, 1000))) {
+                throw new RuntimeException('История funding Bitget не покрывает выбранный период. Расчёт остановлен, ставка не подменялась нулём.');
+            }
+            ksort($rates, SORT_NUMERIC);
+            $cache = ['fetched_at' => time(), 'product_type' => $productType, 'symbol' => $symbol,
+                'first_timestamp' => $first, 'last_timestamp' => $last,
+                'latest_request_time' => $latestRequestTime,
+                'rates' => array_map(static fn (int|string $timestamp, string $rate): array => [intdiv((int) $timestamp, 1000), $rate], array_keys($rates), array_values($rates))];
+            $encoded = json_encode($cache, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+            $temporary = tempnam($root, '.funding-');
+            if ($temporary === false || file_put_contents($temporary, $encoded, LOCK_EX) === false || !rename($temporary, $path)) {
+                if (is_string($temporary)) @unlink($temporary);
+                throw new RuntimeException('Не удалось сохранить историю funding Bitget.');
+            }
+        }
+        return array_values(array_map(static fn (array $row): array => [(int) $row[0], rankingFundingDecimal(is_int($row[1]) || is_float($row[1]) || is_string($row[1]) ? $row[1] : '0')], array_filter($cache['rates'], static fn (array $row): bool => (int) $row[0] >= intdiv($startMilliseconds, 1000) && (int) $row[0] <= intdiv($endMilliseconds, 1000))));
     } finally {
         flock($lock, LOCK_UN);
         fclose($lock);

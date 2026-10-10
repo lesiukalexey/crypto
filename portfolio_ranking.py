@@ -26,6 +26,7 @@ import pymysql
 
 from app import load_config
 from contract_rules import load_contract_specs, numba_market_order_rules
+from futures_costs import load_historical_funding_rates
 from database import connect_mysql
 from ranking_checkpoints import (
     CHECKPOINT_MIN_FREE_BYTES,
@@ -62,6 +63,7 @@ PORTFOLIO_RESULT_DTYPE = np.dtype([("pnl", "<f8"), ("trade_count", "<u4"), ("cha
 def durable_result_path(
     cache_dir: Path, args: argparse.Namespace, category: str,
     max_ids: dict[str, int], quotes_by_symbol: dict[str, QuoteArrays],
+    order_rules_by_symbol: dict[str, tuple[float, float, int, float, float]] | None = None,
 ) -> Path:
     quote_versions = [
         (symbol, max_ids[symbol], quote_prefix_fingerprint(quotes_by_symbol[symbol], len(quotes_by_symbol[symbol]))
@@ -69,11 +71,13 @@ def durable_result_path(
         for symbol in sorted(max_ids)
     ]
     key = hashlib.sha256(json.dumps([
-        "portfolio-durable-result-v6-canonical-ledger" if args.martingale_mode == "none" else "portfolio-durable-result-v11-bitget-contract-rules", category, args.start_day, args.end_day,
+        "portfolio-durable-result-v7-futures-costs-order-rules" if args.martingale_mode == "none" else "portfolio-durable-result-v12-futures-costs-order-rules", category, args.start_day, args.end_day,
         args.balance, args.fee_percent, args.min_trades, args.entry_config,
         args.ranking_params, args.martingale_mode, args.martingale_timing,
         args.martingale_attempts, args.martingale_max_chain_loss,
-        args.martingale_max_day_loss, quote_versions,
+        args.martingale_max_day_loss, getattr(args, "include_funding", "1"),
+        getattr(args, "slippage_bps", 0.0),
+        [(symbol, (order_rules_by_symbol or {}).get(symbol)) for symbol in sorted(max_ids)], quote_versions,
     ], separators=(",", ":")).encode("utf-8")).hexdigest()
     return cache_dir.parent / "bitget-simulation-checkpoints" / "portfolio-results-v1" / key[:2] / f"{key}.json"
 
@@ -112,6 +116,9 @@ def pair_result_cache_paths(
     martingale_attempts: int,
     martingale_max_chain_loss: float | None,
     martingale_max_day_loss: float | None,
+    include_funding: str = "1",
+    slippage_bps: float = 0.0,
+    order_rules_by_symbol: dict[str, tuple[float, float, int, float, float]] | None = None,
 ) -> tuple[Path, dict[str, Path]]:
     cache_root = cache_dir / "portfolio-pair-results"
     cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -124,7 +131,7 @@ def pair_result_cache_paths(
 
     scope_keys = {
         symbol: hashlib.sha256(json.dumps([
-            "portfolio-pair-simulation-v7-canonical-ledger" if martingale_mode == "none" else "portfolio-pair-simulation-v12-bitget-contract-rules",
+            "portfolio-pair-simulation-v8-futures-costs-order-rules" if martingale_mode == "none" else "portfolio-pair-simulation-v13-futures-costs-order-rules",
             category,
             symbol,
             max_ids[symbol],
@@ -138,6 +145,9 @@ def pair_result_cache_paths(
             martingale_attempts,
             martingale_max_chain_loss,
             martingale_max_day_loss,
+            include_funding,
+            slippage_bps,
+            (order_rules_by_symbol or {}).get(symbol),
         ], separators=(",", ":")).encode("utf-8")).hexdigest()
         for symbol in max_ids
     }
@@ -208,13 +218,15 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
             (int(lookback), entry_family or "both", int(threshold))
         ]
     args = state["args"]
+    symbol_state = dict(state)
+    symbol_state["order_rules"] = state["order_rules_by_symbol"][symbol]
     use_checkpoint = args.martingale_mode == "none"
     if not use_checkpoint and (len(signals) == 0 or args.min_trades > len(signals)):
         return symbol, None, 0, 0, 0, False, "unused", ()
 
     cache_filename = hashlib.sha256(entry_id.encode("utf-8")).hexdigest() + ".json.z"
     cache_path = state["pair_cache_scopes"][symbol] / cache_filename
-    checkpoint_path = dated_state_checkpoint_path(state, symbol, entry_id, args.end_day) if use_checkpoint else None
+    checkpoint_path = dated_state_checkpoint_path(symbol_state, symbol, entry_id, args.end_day) if use_checkpoint else None
     source_day = (
         datetime.fromtimestamp(float(quotes.timestamps[0]), timezone.utc)
         .astimezone(KYIV).date().isoformat()
@@ -230,20 +242,20 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
     range_start_day = range_start_boundary[0] if range_start_boundary else None
     range_start_quote_count = range_start_boundary[1] if range_start_boundary else 0
     first_missing_day = next((index for index, (day, _) in enumerate(all_day_boundaries)
-        if not has_dated_state_checkpoint(state, symbol, entry_id, day)), None) if use_checkpoint else None
+        if not has_dated_state_checkpoint(symbol_state, symbol, entry_id, day)), None) if use_checkpoint else None
     resume_until_day = (
         all_day_boundaries[first_missing_day - 1][0]
         if first_missing_day is not None and first_missing_day > 0
         else (None if first_missing_day == 0 else args.end_day)
     ) if use_checkpoint else None
     previous_checkpoint = load_best_state_checkpoint(
-        state, symbol, entry_id, resume_until_day, quotes, len(state["exit_options"]),
+        symbol_state, symbol, entry_id, resume_until_day, quotes, len(state["exit_options"]),
     ) if checkpoint_path is not None and resume_until_day is not None else None
     previous_states = previous_checkpoint[0] if previous_checkpoint is not None else None
     previous_quote_count = previous_checkpoint[1] if previous_checkpoint is not None else 0
     previous_checkpoint_day = previous_checkpoint[2] if previous_checkpoint is not None else None
     range_start_states = load_exact_state_checkpoint(
-        state, symbol, entry_id, range_start_day, quotes,
+        symbol_state, symbol, entry_id, range_start_day, quotes,
         len(state["exit_options"]), range_start_quote_count,
     ) if use_checkpoint and range_start_day is not None else None
     if (use_checkpoint and first_missing_day is None and previous_states is not None
@@ -251,6 +263,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
         and (range_start_day is None or range_start_states is not None)):
         result_pnls, result_trades = standard_range_results(
             quotes, args.balance, state["fee_rate"], range_start_states, previous_states,
+            state["order_rules_by_symbol"][symbol],
         )
         results = np.empty(len(result_pnls), dtype=PORTFOLIO_RESULT_DTYPE)
         results["pnl"] = result_pnls
@@ -323,6 +336,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                         args.balance, state["fee_rate"], take_profit, stop_loss,
                         day_quote_counts_to_capture, previous_state,
                         state["take_confirmation_snapshots"], state["stop_confirmation_snapshots"],
+                        state["order_rules_by_symbol"][symbol],
                     )
                     for index, (day, _) in enumerate(boundaries_to_capture):
                         states_by_day[day][state_index] = day_states[index]
@@ -332,6 +346,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                         quotes, signals, shorts, price_trees[0], price_trees[1],
                         args.balance, state["fee_rate"], take_profit, stop_loss, previous_state,
                         state["take_confirmation_snapshots"], state["stop_confirmation_snapshots"],
+                        state["order_rules_by_symbol"][symbol],
                     )
                 next_states.append(next_state)
                 if range_start_day is not None:
@@ -370,6 +385,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                         args.martingale_max_chain_loss,
                         args.martingale_max_day_loss,
                         state["take_confirmation_snapshots"], state["stop_confirmation_snapshots"],
+                        state["order_rules_by_symbol"][symbol],
                     )
                     chain_count = trade_count
                 if use_checkpoint:
@@ -398,7 +414,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
         checkpoint_status = "saved"
         for day, day_states in states_by_day.items():
             day_quote_count = next(count for current_day, count in boundaries_to_capture if current_day == day)
-            day_path = dated_state_checkpoint_path(state, symbol, entry_id, day)
+            day_path = dated_state_checkpoint_path(symbol_state, symbol, entry_id, day)
             if state_counts_by_day[day] != len(state["exit_options"]) or not write_state_checkpoint(day_path, day, quotes, day_states, day_quote_count):
                 checkpoint_status = "skipped_low_disk"
     reused_days = tuple(day for day, loaded in (
@@ -427,6 +443,8 @@ def main() -> int:
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
     parser.add_argument("--martingale-max-chain-loss", type=float, default=0.0)
     parser.add_argument("--martingale-max-day-loss", type=float, default=0.0)
+    parser.add_argument("--include-funding", choices=("0", "1"), default="1")
+    parser.add_argument("--slippage-bps", type=float, default=0.0)
     parser.add_argument("--workers", type=int, choices=range(1, 5), default=4)
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
@@ -480,13 +498,12 @@ def main() -> int:
 
         config = load_config(Path(__file__).with_name("config.json"))
         order_rules_by_symbol = {}
-        if args.martingale_mode != "none":
-            contract_specs = load_contract_specs(config["category"])
-            for contract_symbol in max_ids:
-                contract = contract_specs.get(contract_symbol)
-                if contract is None:
-                    raise RuntimeError(f"Bitget contract rules are unavailable for {contract_symbol}")
-                order_rules_by_symbol[contract_symbol] = numba_market_order_rules(contract, leverage=1.0)
+        contract_specs = load_contract_specs(config["category"])
+        for contract_symbol in max_ids:
+            contract = contract_specs.get(contract_symbol)
+            if contract is None:
+                raise RuntimeError(f"Bitget contract rules are unavailable for {contract_symbol}")
+            order_rules_by_symbol[contract_symbol] = numba_market_order_rules(contract, leverage=1.0)
         end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
         start_local = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV)
@@ -522,7 +539,21 @@ def main() -> int:
                 row.pop("id", None)
                 rows_by_symbol[symbol].append(row)
 
-        quotes_by_symbol = {symbol: QuoteArrays.from_rows(rows) for symbol, rows in rows_by_symbol.items() if rows}
+        quotes_by_symbol = {}
+        for symbol, rows in rows_by_symbol.items():
+            if not rows:
+                continue
+            quotes = QuoteArrays.from_rows(rows, args.slippage_bps)
+            if args.include_funding == "1" and len(quotes):
+                funding_rows = load_historical_funding_rates(
+                    config["category"], symbol, float(quotes.timestamps[0]), float(quotes.timestamps[-1]),
+                )
+                marks = np.fromiter(
+                    ((float(row["bid_price"]) + float(row["ask_price"])) / 2 for row in rows),
+                    dtype=np.float64, count=len(rows),
+                )
+                quotes.set_funding_rates(funding_rows, marks)
+            quotes_by_symbol[symbol] = quotes
         del raw_rows, rows_by_symbol
         _, pair_cache_scopes = pair_result_cache_paths(
             args.cache_dir,
@@ -539,9 +570,12 @@ def main() -> int:
             args.martingale_attempts,
             args.martingale_max_chain_loss,
             args.martingale_max_day_loss,
+            args.include_funding,
+            args.slippage_bps,
+            order_rules_by_symbol,
         )
         saved_result_path = durable_result_path(
-            args.cache_dir, args, config["category"], max_ids, quotes_by_symbol,
+            args.cache_dir, args, config["category"], max_ids, quotes_by_symbol, order_rules_by_symbol,
         )
         try:
             saved_result = json.loads(saved_result_path.read_text(encoding="utf-8"))

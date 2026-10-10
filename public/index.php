@@ -37,10 +37,12 @@ $rankingError = null;
 try {
     $rankingParameters = rankingParameters($_GET, $entryProfileConfig, $exitProfileConfig);
     $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
+    $simulationCosts = rankingSimulationCosts($_GET);
 } catch (InvalidArgumentException $exception) {
     $rankingError = $exception->getMessage();
     $rankingParameters = rankingParameters([], $entryProfileConfig, $exitProfileConfig);
     $martingaleRiskLimits = ['max_chain_loss' => '0', 'max_day_loss' => '0'];
+    $simulationCosts = ['include_funding' => true, 'slippage_bps' => '0'];
 }
 $rankingRanges = $rankingParameters['ranges'];
 $rankingModes = $rankingParameters['modes'];
@@ -107,7 +109,7 @@ $detailMarketAverage = is_numeric($_GET['detail_market_average'] ?? null) ? (flo
 $detailSupport = filter_var($_GET['detail_support'] ?? null, FILTER_VALIDATE_INT);
 $detailUniverseSize = filter_var($_GET['detail_universe_size'] ?? null, FILTER_VALIDATE_INT);
 $detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALIDATE_INT);
-$viewParams = ['symbol' => $symbol, 'start_day' => $startDayInput, 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent];
+$viewParams = ['symbol' => $symbol, 'start_day' => $startDayInput, 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent, 'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'slippage_bps' => $simulationCosts['slippage_bps']];
 $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
 $isCurrentDay = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
@@ -184,13 +186,11 @@ try {
         if (!in_array($symbol, $symbols, true)) {
             $symbol = $symbols[0];
         }
-        if ($martingaleMode !== 'none') {
-            $martingaleContractRules = rankingCurrentBitgetContract($config['category'], $symbol);
-            if ($martingaleContractRules['symbolStatus'] !== 'normal'
-                || bccomp((string) $martingaleContractRules['minLever'], '1', 12) > 0
-                || bccomp((string) $martingaleContractRules['maxLever'], '1', 12) < 0) {
-                throw new RuntimeException('Текущие правила Bitget не разрешают открыть эту пару с плечом 1×.');
-            }
+        $martingaleContractRules = rankingCurrentBitgetContract($config['category'], $symbol);
+        if ($martingaleContractRules['symbolStatus'] !== 'normal'
+            || bccomp((string) $martingaleContractRules['minLever'], '1', 12) > 0
+            || bccomp((string) $martingaleContractRules['maxLever'], '1', 12) < 0) {
+            throw new RuntimeException('Текущие правила Bitget не разрешают открыть эту пару с плечом 1×.');
         }
         $startDay = DateTimeImmutable::createFromFormat('!Y-m-d', $startDayInput, $timezone);
         $startDateErrors = DateTimeImmutable::getLastErrors();
@@ -242,8 +242,9 @@ $ledgerLastQuotes = [];
 $ledgerSourceDay = null;
 if ($martingaleMode === 'none' && $rows !== [] && $error === null) {
     $closedTradeLedgerKey = hash('sha256', json_encode([
-        'closed-trade-ledger-v2-exit-confirmation', $config['category'], $symbol, $startingBalance,
+        'closed-trade-ledger-v4-shared-cost-model', $config['category'], $symbol, $startingBalance,
         $feePercent, $entryConfig, $selectedExitConfig, $exitConfirmationMode, $exitConfirmationSnapshots,
+        ...rankingSimulationCostsIdentity($simulationCosts), $martingaleContractRules,
     ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
     $prefixContext = hash_init('sha256');
     $quoteCount = 0;
@@ -314,20 +315,33 @@ if ($martingaleMode === 'none' && $rows !== [] && $error === null) {
 
 function h(string $value): string { return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
 function cachedTradeIsOpen(array $trade): bool { return str_starts_with((string) ($trade['reason'] ?? ''), 'Открыта ·'); }
-function markTradeAtQuote(array $trade, array $quote, string $feeRate): array
+function markTradeAtQuote(array $trade, array $quote, string $feeRate, array $fundingEvents, float $slippageBps): array
 {
     $short = (bool) $trade['is_short'];
     $entryPrice = (string) $trade['entry_price'];
     $exitPrice = (string) ($short ? $quote['ask_price'] : $quote['bid_price']);
+    $slippage = bcdiv((string) $slippageBps, '10000', 16);
+    $exitPrice = bcmul($exitPrice, $short ? bcadd('1', $slippage, 16) : bcsub('1', $slippage, 16), 24);
     $move = $short ? bcsub($entryPrice, $exitPrice, 24) : bcsub($exitPrice, $entryPrice, 24);
     $gross = bcmul((string) $trade['quantity'], $move, 24);
     $exitFee = bcmul(bcmul((string) $trade['quantity'], $exitPrice, 24), $feeRate, 24);
     $net = bcsub(bcsub($gross, (string) $trade['entry_fee'], 24), $exitFee, 24);
+    $entryTimestamp = (new DateTimeImmutable($trade['entry']['received_at_utc'], new DateTimeZone('UTC')))->getTimestamp();
+    $quoteTimestamp = (new DateTimeImmutable($quote['received_at_utc'], new DateTimeZone('UTC')))->getTimestamp();
+    $fundingTotal = '0';
+    foreach ($fundingEvents as $event) {
+        if ($entryTimestamp < $event['timestamp'] && $event['timestamp'] <= $quoteTimestamp) {
+            $amount = bcmul(bcmul((string) $trade['quantity'], $event['mark_price'], 24), $event['rate'], 24);
+            $cashflow = $short ? $amount : bcsub('0', $amount, 24);
+            $fundingTotal = bcadd($fundingTotal, $cashflow, 24);
+            $net = bcadd($net, $cashflow, 24);
+        }
+    }
     return [
         'entry' => $trade['entry'], 'exit' => $quote,
         'quantity' => $trade['quantity'], 'entry_price' => $entryPrice,
         'exit_price' => $exitPrice, 'entry_fee' => $trade['entry_fee'],
-        'exit_fee' => $exitFee, 'gross' => $gross, 'net' => $net,
+        'exit_fee' => $exitFee, 'gross' => $gross, 'funding' => $fundingTotal, 'net' => $net,
         'balance' => '0', 'reason' => 'Открыта · последний снимок выбранного периода',
         'is_short' => $short,
     ];
@@ -396,6 +410,42 @@ $balance = $startingBalance;
 $trades = [];
 $tradeEntryIndex = 0;
 $rowCount = count($rows);
+$executionRows = $rows;
+$slippageFraction = (float) $simulationCosts['slippage_bps'] / 10000;
+if ($slippageFraction > 0) {
+    foreach ($executionRows as &$executionRow) {
+        $executionRow['bid_price'] = bcmul((string) $executionRow['bid_price'], bcsub('1', (string) $slippageFraction, 16), 24);
+        $executionRow['ask_price'] = bcmul((string) $executionRow['ask_price'], bcadd('1', (string) $slippageFraction, 16), 24);
+    }
+    unset($executionRow);
+}
+$fundingEvents = [];
+if ($simulationCosts['include_funding'] && $rows !== []) {
+    try {
+        $firstTimestamp = (new DateTimeImmutable($rows[0]['received_at_utc'], new DateTimeZone('UTC')))->getTimestamp() * 1000;
+        $lastTimestamp = (new DateTimeImmutable($rows[$rowCount - 1]['received_at_utc'], new DateTimeZone('UTC')))->getTimestamp() * 1000;
+        foreach (rankingHistoricalFundingRates($config['category'], $symbol, $firstTimestamp, $lastTimestamp) as [$fundingTimestamp, $fundingRate]) {
+            $low = 0;
+            $high = $rowCount;
+            while ($low < $high) {
+                $middle = intdiv($low + $high, 2);
+                $quoteTimestamp = (new DateTimeImmutable($rows[$middle]['received_at_utc'], new DateTimeZone('UTC')))->getTimestamp() * 1000;
+                if ($quoteTimestamp < (int) $fundingTimestamp * 1000) $low = $middle + 1;
+                else $high = $middle;
+            }
+            if ($low < $rowCount) {
+                $markPrice = bcdiv(bcadd((string) $rows[$low]['bid_price'], (string) $rows[$low]['ask_price'], 24), '2', 24);
+                $fundingEvents[] = ['timestamp' => (int) $fundingTimestamp, 'quote_index' => $low, 'mark_price' => $markPrice, 'rate' => (string) $fundingRate];
+            }
+        }
+    } catch (Throwable $fundingError) {
+        $error = 'Не удалось учесть funding: ' . $fundingError->getMessage();
+    }
+}
+$fundingCashflowAtEvent = static function (string $quantity, bool $isShort, array $event): string {
+    $cashflow = bcmul(bcmul($quantity, $event['mark_price'], 24), $event['rate'], 24);
+    return $isShort ? $cashflow : bcsub('0', $cashflow, 24);
+};
 $hasContinuousWindow = static function (int $index) use ($rows, $momentumLookback): bool {
     if ($index < $momentumLookback) return false;
     for ($j = $index - $momentumLookback + 1; $j <= $index; $j++) {
@@ -447,22 +497,25 @@ $findCompatibleEntry = static function (int $fromIndex, bool $wantedShort) use (
     }
     return null;
 };
-if ($cachedStandardTradeEvents !== null) {
+if ($error !== null) {
+    $trades = [];
+    $balance = $startingBalance;
+} elseif ($cachedStandardTradeEvents !== null) {
     $trades = $cachedStandardTradeEvents;
     $balance = $startingBalance;
 } elseif ($martingaleMode !== 'none') {
     $chainAttempt = 0;
-    $appendLegTrades = static function (array $legs, int $exitIndex, string $reason, string &$currentBalance) use (&$trades, &$chainAttempt, $rows, $feeRate, $martingaleMode): void {
-        $exit = $rows[$exitIndex];
+    $appendLegTrades = static function (array $legs, int $exitIndex, string $reason, string &$currentBalance) use (&$trades, &$chainAttempt, $executionRows, $feeRate, $martingaleMode): void {
+        $exit = $executionRows[$exitIndex];
         foreach ($legs as $leg) {
             $short = $leg['is_short'];
             $exitPrice = $short ? $exit['ask_price'] : $exit['bid_price'];
             $move = $short ? bcsub($leg['entry_price'], $exitPrice, 24) : bcsub($exitPrice, $leg['entry_price'], 24);
             $gross = bcmul($leg['quantity'], $move, 24);
             $exitFee = bcmul(bcmul($leg['quantity'], $exitPrice, 24), $feeRate, 24);
-            $net = bcsub(bcsub($gross, $leg['entry_fee'], 24), $exitFee, 24);
+            $net = bcadd(bcsub(bcsub($gross, $leg['entry_fee'], 24), $exitFee, 24), $leg['funding_paid'], 24);
             $currentBalance = bcadd($currentBalance, $net, 24);
-            $trades[] = ['entry' => $leg['entry'], 'exit' => $exit, 'quantity' => $leg['quantity'], 'entry_price' => $leg['entry_price'], 'exit_price' => $exitPrice, 'entry_fee' => $leg['entry_fee'], 'exit_fee' => $exitFee, 'gross' => $gross, 'net' => $net, 'balance' => $currentBalance, 'reason' => $reason, 'is_short' => $short, 'chain_id' => $chainAttempt];
+            $trades[] = ['entry' => $leg['entry'], 'exit' => $exit, 'quantity' => $leg['quantity'], 'entry_price' => $leg['entry_price'], 'exit_price' => $exitPrice, 'entry_fee' => $leg['entry_fee'], 'exit_fee' => $exitFee, 'gross' => $gross, 'funding' => $leg['funding_paid'], 'net' => $net, 'balance' => $currentBalance, 'reason' => $reason, 'is_short' => $short, 'chain_id' => $chainAttempt];
         }
     };
     $finalScale = (string) (2 ** ($martingaleAttempts - 1));
@@ -491,14 +544,14 @@ if ($cachedStandardTradeEvents !== null) {
             : $findMomentumEntry($tradeEntryIndex);
         if ($signal === null) break;
         [$tradeEntryIndex, $tradeIsShort] = $signal;
-        $entryDay = (new DateTimeImmutable($rows[$tradeEntryIndex]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
+        $entryDay = (new DateTimeImmutable($executionRows[$tradeEntryIndex]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
         if ((float) $martingaleRiskLimits['max_day_loss'] > 0
             && isset($dailyRealizedByDay[$entryDay])
             && bccomp($dailyRealizedByDay[$entryDay], bcsub('0', $martingaleRiskLimits['max_day_loss'], 24), 24) <= 0) {
             $tradeEntryIndex++;
             continue;
         }
-        $entryPrice = $tradeIsShort ? $rows[$tradeEntryIndex]['bid_price'] : $rows[$tradeEntryIndex]['ask_price'];
+        $entryPrice = $tradeIsShort ? $executionRows[$tradeEntryIndex]['bid_price'] : $executionRows[$tradeEntryIndex]['ask_price'];
         if (bccomp($entryPrice, '0', 24) <= 0) { $tradeEntryIndex++; continue; }
         $availableInitialStake = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
         $stake = bccomp($baseStake, $availableInitialStake, 24) < 0 ? $baseStake : $availableInitialStake;
@@ -507,8 +560,8 @@ if ($cachedStandardTradeEvents !== null) {
         $legs = [];
         $positionNotional = '0';
         $stage = 1;
-        $addLeg = static function (int $index, bool $short, string &$notional) use (&$legs, &$positionNotional, &$martingaleOrderConstraintError, $rows, $feeRate, $martingaleContractRules): bool {
-            $entry = $rows[$index];
+        $addLeg = static function (int $index, bool $short, string &$notional) use (&$legs, &$positionNotional, &$martingaleOrderConstraintError, $executionRows, $feeRate, $martingaleContractRules): bool {
+            $entry = $executionRows[$index];
             $price = $short ? $entry['bid_price'] : $entry['ask_price'];
             if (bccomp($price, '0', 24) <= 0 || bccomp($notional, '0', 24) <= 0) return false;
             $reservedBalance = bcadd($notional, bcmul($notional, $feeRate, 24), 24);
@@ -520,12 +573,14 @@ if ($cachedStandardTradeEvents !== null) {
             $notional = $order['notional'];
             $qty = $order['quantity'];
             $entryFee = bcmul($notional, $feeRate, 24);
-            $legs[] = ['entry' => $entry, 'entry_price' => $price, 'quantity' => $qty, 'entry_fee' => $entryFee, 'notional' => $notional, 'is_short' => $short];
+            $legs[] = ['entry' => $entry, 'entry_price' => $price, 'quantity' => $qty, 'entry_fee' => $entryFee, 'notional' => $notional, 'is_short' => $short, 'entry_timestamp' => (new DateTimeImmutable($entry['received_at_utc'], new DateTimeZone('UTC')))->getTimestamp(), 'funding_paid' => '0'];
             $positionNotional = bcadd($positionNotional, $notional, 24);
             return true;
         };
         if (!$addLeg($tradeEntryIndex, $tradeIsShort, $stake)) break;
         $chainBaseStake = $stake;
+        $fundingCursor = 0;
+        while ($fundingCursor < count($fundingEvents) && $fundingEvents[$fundingCursor]['quote_index'] <= $tradeEntryIndex) $fundingCursor++;
 
         while ($legs !== []) {
             $exitIndex = $rowCount - 1;
@@ -539,17 +594,29 @@ if ($cachedStandardTradeEvents !== null) {
             $foundStop = false;
             $hitRiskLimit = false;
             for ($i = $tradeEntryIndex + 1; $i < $rowCount; $i++) {
-                $exitQuote = $tradeIsShort ? $rows[$i]['ask_price'] : $rows[$i]['bid_price'];
+                while ($fundingCursor < count($fundingEvents) && $fundingEvents[$fundingCursor]['quote_index'] <= $i) {
+                    $event = $fundingEvents[$fundingCursor];
+                    foreach ($legs as &$fundingLeg) {
+                        if ($fundingLeg['entry_timestamp'] < $event['timestamp']) {
+                            $fundingLeg['funding_paid'] = bcadd($fundingLeg['funding_paid'], $fundingCashflowAtEvent($fundingLeg['quantity'], $tradeIsShort, $event), 24);
+                        }
+                    }
+                    unset($fundingLeg);
+                    $fundingCursor++;
+                }
+                $exitQuote = $tradeIsShort ? $executionRows[$i]['ask_price'] : $executionRows[$i]['bid_price'];
                 $grossNow = '0'; $entryFeesNow = '0'; $totalQty = '0';
+                $fundingNetNow = '0';
                 foreach ($legs as $leg) {
                     $move = $tradeIsShort ? bcsub($leg['entry_price'], $exitQuote, 24) : bcsub($exitQuote, $leg['entry_price'], 24);
                     $grossNow = bcadd($grossNow, bcmul($leg['quantity'], $move, 24), 24);
                     $entryFeesNow = bcadd($entryFeesNow, $leg['entry_fee'], 24);
                     $totalQty = bcadd($totalQty, $leg['quantity'], 24);
+                    $fundingNetNow = bcadd($fundingNetNow, $leg['funding_paid'], 24);
                 }
                 $exitFeeNow = bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24);
-                $netNow = bcsub(bcsub($grossNow, $entryFeesNow, 24), $exitFeeNow, 24);
-                $quoteDay = (new DateTimeImmutable($rows[$i]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
+                $netNow = bcadd(bcsub(bcsub($grossNow, $entryFeesNow, 24), $exitFeeNow, 24), $fundingNetNow, 24);
+                $quoteDay = (new DateTimeImmutable($executionRows[$i]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
                 $projectedChainPnl = bcadd($chainRealizedPnl, $netNow, 24);
                 $projectedDayPnl = bcadd((string) ($dailyRealizedByDay[$quoteDay] ?? '0'), $projectedChainPnl, 24);
                 if ((float) $martingaleRiskLimits['max_chain_loss'] > 0
@@ -601,7 +668,7 @@ if ($cachedStandardTradeEvents !== null) {
                 $balanceBeforeClose = $balance;
                 $appendLegTrades($legs, $exitIndex, $exitReason, $balance);
                 $closedNet = bcsub($balance, $balanceBeforeClose, 24);
-                $exitDay = (new DateTimeImmutable($rows[$exitIndex]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
+                $exitDay = (new DateTimeImmutable($executionRows[$exitIndex]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
                 $dailyRealizedByDay[$exitDay] = bcadd(
                     (string) ($dailyRealizedByDay[$exitDay] ?? '0'),
                     bcadd($chainRealizedPnl, $closedNet, 24),
@@ -612,15 +679,16 @@ if ($cachedStandardTradeEvents !== null) {
                 break;
             }
 
-            $exitQuote = $tradeIsShort ? $rows[$exitIndex]['ask_price'] : $rows[$exitIndex]['bid_price'];
-            $grossNow = '0'; $entryFeesNow = '0'; $totalQty = '0';
+            $exitQuote = $tradeIsShort ? $executionRows[$exitIndex]['ask_price'] : $executionRows[$exitIndex]['bid_price'];
+            $grossNow = '0'; $entryFeesNow = '0'; $totalQty = '0'; $fundingNetNow = '0';
             foreach ($legs as $leg) {
                 $move = $tradeIsShort ? bcsub($leg['entry_price'], $exitQuote, 24) : bcsub($exitQuote, $leg['entry_price'], 24);
                 $grossNow = bcadd($grossNow, bcmul($leg['quantity'], $move, 24), 24);
                 $entryFeesNow = bcadd($entryFeesNow, $leg['entry_fee'], 24);
                 $totalQty = bcadd($totalQty, $leg['quantity'], 24);
+                $fundingNetNow = bcadd($fundingNetNow, $leg['funding_paid'], 24);
             }
-            $unrealized = bcsub(bcsub($grossNow, $entryFeesNow, 24), bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24), 24);
+            $unrealized = bcadd(bcsub(bcsub($grossNow, $entryFeesNow, 24), bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24), 24), $fundingNetNow, 24);
             if ($martingaleMode === 'simple_profit') {
                 $closedNotional = $positionNotional;
                 $appendLegTrades($legs, $exitIndex, $exitReason, $balance);
@@ -652,7 +720,17 @@ if ($cachedStandardTradeEvents !== null) {
                     $takeBeforeSignal = null;
                     if ($stageTarget !== null) {
                         for ($i = $exitIndex + 1; $i < min($nextIndex, $rowCount); $i++) {
-                            $waitQuote = $tradeIsShort ? $rows[$i]['ask_price'] : $rows[$i]['bid_price'];
+                            while ($fundingCursor < count($fundingEvents) && $fundingEvents[$fundingCursor]['quote_index'] <= $i) {
+                                $event = $fundingEvents[$fundingCursor];
+                                foreach ($legs as &$fundingLeg) {
+                                    if ($fundingLeg['entry_timestamp'] < $event['timestamp']) {
+                                        $fundingLeg['funding_paid'] = bcadd($fundingLeg['funding_paid'], $fundingCashflowAtEvent($fundingLeg['quantity'], $tradeIsShort, $event), 24);
+                                    }
+                                }
+                                unset($fundingLeg);
+                                $fundingCursor++;
+                            }
+                            $waitQuote = $tradeIsShort ? $executionRows[$i]['ask_price'] : $executionRows[$i]['bid_price'];
                             $waitGross = '0'; $waitEntryFees = '0'; $waitQuantity = '0';
                             foreach ($legs as $leg) {
                                 $waitMove = $tradeIsShort ? bcsub($leg['entry_price'], $waitQuote, 24) : bcsub($waitQuote, $leg['entry_price'], 24);
@@ -665,6 +743,7 @@ if ($cachedStandardTradeEvents !== null) {
                                 bcmul(bcmul($waitQuantity, $waitQuote, 24), $feeRate, 24),
                                 24,
                             );
+                            foreach ($legs as $leg) $waitNet = bcadd($waitNet, $leg['funding_paid'], 24);
                             if (bccomp($waitNet, $stageTarget, 24) >= 0) {
                                 $takeBeforeSignal = $i;
                                 break;
@@ -681,7 +760,7 @@ if ($cachedStandardTradeEvents !== null) {
                         $appendLegTrades($legs, $rowCount - 1, $isCurrentDay ? 'Мартингейл · ожидание сигнала · последний снимок' : 'Мартингейл · ожидание сигнала · конец периода', $balance);
                         $legs = []; $tradeEntryIndex = $rowCount; break;
                     }
-                    $signalQuote = $tradeIsShort ? $rows[$nextIndex]['ask_price'] : $rows[$nextIndex]['bid_price'];
+                    $signalQuote = $tradeIsShort ? $executionRows[$nextIndex]['ask_price'] : $executionRows[$nextIndex]['bid_price'];
                     $signalGross = '0'; $signalFees = '0'; $signalQty = '0';
                     foreach ($legs as $leg) {
                         $signalMove = $tradeIsShort ? bcsub($leg['entry_price'], $signalQuote, 24) : bcsub($signalQuote, $leg['entry_price'], 24);
@@ -690,6 +769,7 @@ if ($cachedStandardTradeEvents !== null) {
                         $signalQty = bcadd($signalQty, $leg['quantity'], 24);
                     }
                     $signalNet = bcsub(bcsub($signalGross, $signalFees, 24), bcmul(bcmul($signalQty, $signalQuote, 24), $feeRate, 24), 24);
+                    foreach ($legs as $leg) $signalNet = bcadd($signalNet, $leg['funding_paid'], 24);
                     $signalEquity = bcadd($balance, $signalNet, 24);
                     $signalFreeMargin = bcsub($signalEquity, $positionNotional, 24);
                     $maxSignalAffordable = bcdiv($signalFreeMargin, bcadd('1', $feeRate, 24), 24);
@@ -729,6 +809,7 @@ if ($cachedStandardTradeEvents !== null) {
         $balance = $startingBalance;
     }
 } else {
+$ordinaryOrderConstraintError = null;
 while (bccomp($balance, '0', 24) > 0) {
     if ($isImmediateEntry) {
         $signal = $tradeEntryIndex === 0 && $rowCount > 1 ? [0, $immediateDirection === 'short'] : null;
@@ -738,21 +819,37 @@ while (bccomp($balance, '0', 24) > 0) {
     if ($signal === null) break;
     [$tradeEntryIndex, $tradeIsShort] = $signal;
 
-    $entry = $rows[$tradeEntryIndex];
+    $entry = $executionRows[$tradeEntryIndex];
     $entryPrice = $tradeIsShort ? $entry['bid_price'] : $entry['ask_price'];
-    $quantity = bcdiv($startingBalance, bcmul($entryPrice, bcadd('1', $feeRate, 24), 24), 24);
-    $entryFee = bcmul(bcmul($quantity, $entryPrice, 24), $feeRate, 24);
+    $requestedNotional = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
+    if (bccomp($requestedNotional, $startingBalance, 24) > 0) $requestedNotional = $startingBalance;
+    $order = rankingQuantizeBitgetMarketOrder($requestedNotional, $entryPrice, $martingaleContractRules ?? [], $feeRate, $balance);
+    if ($order === null) {
+        $ordinaryOrderConstraintError = 'Обычная заявка не проходит действующие правила Bitget или не помещается в доступный баланс (минимум, шаг/точность, максимум рыночного ордера). Вариант исключён.';
+        break;
+    }
+    $quantity = $order['quantity'];
+    $entryFee = bcmul($order['notional'], $feeRate, 24);
+    $entryTimestamp = (new DateTimeImmutable($entry['received_at_utc'], new DateTimeZone('UTC')))->getTimestamp();
+    $fundingPaid = '0';
+    $fundingCursor = 0;
+    while ($fundingCursor < count($fundingEvents) && $fundingEvents[$fundingCursor]['quote_index'] <= $tradeEntryIndex) $fundingCursor++;
     $exitIndex = $rowCount - 1;
     $exitReason = 'Открыта · последний снимок выбранного периода';
     $tradeNet = '0';
     $takeConfirmationIndex = null;
     $stopConfirmationIndex = null;
     for ($i = $tradeEntryIndex + 1; $i < $rowCount; $i++) {
-        $exitPrice = $tradeIsShort ? $rows[$i]['ask_price'] : $rows[$i]['bid_price'];
+        while ($fundingCursor < count($fundingEvents) && $fundingEvents[$fundingCursor]['quote_index'] <= $i) {
+            $event = $fundingEvents[$fundingCursor];
+            if ($entryTimestamp < $event['timestamp']) $fundingPaid = bcadd($fundingPaid, $fundingCashflowAtEvent($quantity, $tradeIsShort, $event), 24);
+            $fundingCursor++;
+        }
+        $exitPrice = $tradeIsShort ? $executionRows[$i]['ask_price'] : $executionRows[$i]['bid_price'];
         $priceMove = $tradeIsShort ? bcsub($entryPrice, $exitPrice, 24) : bcsub($exitPrice, $entryPrice, 24);
         $gross = bcmul($quantity, $priceMove, 24);
         $exitFee = bcmul(bcmul($quantity, $exitPrice, 24), $feeRate, 24);
-        $tradeNet = bcsub(bcsub($gross, $entryFee, 24), $exitFee, 24);
+        $tradeNet = bcadd(bcsub(bcsub($gross, $entryFee, 24), $exitFee, 24), $fundingPaid, 24);
         $takeCondition = $profitTarget !== null && bccomp($tradeNet, $profitTarget, 24) >= 0;
         $stopCondition = $lossThreshold !== null && bccomp($tradeNet, $lossThreshold, 24) <= 0;
         if ($takeCondition && $takeConfirmationIndex === null) $takeConfirmationIndex = $i + $takeConfirmationDelay;
@@ -774,17 +871,22 @@ while (bccomp($balance, '0', 24) > 0) {
             $stopConfirmationIndex = null;
         }
     }
-    $exit = $rows[$exitIndex];
+    $exit = $executionRows[$exitIndex];
     $exitPrice = $tradeIsShort ? $exit['ask_price'] : $exit['bid_price'];
     $priceMove = $tradeIsShort ? bcsub($entryPrice, $exitPrice, 24) : bcsub($exitPrice, $entryPrice, 24);
     $gross = bcmul($quantity, $priceMove, 24);
     $exitFee = bcmul(bcmul($quantity, $exitPrice, 24), $feeRate, 24);
-    $tradeNet = bcsub(bcsub($gross, $entryFee, 24), $exitFee, 24);
+    $tradeNet = bcadd(bcsub(bcsub($gross, $entryFee, 24), $exitFee, 24), $fundingPaid, 24);
     $balance = bcadd($balance, $tradeNet, 24);
-    $trades[] = ['entry' => $entry, 'exit' => $exit, 'quantity' => $quantity, 'entry_price' => $entryPrice, 'exit_price' => $exitPrice, 'entry_fee' => $entryFee, 'exit_fee' => $exitFee, 'gross' => $gross, 'net' => $tradeNet, 'balance' => $balance, 'reason' => $exitReason, 'is_short' => $tradeIsShort];
+    $trades[] = ['entry' => $entry, 'exit' => $exit, 'quantity' => $quantity, 'entry_price' => $entryPrice, 'exit_price' => $exitPrice, 'entry_fee' => $entryFee, 'exit_fee' => $exitFee, 'gross' => $gross, 'funding' => $fundingPaid, 'net' => $tradeNet, 'balance' => $balance, 'reason' => $exitReason, 'is_short' => $tradeIsShort];
 
     // Wait for a new momentum threshold crossing after each closed trade.
     $tradeEntryIndex = $exitIndex + 1;
+}
+if ($ordinaryOrderConstraintError !== null) {
+    $trades = [];
+    $balance = $startingBalance;
+    $error = $ordinaryOrderConstraintError;
 }
 }
 $martingaleChainResults = [];
@@ -845,7 +947,7 @@ if ($martingaleMode === 'none' && $cachedStandardTradeEvents === null
                 $exitAt = new DateTimeImmutable($trade['exit']['received_at_utc'], new DateTimeZone('UTC'));
                 if ($entryAt <= $lastQuoteAt
                     && (cachedTradeIsOpen($trade) || $exitAt > $lastQuoteAt)) {
-                    $openTrade = markTradeAtQuote($trade, $lastQuote, $feeRate);
+                    $openTrade = markTradeAtQuote($trade, $lastQuote, $feeRate, $fundingEvents, (float) $simulationCosts['slippage_bps']);
                     break;
                 }
             }
@@ -974,6 +1076,9 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
+<label class="field">Проскальзывание (б.п.)<input type="number" name="slippage_bps" min="0" max="9999.9999" step="0.1" value="<?= h($simulationCosts['slippage_bps']) ?>" required></label>
+<label class="save-mode-toggle"><input type="hidden" name="include_funding" value="0"><input type="checkbox" name="include_funding" value="1" <?= $simulationCosts['include_funding'] ? 'checked' : '' ?>><span class="save-mode-detail">Учитывать funding</span></label>
+<p class="small-note">Проскальзывание ухудшает цену исполнения каждой стороны: покупка дороже, продажа дешевле. Сигналы строятся по сохранённой Last.</p>
 <details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><label class="field">Макс. убыток цепочки (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>"></label><label class="field">Макс. убыток за день (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>"></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Ноль отключает лимит. Лимит цепочки закрывает её на первом снимке, где чистый убыток достигает суммы. Дневной лимит учитывает результат закрытых цепочек по дате закрытия и запрещает новые цепочки до следующего дня; лимит цепочки ограничивает текущую позицию.</p><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Перед расчётом каждый ордер сверяется с актуальными правилами контракта Bitget: минимумом суммы и количества, шагом количества, максимальным размером рыночного ордера и доступным балансом.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
@@ -1006,7 +1111,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?= rankingSegmentEditor('Только Take Profit (%)', 'profit', $rankingRanges['profit'], $defaultRankingRanges['profit'], true) ?>
 <?= rankingSegmentEditor('Только Stop Loss (%)', 'loss', $rankingRanges['loss'], $defaultRankingRanges['loss'], true) ?>
 <p class="small-note">Для каждого параметра можно добавить несколько диапазонов. Внутри каждого задайте «от», «до» и шаг; граничные значения включаются.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
-<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Симуляция использует плечо 1×, дробное количество и комиссию за market/taker на обеих сторонах. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
+<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Для исполнения используются действующие правила контракта Bitget (плечо 1×, шаг количества, минимумы и максимум рыночной заявки), комиссия за market/taker и указанное проскальзывание. К историческим сделкам применяются текущие правила контракта. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
 <section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты и очищает очередь. 🧹 делает то же самое и дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head chart-info-line"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count"><?= $visibleQuoteCount ?> снимков</span><span class="chart-info-item"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
@@ -1016,12 +1121,12 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?php endif; ?></section>
 <section class="panel" id="results"><div class="chart-head"><h2>Сделки стратегии</h2><span class="count"><?= $closedTradeCount ?> закрытых сделок<?php if ($openTradeCount > 0): ?> · <?= $openTradeCount ?> открыто на последнем снимке<?php endif; ?></span></div>
 <div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div><?php if ($martingaleMode !== 'none'): ?><div class="stat"><span>Цепочки в расчёте</span><strong><?= $martingaleChainCount ?></strong></div><div class="stat"><span>Медианный результат цепочки</span><strong><?= $martingaleMedianChain === null ? '—' : (($martingaleMedianChain[0] === '-' ? '' : '+') . money($martingaleMedianChain)) ?> USDT</strong></div><div class="stat"><span>Худшая цепочка</span><strong class="<?= $martingaleWorstChain !== null && bccomp($martingaleWorstChain, '0', 24) < 0 ? 'loss' : '' ?>"><?= $martingaleWorstChain === null ? '—' : money($martingaleWorstChain) ?> USDT</strong></div><div class="stat"><span>Просадка по результатам цепочек</span><strong><?= money($martingaleMaxDrawdown) ?> USDT</strong></div><?php endif; ?></div>
-<?php if ($martingaleMode !== 'none' && $martingaleChainCount > 0): ?><p class="small-note">Метрики сгруппированы по одной мартингейл-попытке. Просадка рассчитана по балансу после каждой цепочки; позиция, оставшаяся открытой на последнем снимке, учитывается по этому снимку.</p><?php endif; ?>
+<?php if ($simulationCosts['include_funding'] || (float) $simulationCosts['slippage_bps'] > 0): ?><p class="small-note">В расчёте: funding <?= $simulationCosts['include_funding'] ? 'учтён по истории Bitget; mark price заменён midpoint первой доступной котировки после settlement' : 'отключён' ?> · проскальзывание <?= h($simulationCosts['slippage_bps']) ?> б.п. в неблагоприятную сторону. Применены действующие правила контракта Bitget.</p><?php endif; ?><?php if ($martingaleMode !== 'none' && $martingaleChainCount > 0): ?><p class="small-note">Метрики сгруппированы по одной мартингейл-попытке. Просадка рассчитана по балансу после каждой цепочки; позиция, оставшаяся открытой на последнем снимке, учитывается по этому снимку.</p><?php endif; ?>
 <?php if (count($rows) < 2): ?><div class="empty">Нужно минимум два снимка в выбранном периоде, чтобы выполнить симуляцию.</div>
 <?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 1, ',', ' ') . '% ' . ($entrySignalMode === 'within' ? 'в пределах ' : 'за ') . $momentumLookback . ' снимков.' ?></div>
-<?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Сумма входа</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>
+<?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Сумма входа</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Funding</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>
 <?php foreach ($trades as $index => $trade): $resultCompare = bccomp($trade['net'], '0', 24); $tradeIsOpen = $isOpenTrade($trade); $rowClass = $tradeIsOpen ? ($resultCompare > 0 ? 'trade-open-positive' : ($resultCompare < 0 ? 'trade-open-negative' : 'trade-flat')) : ($resultCompare > 0 ? 'trade-positive' : ($resultCompare < 0 ? 'trade-negative' : 'trade-flat')); $totalFees = bcadd($trade['entry_fee'], $trade['exit_fee'], 24); $tradeNotional = bcmul($trade['quantity'], $trade['entry_price'], 24); $tradeEntryLabel = $trade['is_short'] ? 'Продажа Bid' : 'Покупка Ask'; $tradeExitLabel = $trade['is_short'] ? 'Покупка Ask' : 'Продажа Bid'; ?>
-<tr class="<?= $rowClass ?> trade-row" tabindex="0" data-entry-time="<?= epochMilliseconds($trade['entry']['received_at_utc']) ?>" data-exit-time="<?= epochMilliseconds($trade['exit']['received_at_utc']) ?>" data-entry-price="<?= h((string) $trade['entry_price']) ?>" data-exit-price="<?= h((string) $trade['exit_price']) ?>" data-is-short="<?= $trade['is_short'] ? '1' : '0' ?>" data-net="<?= h((string) $trade['net']) ?>"><td><?= $index + 1 ?></td><td><?= h(formatKyivTime($trade['entry']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeEntryLabel . ' · ' . $trade['entry_price']) ?></td><td><?= h(formatKyivTime($trade['exit']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeExitLabel . ' · ' . $trade['exit_price']) ?></td><td><?= money($trade['quantity']) ?></td><td><?= money($tradeNotional) ?> USDT</td><td><?= money($trade['gross']) ?></td><td><?= money($totalFees) ?></td><td><?= $resultCompare > 0 ? '+' : '' ?><?= money($trade['net']) ?></td><td><?= money($trade['balance']) ?></td><td class="reason"><?= $tradeIsOpen ? 'Открыта · результат по последнему снимку' : h($trade['reason']) ?></td></tr>
+<tr class="<?= $rowClass ?> trade-row" tabindex="0" data-entry-time="<?= epochMilliseconds($trade['entry']['received_at_utc']) ?>" data-exit-time="<?= epochMilliseconds($trade['exit']['received_at_utc']) ?>" data-entry-price="<?= h((string) $trade['entry_price']) ?>" data-exit-price="<?= h((string) $trade['exit_price']) ?>" data-is-short="<?= $trade['is_short'] ? '1' : '0' ?>" data-net="<?= h((string) $trade['net']) ?>"><td><?= $index + 1 ?></td><td><?= h(formatKyivTime($trade['entry']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeEntryLabel . ' · ' . $trade['entry_price']) ?></td><td><?= h(formatKyivTime($trade['exit']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeExitLabel . ' · ' . $trade['exit_price']) ?></td><td><?= money($trade['quantity']) ?></td><td><?= money($tradeNotional) ?> USDT</td><td><?= money($trade['gross']) ?></td><td><?= money($totalFees) ?></td><td><?= money($trade['funding'] ?? '0') ?></td><td><?= $resultCompare > 0 ? '+' : '' ?><?= money($trade['net']) ?></td><td><?= money($trade['balance']) ?></td><td class="reason"><?= $tradeIsOpen ? 'Открыта · результат по последнему снимку' : h($trade['reason']) ?></td></tr>
 <?php endforeach; ?></tbody></table></div><p class="small-note">Зелёная строка — прибыльная закрытая сделка; красная — убыточная. Результат открытой позиции по последнему снимку включён в итог и может измениться. Между снимками результат закрытой сделки может превысить заданный порог.</p><?php endif; ?><p class="footer">Источник: локальная база <?= h($db['database']) ?> · шаг сбора <?= (int) $config['poll_interval_seconds'] ?> сек.</p></section>
 </main>
 <?php if ($rows !== []): ?><script>

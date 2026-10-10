@@ -19,6 +19,7 @@ import pymysql
 from app import load_config
 from database import connect_mysql
 from contract_rules import load_contract_specs, numba_market_order_rules
+from futures_costs import load_historical_funding_rates
 import portfolio_ranking as portfolio_engine
 from portfolio_ranking import exit_specs
 from ranking_checkpoints import daily_quote_boundaries
@@ -45,6 +46,8 @@ def main() -> int:
     parser.add_argument("--martingale-attempts", type=int, choices=range(2, 11), default=3)
     parser.add_argument("--martingale-max-chain-loss", type=float, default=0.0)
     parser.add_argument("--martingale-max-day-loss", type=float, default=0.0)
+    parser.add_argument("--include-funding", choices=("0", "1"), default="1")
+    parser.add_argument("--slippage-bps", type=float, default=0.0)
     args = parser.parse_args()
 
     result_path = args.cache_dir / f"combination-{args.cache_key}.json"
@@ -112,13 +115,12 @@ def main() -> int:
 
         config = load_config(Path(__file__).with_name("config.json"))
         contract_rules_by_symbol = {}
-        if args.martingale_mode != "none":
-            contract_specs = load_contract_specs(config["category"])
-            for contract_symbol in max_ids:
-                contract = contract_specs.get(contract_symbol)
-                if contract is None:
-                    raise RuntimeError(f"Bitget contract rules are unavailable for {contract_symbol}")
-                contract_rules_by_symbol[contract_symbol] = numba_market_order_rules(contract, leverage=1.0)
+        contract_specs = load_contract_specs(config["category"])
+        for contract_symbol in max_ids:
+            contract = contract_specs.get(contract_symbol)
+            if contract is None:
+                raise RuntimeError(f"Bitget contract rules are unavailable for {contract_symbol}")
+            contract_rules_by_symbol[contract_symbol] = numba_market_order_rules(contract, leverage=1.0)
         end_local = datetime.combine(date.fromisoformat(args.end_day) + timedelta(days=1), day_time.min, KYIV)
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
         start_utc = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV).astimezone(timezone.utc).replace(tzinfo=None)
@@ -158,10 +160,21 @@ def main() -> int:
         entry_id, entry_label, lookback, threshold, entry_family, immediate_short = selected_entry
         _, exit_label, take_profit, stop_loss = selected_exit
         fee_rate = args.fee_percent / 100
-        quotes_by_symbol = {
-            symbol: QuoteArrays.from_rows(rows)
-            for symbol, rows in rows_by_symbol.items() if rows
-        }
+        quotes_by_symbol = {}
+        for symbol, rows in rows_by_symbol.items():
+            if not rows:
+                continue
+            quotes = QuoteArrays.from_rows(rows, args.slippage_bps)
+            if args.include_funding == "1" and len(quotes):
+                funding_rows = load_historical_funding_rates(
+                    config["category"], symbol, float(quotes.timestamps[0]), float(quotes.timestamps[-1]),
+                )
+                marks = np.fromiter(
+                    ((float(row["bid_price"]) + float(row["ask_price"])) / 2 for row in rows),
+                    dtype=np.float64, count=len(rows),
+                )
+                quotes.set_funding_rates(funding_rows, marks)
+            quotes_by_symbol[symbol] = quotes
         checkpoint_exit_options = [
             (
                 f"{base_exit_id}:{policy}" if policy_label else base_exit_id,
@@ -179,6 +192,7 @@ def main() -> int:
             ranking_params=ranking, martingale_mode="none",
             martingale_timing=args.martingale_timing,
             martingale_attempts=args.martingale_attempts, entry_config=args.entry_config,
+            include_funding=args.include_funding, slippage_bps=args.slippage_bps,
         )
         checkpoint_cache_root = args.cache_dir / "combination-pair-results" / args.cache_key
         checkpoint_state = {
@@ -192,6 +206,7 @@ def main() -> int:
             "exit_options": checkpoint_exit_options,
             "args": checkpoint_args,
             "fee_rate": fee_rate,
+            "order_rules_by_symbol": contract_rules_by_symbol,
         }
         if immediate_short is None:
             signal_key = (int(lookback), entry_family or "both", int(threshold))
@@ -222,7 +237,16 @@ def main() -> int:
                         pnl = None
             else:
                 rows = rows_by_symbol.pop(symbol)
-                quotes = QuoteArrays.from_rows(rows) if rows else QuoteArrays([], [], [], [])
+                quotes = QuoteArrays.from_rows(rows, args.slippage_bps) if rows else QuoteArrays([], [], [], [])
+                if args.include_funding == "1" and len(quotes):
+                    funding_rows = load_historical_funding_rates(
+                        config["category"], symbol, float(quotes.timestamps[0]), float(quotes.timestamps[-1]),
+                    )
+                    marks = np.fromiter(
+                        ((float(row["bid_price"]) + float(row["ask_price"])) / 2 for row in rows),
+                        dtype=np.float64, count=len(rows),
+                    )
+                    quotes.set_funding_rates(funding_rows, marks)
                 if len(quotes) >= 2:
                     if immediate_short is not None:
                         signals, shorts = [0], [immediate_short]
