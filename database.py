@@ -47,7 +47,81 @@ def initialize_schema(connection: Any) -> None:
                 KEY idx_quote_symbol_time (category, symbol, received_at_utc)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
         )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS historical_candles (
+                category VARCHAR(24) NOT NULL,
+                symbol VARCHAR(40) NOT NULL,
+                interval_name VARCHAR(8) NOT NULL,
+                candle_timestamp_ms BIGINT NOT NULL,
+                open_price VARCHAR(80) NOT NULL,
+                high_price VARCHAR(80) NOT NULL,
+                low_price VARCHAR(80) NOT NULL,
+                close_price VARCHAR(80) NOT NULL,
+                base_volume VARCHAR(80) NOT NULL,
+                quote_volume VARCHAR(80) NOT NULL,
+                retrieved_at_utc DATETIME(3) NOT NULL,
+                PRIMARY KEY (category, symbol, interval_name, candle_timestamp_ms),
+                KEY idx_historical_candles_time (category, symbol, interval_name, candle_timestamp_ms)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+        )
     connection.commit()
+
+
+def latest_snapshot_timestamp_ms(connection: Any, category: str, symbol: str) -> int | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT MAX(received_at_utc)
+               FROM quote_snapshots
+               WHERE category = %s AND symbol = %s""",
+            (category, symbol),
+        )
+        row = cursor.fetchone()
+    if not row or row[0] is None:
+        return None
+    timestamp = row[0].replace(tzinfo=timezone.utc).timestamp()
+    return int(timestamp * 1000)
+
+
+def latest_historical_candle_timestamp_ms(
+    connection: Any, category: str, symbol: str, interval_name: str
+) -> int | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT MAX(candle_timestamp_ms)
+               FROM historical_candles
+               WHERE category = %s AND symbol = %s AND interval_name = %s""",
+            (category, symbol, interval_name),
+        )
+        row = cursor.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def insert_historical_candles(
+    connection: Any,
+    category: str,
+    symbol: str,
+    interval_name: str,
+    candles: list[list[str]],
+) -> int:
+    retrieved_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    rows = [
+        (category, symbol, interval_name, int(candle[0]), *map(str, candle[1:7]), retrieved_at)
+        for candle in candles
+    ]
+    if not rows:
+        return 0
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """INSERT IGNORE INTO historical_candles (
+                   category, symbol, interval_name, candle_timestamp_ms,
+                   open_price, high_price, low_price, close_price, base_volume, quote_volume,
+                   retrieved_at_utc
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            rows,
+        )
+        inserted = cursor.rowcount
+    connection.commit()
+    return inserted
 
 
 def insert_snapshots(connection: Any, category: str, snapshots: list[dict[str, Any]], symbols: set[str]) -> int:
