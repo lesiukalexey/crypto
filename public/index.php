@@ -74,6 +74,35 @@ $startDayAuto = array_key_exists('start_day_auto', $_GET)
     : !array_key_exists('start_day', $_GET) && !array_key_exists('day', $_GET);
 $startDayInput = (string) ($_GET['start_day'] ?? $_GET['day'] ?? '2026-10-06');
 $endDayInput = (string) ($_GET['end_day'] ?? $_GET['day'] ?? $today->format('Y-m-d'));
+$pdo = null;
+if ($startDayAuto && $enabledSymbols !== []) {
+    try {
+        $password = getenv($db['password_env']) ?: '';
+        if ($password !== '') {
+            $pdo = new PDO(
+                sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $db['host'], $db['port'], $db['database']),
+                $db['user'],
+                $password,
+                [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_EMULATE_PREPARES => false]
+            );
+            $placeholders = implode(', ', array_fill(0, count($enabledSymbols), '?'));
+            $earliestStatement = $pdo->prepare(
+                'SELECT MIN(received_at_utc) FROM quote_snapshots '
+                . 'WHERE category = ? AND symbol IN (' . $placeholders . ')'
+            );
+            $earliestStatement->execute([$config['category'], ...$enabledSymbols]);
+            $earliestQuote = $earliestStatement->fetchColumn();
+            if (is_string($earliestQuote) && $earliestQuote !== '') {
+                $startDayInput = (new DateTimeImmutable($earliestQuote, new DateTimeZone('UTC')))
+                    ->setTimezone($timezone)
+                    ->format('Y-m-d');
+            }
+        }
+    } catch (Throwable $exception) {
+        $pdo = null;
+        error_log('Unable to determine default Basic Checks start date: ' . $exception->getMessage());
+    }
+}
 $defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThresholdsTenthsPercent, true)
     ? 'entry:10:1' : 'entry:' . $entryWindows[0] . ':' . $entryThresholdsTenthsPercent[0];
 $entrySignalMode = $rankingParameters['worker']['entry_signal_mode'];
@@ -172,7 +201,7 @@ try {
     if ($password === '') {
         throw new RuntimeException('Не задан пароль подключения к MySQL.');
     }
-    $pdo = new PDO(
+    $pdo ??= new PDO(
         sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $db['host'], $db['port'], $db['database']),
         $db['user'],
         $password,
