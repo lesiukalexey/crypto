@@ -848,7 +848,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .history-import-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.history-import-button{min-width:0;min-height:42px;padding:9px 12px;white-space:nowrap;font-size:13px}.history-import-button:disabled{cursor:progress;opacity:.65}.history-import-status{flex-basis:100%;min-height:0;margin:0;color:var(--muted);font-size:12px}.history-import-status:empty{display:none}.history-import-status[data-status="error"]{color:#ff9eaa}.history-import-status[data-status="ready"]{color:#a8f0cf}
 .date-refresh-row{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.date-refresh-row>.field{flex:0 0 190px}.date-refresh-row>.history-import-status{flex-basis:100%}
 .refresh-today-snapshot[hidden]{display:none}.refresh-today-snapshot:disabled{cursor:progress;opacity:.65}
-.page-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.page-heading .eyebrow{white-space:nowrap}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}.collector-status{margin:0;white-space:nowrap}.save-mode-toggle{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.save-mode-toggle input{position:absolute;opacity:0;width:1px;height:1px;min-width:0}.save-mode-switch{position:relative;width:38px;height:22px;border:1px solid #52617d;border-radius:999px;background:#263149;transition:.2s}.save-mode-switch:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#b7c1d5;transition:.2s}.save-mode-toggle input:checked+.save-mode-switch{background:#176647;border-color:#42d6a4}.save-mode-toggle input:checked+.save-mode-switch:after{transform:translateX(16px);background:#42d6a4}.save-mode-toggle input:focus-visible+.save-mode-switch{outline:2px solid #8ea5ff;outline-offset:2px}.save-mode-detail{color:var(--muted);font-weight:400}@media(max-width:700px){.page-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.header-actions{justify-content:flex-start}}
+.page-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.page-heading .eyebrow{white-space:nowrap}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}.collector-status{margin:0;min-width:0;padding:7px 11px;border:1px solid #34415e;background:#0c1222;font-weight:400;white-space:nowrap;cursor:pointer}.collector-status:hover{background:#0c1222;filter:brightness(1.2)}.collector-status:disabled{cursor:progress;opacity:.7}.save-mode-toggle{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.save-mode-toggle input{position:absolute;opacity:0;width:1px;height:1px;min-width:0}.save-mode-switch{position:relative;width:38px;height:22px;border:1px solid #52617d;border-radius:999px;background:#263149;transition:.2s}.save-mode-switch:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#b7c1d5;transition:.2s}.save-mode-toggle input:checked+.save-mode-switch{background:#176647;border-color:#42d6a4}.save-mode-toggle input:checked+.save-mode-switch:after{transform:translateX(16px);background:#42d6a4}.save-mode-toggle input:focus-visible+.save-mode-switch{outline:2px solid #8ea5ff;outline-offset:2px}.save-mode-detail{color:var(--muted);font-weight:400}@media(max-width:700px){.page-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.header-actions{justify-content:flex-start}}
 .wrap{max-width:none;padding-left:20px;padding-right:20px;padding-bottom:12px}.chart-wrap{container-type:inline-size}#chart{height:clamp(400px,27vw,440px)}.chart-head.chart-info-line{justify-content:flex-start;align-items:center;gap:18px;min-width:0;overflow-x:auto;white-space:nowrap;scrollbar-width:thin}.chart-info-line h2,.chart-info-line .count,.chart-info-item{flex:0 0 auto;white-space:nowrap}.chart-info-line h2{font-size:16px}.chart-info-item{display:inline-flex;align-items:center;gap:7px;color:#b7c1d5;font-size:13px}.chart-info-item .dot{flex:0 0 9px}.chart-info-item .session-marker{width:9px;height:9px;border:1px solid #48536c;border-radius:2px;background:#080d19;flex:0 0 9px}@media(max-width:600px){#chart{height:clamp(320px,58vw,360px)}.wrap{padding-bottom:10px}.chart-head.chart-info-line{align-items:center;flex-direction:row;gap:14px}}
 .entry-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.entry-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.entry-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.entry-strategy-fields>.field{flex:1 1 190px;min-width:150px}.entry-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.entry-strategy-fields>.field{flex-basis:100%;width:100%}}
 .exit-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.exit-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.exit-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.exit-strategy-fields>.field:first-child{flex:1 1 260px}.exit-strategy-fields>.field:nth-child(2){flex:2 1 420px}.exit-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.exit-strategy-fields>.field{flex-basis:100%;width:100%}}
@@ -867,10 +867,10 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
-.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .reset-symbol-cache,.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
+.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .reset-symbol-cache,.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings,.favorite-readonly .collector-status{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
 </style>
 </head><body><main class="wrap">
-<header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><div class="collector-status" id="collector-status" data-status="unknown" role="status" aria-live="polite" title="Загружаю последнее время котировки">Загружаю последнюю котировку…</div></div></header>
+<header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><button class="collector-status" id="collector-status" type="button" data-status="unknown" aria-label="Загрузить данные для всех активных пар от последней сохранённой минуты" title="Нажмите, чтобы загрузить минутные данные всех активных пар от их последней сохранённой котировки до последней доступной минуты">Загружаю последнюю котировку…</button></div></header>
 <nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a></nav>
 <?php if ($favoriteView): ?><p class="favorite-readonly-note">Просмотр сохранённой стратегии «<?= h((string) ($favorite['name'] ?? $favoriteId)) ?>». Параметры доступны только для чтения. <a class="strategy-link" href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
 <?php if ($combinationDetail): ?>
@@ -1142,8 +1142,9 @@ const calculationQueueUpdated = document.querySelector('#calculation-queue-updat
 const endDayInput = filtersForm.elements.namedItem('end_day');
 const historyImportStatus = document.querySelector('#history-import-status');
 const selectedSymbolImportButton = document.querySelector('#import-selected-symbol');
+const latestQuoteControl = document.querySelector('#collector-status');
 const allSymbolsImportButton = document.querySelector('#import-all-active-symbols');
-const historyImportButtons = [selectedSymbolImportButton, allSymbolsImportButton].filter(Boolean);
+const historyImportButtons = [selectedSymbolImportButton, allSymbolsImportButton, latestQuoteControl].filter(Boolean);
 const historyImportJobStorageKey = 'bitget-history-import-job-v1';
 const historyImportResultStorageKey = 'bitget-history-import-result-v1';
 function updateHistoryImportLabels() {
@@ -1210,7 +1211,8 @@ async function pollHistoryImport(jobId, importRequest) {
     }
 }
 async function startHistoryImport(scope) {
-    if (!filtersForm.checkValidity()) {
+    const latestMode = scope === 'latest';
+    if (!latestMode && !filtersForm.checkValidity()) {
         filtersForm.reportValidity();
         return;
     }
@@ -1223,9 +1225,11 @@ async function startHistoryImport(scope) {
     };
     historyImportButtons.forEach(button => { button.disabled = true; });
     historyImportStatus.dataset.status = 'running';
-    historyImportStatus.textContent = scope === 'all'
-        ? 'Отправляю запрос на загрузку всех активных пар…'
-        : `Отправляю запрос на загрузку ${request.symbol}…`;
+    historyImportStatus.textContent = latestMode
+        ? 'Загружаю минутные данные всех активных пар от последних сохранённых котировок…'
+        : scope === 'all'
+            ? 'Отправляю запрос на загрузку всех активных пар…'
+            : `Отправляю запрос на загрузку ${request.symbol}…`;
     try {
         const response = await fetch('import-candles.php', {
             method: 'POST', body: new URLSearchParams(request),
@@ -1243,6 +1247,7 @@ async function startHistoryImport(scope) {
 }
 selectedSymbolImportButton?.addEventListener('click', () => startHistoryImport('symbol'));
 allSymbolsImportButton?.addEventListener('click', () => startHistoryImport('all'));
+latestQuoteControl?.addEventListener('click', () => startHistoryImport('latest'));
 try {
     const savedImportJob = JSON.parse(sessionStorage.getItem(historyImportJobStorageKey) || 'null');
     if (savedImportJob?.job_id && savedImportJob?.request) pollHistoryImport(savedImportJob.job_id, savedImportJob.request);
@@ -2408,14 +2413,14 @@ refreshSymbolsButton.addEventListener('click', () => {
     symbolSortMode.value = 'profit';
     loadPortfolioRanking();
 });
-const collectorStatus = document.querySelector('#collector-status');
+const collectorStatus = latestQuoteControl;
 async function refreshCollectorStatus() {
     try {
         const response = await fetch('collector-status.php', {headers:{Accept:'application/json'}, cache:'no-store'});
         const status = await response.json();
         collectorStatus.dataset.status = status.status || 'unknown';
         collectorStatus.textContent = status.label || 'Не удалось загрузить время котировки';
-        collectorStatus.title = status.title || status.label || 'Статус сборщика недоступен';
+        collectorStatus.title = (status.title || status.label || 'Статус сборщика недоступен') + ' Нажмите, чтобы загрузить минутные данные всех активных пар от их последних сохранённых котировок.';
     } catch (_) {
         collectorStatus.dataset.status = 'unknown';
         collectorStatus.textContent = 'Не удалось загрузить время котировки';

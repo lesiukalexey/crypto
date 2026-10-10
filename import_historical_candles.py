@@ -21,6 +21,7 @@ from database import (
     connect_mysql,
     insert_historical_candles,
     insert_historical_candle_snapshots,
+    latest_quote_timestamp_ms,
 )
 
 API_URL = "https://api.bitget.com/api/v3/market/history-candles"
@@ -72,7 +73,8 @@ def parse_args() -> argparse.Namespace:
     scope.add_argument("--symbol", help="One enabled symbol from config.json")
     scope.add_argument("--all-enabled", action="store_true", help="Import every enabled symbol")
     parser.add_argument("--start-date", default="2026-10-01", help="Local calendar date in Europe/Kyiv")
-    parser.add_argument("--end-date", required=True, help="Inclusive local calendar end date in Europe/Kyiv")
+    parser.add_argument("--end-date", help="Inclusive local calendar end date in Europe/Kyiv (default: today)")
+    parser.add_argument("--from-latest", action="store_true", help="Continue every enabled symbol after its newest saved quote")
     parser.add_argument("--timeout", type=float, default=15.0, help="HTTP timeout in seconds")
     parser.add_argument("--status-file", type=Path, help="Write import progress to this JSON file")
     return parser.parse_args()
@@ -165,19 +167,23 @@ def main() -> int:
             raise ValueError(f"Symbols are not configured: {', '.join(unknown)}")
         if disabled:
             raise ValueError(f"Symbols are disabled in Settings: {', '.join(disabled)}")
+        if args.from_latest and not args.all_enabled:
+            raise ValueError("--from-latest requires --all-enabled")
+        if not args.from_latest and not args.end_date:
+            raise ValueError("--end-date is required unless --from-latest is used")
+        end_date_value = args.end_date or datetime.now(LOCAL_ZONE).strftime("%Y-%m-%d")
         start_dt = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=LOCAL_ZONE)
-        end_dt = datetime.strptime(args.end_date, "%Y-%m-%d").replace(tzinfo=LOCAL_ZONE)
-        if end_dt < start_dt:
+        end_dt = datetime.strptime(end_date_value, "%Y-%m-%d").replace(tzinfo=LOCAL_ZONE)
+        if not args.from_latest and end_dt < start_dt:
             raise ValueError("End date must be on or after the start date")
-        start_ms = int(start_dt.timestamp() * 1000) // INTERVAL_MS * INTERVAL_MS
+        default_start_ms = int(start_dt.timestamp() * 1000) // INTERVAL_MS * INTERVAL_MS
         requested_end_exclusive_ms = int((end_dt + timedelta(days=1)).timestamp() * 1000)
         latest_completed_ms = int(datetime.now(timezone.utc).timestamp() * 1000) // INTERVAL_MS * INTERVAL_MS
         end_exclusive_ms = min(requested_end_exclusive_ms, latest_completed_ms)
-        total_minutes = max(0, (end_exclusive_ms - start_ms) // INTERVAL_MS)
-        total_pages = math.ceil(total_minutes / PAGE_CANDLES) * len(symbols)
         write_status(args.status_file, {
-            "status": "running", "progress": 0, "start_day": args.start_date,
-            "end_day": args.end_date, "symbol_count": len(symbols), "completed_symbols": 0,
+            "status": "running", "progress": 0,
+            "start_day": "per-symbol latest" if args.from_latest else args.start_date,
+            "end_day": end_date_value, "symbol_count": len(symbols), "completed_symbols": 0,
             "current_symbol": symbols[0], "candles_received": 0, "candles_inserted": 0,
             "snapshots_inserted": 0, "message": "Подключаюсь к Bitget и MySQL…",
         })
@@ -190,15 +196,35 @@ def main() -> int:
         return 2
 
     try:
+        start_ms_by_symbol: dict[str, int] = {}
+        failures: list[dict[str, str]] = []
+        for symbol in symbols:
+            if args.from_latest:
+                latest_ms = latest_quote_timestamp_ms(connection, category, symbol)
+                if latest_ms is None:
+                    failures.append({"symbol": symbol, "message": "Нет сохранённых котировок, чтобы определить начальное время"})
+                    continue
+                # Include the minute containing the newest saved quote; existing snapshots remain untouched.
+                start_ms_by_symbol[symbol] = (latest_ms // INTERVAL_MS) * INTERVAL_MS
+            else:
+                start_ms_by_symbol[symbol] = default_start_ms
+
+        total_pages = sum(
+            math.ceil(max(0, end_exclusive_ms - start_ms) / (PAGE_CANDLES * INTERVAL_MS))
+            for start_ms in start_ms_by_symbol.values()
+        )
         page_offset = 0
         totals = {"candles_received": 0, "candles_inserted": 0, "snapshots_inserted": 0}
-        failures: list[dict[str, str]] = []
         for symbol_index, symbol in enumerate(symbols, start=1):
+            start_ms = start_ms_by_symbol.get(symbol)
+            if start_ms is None:
+                continue
+            symbol_pages = math.ceil(max(0, end_exclusive_ms - start_ms) / (PAGE_CANDLES * INTERVAL_MS))
             write_status(args.status_file, {
                 "status": "running", "progress": int(page_offset * 100 / max(1, total_pages)),
-                "start_day": args.start_date, "end_day": args.end_date,
-                "symbol_count": len(symbols), "completed_symbols": symbol_index - 1,
-                "current_symbol": symbol, **totals,
+                "start_day": "per-symbol latest" if args.from_latest else args.start_date,
+                "end_day": end_date_value, "symbol_count": len(symbols),
+                "completed_symbols": symbol_index - 1, "current_symbol": symbol, **totals,
                 "message": f"Загружаю {symbol} ({symbol_index}/{len(symbols)})…",
             })
 
@@ -206,10 +232,10 @@ def main() -> int:
                 current_pages = page_offset + page_number
                 write_status(args.status_file, {
                     "status": "running", "progress": int(current_pages * 100 / max(1, total_pages)),
-                    "start_day": args.start_date, "end_day": args.end_date,
-                    "symbol_count": len(symbols), "completed_symbols": symbol_index - 1,
-                    "current_symbol": symbol, "current_page": page_number,
-                    "symbol_pages": page_count, **totals,
+                    "start_day": "per-symbol latest" if args.from_latest else args.start_date,
+                    "end_day": end_date_value, "symbol_count": len(symbols),
+                    "completed_symbols": symbol_index - 1, "current_symbol": symbol,
+                    "current_page": page_number, "symbol_pages": page_count, **totals,
                     "message": f"{symbol}: страница {page_number} из {page_count}",
                 })
 
@@ -225,11 +251,12 @@ def main() -> int:
                 connection.rollback()
                 failures.append({"symbol": symbol, "message": str(exc)[:500]})
                 logging.exception("Historical import failed for %s", symbol)
-            page_offset += math.ceil(max(0, end_exclusive_ms - start_ms) / (PAGE_CANDLES * INTERVAL_MS))
+            page_offset += symbol_pages
             write_status(args.status_file, {
                 "status": "running", "progress": int(page_offset * 100 / max(1, total_pages)),
-                "start_day": args.start_date, "end_day": args.end_date,
-                "symbol_count": len(symbols), "completed_symbols": symbol_index,
+                "start_day": "per-symbol latest" if args.from_latest else args.start_date,
+                "end_day": end_date_value, "symbol_count": len(symbols),
+                "completed_symbols": symbol_index,
                 "current_symbol": symbols[symbol_index] if symbol_index < len(symbols) else None,
                 **totals, "failures": failures,
                 "message": f"Обработано пар: {symbol_index} из {len(symbols)}",
@@ -237,11 +264,12 @@ def main() -> int:
 
         final_status = "error" if len(failures) == len(symbols) else "partial" if failures else "ready"
         message = "Загрузка завершена" if not failures else f"Загрузка завершена с ошибками у {len(failures)} пар"
-        if total_minutes == 0:
-            message = "В выбранном диапазоне пока нет завершённых минутных свечей"
+        if not any(start_ms < end_exclusive_ms for start_ms in start_ms_by_symbol.values()):
+            message = "Нет новых завершённых минутных свечей для загрузки"
         write_status(args.status_file, {
-            "status": final_status, "progress": 100, "start_day": args.start_date,
-            "end_day": args.end_date, "symbol_count": len(symbols),
+            "status": final_status, "progress": 100,
+            "start_day": "per-symbol latest" if args.from_latest else args.start_date,
+            "end_day": end_date_value, "symbol_count": len(symbols),
             "completed_symbols": len(symbols), "current_symbol": None,
             **totals, "failures": failures, "message": message,
         })

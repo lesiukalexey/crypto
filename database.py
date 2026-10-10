@@ -89,6 +89,21 @@ def latest_snapshot_timestamp_ms(connection: Any, category: str, symbol: str) ->
     return int(timestamp * 1000)
 
 
+def latest_quote_timestamp_ms(connection: Any, category: str, symbol: str) -> int | None:
+    """Return the newest saved quote timestamp, including imported history."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT MAX(received_at_utc)
+               FROM quote_snapshots
+               WHERE category = %s AND symbol = %s""",
+            (category, symbol),
+        )
+        row = cursor.fetchone()
+    if not row or row[0] is None:
+        return None
+    return int(row[0].replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
 def first_snapshot_timestamp_ms(connection: Any, category: str, symbol: str) -> int | None:
     with connection.cursor() as cursor:
         cursor.execute(

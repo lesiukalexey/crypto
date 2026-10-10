@@ -77,17 +77,22 @@ try {
     }
 
     $timezone = new DateTimeZone('Europe/Kyiv');
-    $startValue = (string) ($_POST['start_day'] ?? '');
-    $endValue = (string) ($_POST['end_day'] ?? '');
-    $startDay = parseCandleImportDate($startValue, $timezone);
-    $endDay = parseCandleImportDate($endValue, $timezone);
-    if ($startDay === null || $endDay === null || $endDay < $startDay) {
-        candleImportRespond(['status' => 'error', 'message' => 'Проверьте выбранный диапазон дат.'], 400);
-    }
-
     $enabled = enabledTickerSymbols($config);
     $scope = (string) ($_POST['scope'] ?? 'symbol');
-    if ($scope === 'all') {
+    $latestMode = $scope === 'latest';
+    $startValue = (string) ($_POST['start_day'] ?? '');
+    $endValue = (string) ($_POST['end_day'] ?? '');
+    if ($latestMode) {
+        $startValue = 'per-symbol latest';
+        $endValue = (new DateTimeImmutable('now', $timezone))->format('Y-m-d');
+    } else {
+        $startDay = parseCandleImportDate($startValue, $timezone);
+        $endDay = parseCandleImportDate($endValue, $timezone);
+        if ($startDay === null || $endDay === null || $endDay < $startDay) {
+            candleImportRespond(['status' => 'error', 'message' => 'Проверьте выбранный диапазон дат.'], 400);
+        }
+    }
+    if ($scope === 'all' || $latestMode) {
         $symbols = $enabled;
     } elseif ($scope === 'symbol') {
         $symbol = strtoupper(trim((string) ($_POST['symbol'] ?? '')));
@@ -132,8 +137,8 @@ try {
     if (!is_executable($python)) $python = '/usr/bin/python3';
     $command = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/launch-ranking-worker.py')
         . ' ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/import_historical_candles.py')
-        . ($scope === 'all' ? ' --all-enabled' : ' --symbol ' . escapeshellarg($symbols[0]))
-        . ' --start-date ' . escapeshellarg($startValue)
+        . ($scope === 'all' || $latestMode ? ' --all-enabled' : ' --symbol ' . escapeshellarg($symbols[0]))
+        . ($latestMode ? ' --from-latest' : ' --start-date ' . escapeshellarg($startValue))
         . ' --end-date ' . escapeshellarg($endValue)
         . ' --status-file ' . escapeshellarg($statusPath)
         . ' >> ' . escapeshellarg($localRoot . '/job-' . $jobId . '.log') . ' 2>&1 < /dev/null & echo $!';
