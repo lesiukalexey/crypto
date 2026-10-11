@@ -87,6 +87,8 @@ try {
         if ($martingaleMode !== 'none') {
             array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
         }
+        array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
+        array_push($keyParts, ...rankingContractRulesIdentity($config['category'], [$symbol]));
         $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $generation);
         if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
         $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
@@ -99,8 +101,6 @@ try {
             if (!is_array($entry) || !is_numeric($entry['best_pnl'] ?? null)) continue;
             if ($best === null || (float) $entry['best_pnl'] > (float) $best['best_pnl']) $best = $entry;
         }
-        array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
-        array_push($keyParts, ...rankingContractRulesIdentity($config['category'], [$symbol]));
         if ($best !== null) {
             $symbols[] = [
                 'symbol' => (string) $symbol,
