@@ -33,10 +33,18 @@ try {
         candleCompletenessRespond(['status' => 'error', 'message' => 'Проверьте выбранный диапазон дат.'], 400);
     }
 
-    $enabled = enabledTickerSymbols($config);
+    $tickerSetId = trim((string) ($_GET['ticker_set'] ?? ''));
+    if ($tickerSetId === '') {
+        candleCompletenessRespond(['status' => 'error', 'message' => 'Выбранный список тикеров не передан.'], 400);
+    }
+    $tickerSet = selectedTickerSet($config, $tickerSetId);
+    if ($tickerSet['id'] !== $tickerSetId) {
+        candleCompletenessRespond(['status' => 'error', 'message' => 'Выбранный список тикеров не найден.'], 400);
+    }
+    $enabled = $tickerSet['symbols'];
     $selected = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
     if (!in_array($selected, $enabled, true)) {
-        candleCompletenessRespond(['status' => 'error', 'message' => 'Пара выключена или не настроена.'], 400);
+        candleCompletenessRespond(['status' => 'error', 'message' => 'Пара не входит в выбранный активный список тикеров.'], 400);
     }
     if ($enabled === []) {
         candleCompletenessRespond(['status' => 'ready', 'symbol_incomplete' => false, 'all_incomplete' => false, 'incomplete_symbols' => [], 'checked_days' => 0]);

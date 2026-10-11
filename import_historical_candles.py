@@ -71,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path("config.json"), help="JSON config file")
     scope = parser.add_mutually_exclusive_group(required=True)
     scope.add_argument("--symbol", help="One enabled symbol from config.json")
+    scope.add_argument("--symbols", nargs="+", help="Selected enabled symbols from config.json")
     scope.add_argument("--all-enabled", action="store_true", help="Import every enabled symbol")
     parser.add_argument("--start-date", default="2026-10-01", help="Local calendar date in Europe/Kyiv")
     parser.add_argument("--end-date", help="Inclusive local calendar end date in Europe/Kyiv (default: today)")
@@ -161,7 +162,9 @@ def main() -> int:
     try:
         config = load_config(args.config)
         category = str(config.get("category", "SPOT")).upper()
-        symbols = enabled_symbols(config) if args.all_enabled else [args.symbol.upper()]
+        symbols = enabled_symbols(config) if args.all_enabled else (
+            [args.symbol.upper()] if args.symbol else list(dict.fromkeys(symbol.upper() for symbol in args.symbols))
+        )
         if not symbols:
             raise ValueError("There are no enabled symbols to import")
         configured = {str(item).upper() for item in config.get("symbols", [])}

@@ -1407,7 +1407,10 @@ function updateHistoryImportLabels() {
     const start = filtersForm.elements.namedItem('start_day').value;
     const end = endDayInput.value;
     selectedSymbolImportButton.title = `Скачать минутные свечи ${symbolSelect.value} из Bitget за период ${start} — ${end} включительно, сохранить в БД и обновить график и расчёты. Для пропущенных минут Close свечи используется как цена.`;
-    if (allSymbolsImportButton) allSymbolsImportButton.title = `Скачать минутные свечи всех активных пар из Bitget за период ${start} — ${end} включительно, сохранить в БД и обновить график и расчёты. Для пропущенных минут Close свечи используется как цена.`;
+    if (allSymbolsImportButton) {
+        const tickerSetName = tickerSetSelect?.selectedOptions[0]?.textContent || 'выбранного списка';
+        allSymbolsImportButton.title = `Скачать минутные свечи всех активных пар списка «${tickerSetName}» из Bitget за период ${start} — ${end} включительно, сохранить в БД и обновить график и расчёты. Для пропущенных минут Close свечи используется как цена.`;
+    }
 }
 updateHistoryImportLabels();
 let candleCompletenessVersion = 0;
@@ -1420,7 +1423,8 @@ async function refreshCandleImportVisibility() {
     selectedSymbolImportButton.hidden = true;
     allSymbolsImportButton.hidden = true;
     if (!start || !end || end < start || !symbol) return;
-    const query = new URLSearchParams({start_day:start, end_day:end, symbol});
+    const tickerSet = filtersForm.querySelector('[name="ticker_set"]')?.value || '';
+    const query = new URLSearchParams({start_day:start, end_day:end, symbol, ticker_set:tickerSet});
     try {
         const response = await fetch('candle-completeness.php?' + query.toString(), {headers:{Accept:'application/json'}, cache:'no-store'});
         const result = await response.json();
@@ -1588,6 +1592,7 @@ async function startHistoryImport(scope) {
         symbol: symbolSelect.value,
         start_day: filtersForm.elements.namedItem('start_day').value,
         end_day: endDayInput.value,
+        ticker_set: filtersForm.querySelector('[name="ticker_set"]')?.value || '',
     };
     historyImportButtons.forEach(button => { button.disabled = true; });
     historyImportStatus.dataset.status = 'running';
@@ -1626,6 +1631,7 @@ try {
                     const request = {
                         scope:status.scope || 'all',
                         symbol:status.symbol || symbolSelect.value,
+                        ticker_set:status.ticker_set || '',
                         start_day:status.request_start_day || status.start_day,
                         end_day:status.request_end_day || status.end_day,
                     };
