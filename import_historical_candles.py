@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,9 +18,12 @@ from zoneinfo import ZoneInfo
 
 from database import (
     connect_mysql,
+    historical_candle_coverage,
+    historical_candle_timestamps,
     insert_historical_candles,
     insert_historical_candle_snapshots,
     latest_quote_timestamp_ms,
+    mark_historical_candle_coverage,
 )
 
 API_URL = "https://api.bitget.com/api/v3/market/history-candles"
@@ -31,6 +33,47 @@ PAGE_CANDLES = 100
 LOCAL_ZONE = ZoneInfo("Europe/Kyiv")
 MIN_REQUEST_INTERVAL_SECONDS = 0.06
 LAST_REQUEST_STARTED_AT = 0.0
+
+
+def missing_candle_ranges(
+    start_ms: int,
+    end_exclusive_ms: int,
+    candle_timestamps: list[int],
+    covered_ranges: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Return uncovered minute ranges, treating archived candles as one-minute coverage."""
+    if end_exclusive_ms <= start_ms:
+        return []
+    intervals = [(timestamp, timestamp + INTERVAL_MS) for timestamp in candle_timestamps]
+    intervals.extend(covered_ranges)
+    clipped = sorted(
+        (max(start_ms, left), min(end_exclusive_ms, right))
+        for left, right in intervals
+        if right > start_ms and left < end_exclusive_ms and right > left
+    )
+    missing: list[tuple[int, int]] = []
+    cursor = start_ms
+    for left, right in clipped:
+        if left > cursor:
+            missing.append((cursor, left))
+        cursor = max(cursor, right)
+        if cursor >= end_exclusive_ms:
+            break
+    if cursor < end_exclusive_ms:
+        missing.append((cursor, end_exclusive_ms))
+    return missing
+
+
+def chunk_candle_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Split uncovered ranges into API requests of at most PAGE_CANDLES minutes."""
+    chunks: list[tuple[int, int]] = []
+    max_span = PAGE_CANDLES * INTERVAL_MS
+    for start_ms, end_ms in ranges:
+        while start_ms < end_ms:
+            chunk_end = min(start_ms + max_span, end_ms)
+            chunks.append((start_ms, chunk_end))
+            start_ms = chunk_end
+    return chunks
 
 
 def fetch_page(category: str, symbol: str, first_ms: int, last_ms: int, timeout: float) -> list[list[str]]:
@@ -116,21 +159,15 @@ def import_symbol(
     connection: Any,
     category: str,
     symbol: str,
-    start_ms: int,
-    end_exclusive_ms: int,
+    ranges: list[tuple[int, int]],
     timeout: float,
     on_page: Any,
 ) -> tuple[int, int, int]:
-    last_ms = end_exclusive_ms - INTERVAL_MS
-    if last_ms < start_ms:
-        return 0, 0, 0
-
     totals = {"candles_received": 0, "candles_inserted": 0, "snapshots_inserted": 0}
-    page_start = start_ms
-    page_count = math.ceil((last_ms - start_ms + INTERVAL_MS) / (PAGE_CANDLES * INTERVAL_MS))
     page_number = 0
-    while page_start <= last_ms:
-        page_last = min(page_start + (PAGE_CANDLES - 1) * INTERVAL_MS, last_ms)
+    page_count = len(ranges)
+    for page_start, page_end_exclusive in ranges:
+        page_last = page_end_exclusive - INTERVAL_MS
         rows = fetch_page(category, symbol, page_start, page_last, timeout)
         candle_rows: dict[int, list[str]] = {}
         for row in rows:
@@ -143,6 +180,9 @@ def import_symbol(
             snapshots_inserted = insert_historical_candle_snapshots(
                 connection, category, symbol, INTERVAL, page_start, page_last + INTERVAL_MS,
             )
+            mark_historical_candle_coverage(
+                connection, category, symbol, INTERVAL, page_start, page_end_exclusive,
+            )
         except Exception:
             connection.rollback()
             raise
@@ -151,7 +191,6 @@ def import_symbol(
         totals["snapshots_inserted"] += snapshots_inserted
         page_number += 1
         on_page(page_number, page_count, len(candles), raw_inserted, snapshots_inserted)
-        page_start = page_last + INTERVAL_MS
 
     return totals["candles_received"], totals["candles_inserted"], totals["snapshots_inserted"]
 
@@ -216,17 +255,25 @@ def main() -> int:
             else:
                 start_ms_by_symbol[symbol] = default_start_ms
 
-        total_pages = sum(
-            math.ceil(max(0, end_exclusive_ms - start_ms) / (PAGE_CANDLES * INTERVAL_MS))
-            for start_ms in start_ms_by_symbol.values()
-        )
+        ranges_by_symbol: dict[str, list[tuple[int, int]]] = {}
+        for symbol, start_ms in start_ms_by_symbol.items():
+            archived = historical_candle_timestamps(
+                connection, category, symbol, INTERVAL, start_ms, end_exclusive_ms,
+            )
+            coverage = historical_candle_coverage(
+                connection, category, symbol, INTERVAL, start_ms, end_exclusive_ms,
+            )
+            missing = missing_candle_ranges(start_ms, end_exclusive_ms, archived, coverage)
+            ranges_by_symbol[symbol] = chunk_candle_ranges(missing)
+        total_pages = sum(map(len, ranges_by_symbol.values()))
         page_offset = 0
         totals = {"candles_received": 0, "candles_inserted": 0, "snapshots_inserted": 0}
         for symbol_index, symbol in enumerate(symbols, start=1):
             start_ms = start_ms_by_symbol.get(symbol)
             if start_ms is None:
                 continue
-            symbol_pages = math.ceil(max(0, end_exclusive_ms - start_ms) / (PAGE_CANDLES * INTERVAL_MS))
+            symbol_ranges = ranges_by_symbol[symbol]
+            symbol_pages = len(symbol_ranges)
             completed_pages_for_symbol = [0]
             symbol_totals = {"symbol_candles_received": 0, "symbol_candles_inserted": 0, "symbol_snapshots_inserted": 0}
 
@@ -268,9 +315,11 @@ def main() -> int:
 
             try:
                 received, inserted, snapshots = import_symbol(
-                    connection, category, symbol, start_ms, end_exclusive_ms, args.timeout, on_page,
+                    connection, category, symbol, symbol_ranges, args.timeout, on_page,
                 )
                 logging.info("%s: fetched=%s archived=%s snapshots_added=%s", symbol, received, inserted, snapshots)
+                if not symbol_ranges:
+                    logging.info("%s: no missing historical candle ranges", symbol)
             except Exception as exc:
                 connection.rollback()
                 failures.append({"symbol": symbol, "message": str(exc)[:500]})
@@ -288,8 +337,8 @@ def main() -> int:
 
         final_status = "error" if len(failures) == len(symbols) else "partial" if failures else "ready"
         message = "Загрузка завершена" if not failures else f"Загрузка завершена с ошибками у {len(failures)} пар"
-        if not any(start_ms < end_exclusive_ms for start_ms in start_ms_by_symbol.values()):
-            message = "Нет новых завершённых минутных свечей для загрузки"
+        if not failures and total_pages == 0:
+            message = "Пропусков для загрузки нет"
         write_status(args.status_file, {
             "status": final_status, "progress": 100,
             "start_day": "per-symbol latest" if args.from_latest else args.start_date,

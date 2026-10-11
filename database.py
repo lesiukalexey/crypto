@@ -71,6 +71,18 @@ def initialize_schema(connection: Any) -> None:
                 KEY idx_historical_candles_time (category, symbol, interval_name, candle_timestamp_ms)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
         )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS historical_candle_coverage (
+                category VARCHAR(24) NOT NULL,
+                symbol VARCHAR(40) NOT NULL,
+                interval_name VARCHAR(8) NOT NULL,
+                start_timestamp_ms BIGINT NOT NULL,
+                end_exclusive_timestamp_ms BIGINT NOT NULL,
+                checked_at_utc DATETIME(3) NOT NULL,
+                PRIMARY KEY (category, symbol, interval_name, start_timestamp_ms, end_exclusive_timestamp_ms),
+                KEY idx_historical_candle_coverage_range (category, symbol, interval_name, start_timestamp_ms, end_exclusive_timestamp_ms)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+        )
     connection.commit()
 
 
@@ -159,6 +171,71 @@ def insert_historical_candles(
         inserted = cursor.rowcount
     connection.commit()
     return inserted
+
+
+def historical_candle_timestamps(
+    connection: Any,
+    category: str,
+    symbol: str,
+    interval_name: str,
+    start_ms: int,
+    end_exclusive_ms: int,
+) -> list[int]:
+    """Return archived candle timestamps in [start_ms, end_exclusive_ms)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT candle_timestamp_ms
+               FROM historical_candles
+               WHERE category = %s AND symbol = %s AND interval_name = %s
+                 AND candle_timestamp_ms >= %s AND candle_timestamp_ms < %s
+               ORDER BY candle_timestamp_ms""",
+            (category, symbol, interval_name, start_ms, end_exclusive_ms),
+        )
+        return [int(row[0]) for row in cursor.fetchall()]
+
+
+def historical_candle_coverage(
+    connection: Any,
+    category: str,
+    symbol: str,
+    interval_name: str,
+    start_ms: int,
+    end_exclusive_ms: int,
+) -> list[tuple[int, int]]:
+    """Return successfully queried historical ranges overlapping a request."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT start_timestamp_ms, end_exclusive_timestamp_ms
+               FROM historical_candle_coverage
+               WHERE category = %s AND symbol = %s AND interval_name = %s
+                 AND start_timestamp_ms < %s AND end_exclusive_timestamp_ms > %s
+               ORDER BY start_timestamp_ms""",
+            (category, symbol, interval_name, end_exclusive_ms, start_ms),
+        )
+        return [(int(row[0]), int(row[1])) for row in cursor.fetchall()]
+
+
+def mark_historical_candle_coverage(
+    connection: Any,
+    category: str,
+    symbol: str,
+    interval_name: str,
+    start_ms: int,
+    end_exclusive_ms: int,
+) -> None:
+    """Record a range only after its response and derived snapshot write succeeded."""
+    if end_exclusive_ms <= start_ms:
+        raise ValueError("Historical candle coverage range must be non-empty")
+    checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """INSERT IGNORE INTO historical_candle_coverage (
+                   category, symbol, interval_name, start_timestamp_ms,
+                   end_exclusive_timestamp_ms, checked_at_utc
+               ) VALUES (%s, %s, %s, %s, %s, %s)""",
+            (category, symbol, interval_name, start_ms, end_exclusive_ms, checked_at),
+        )
+    connection.commit()
 
 
 def insert_historical_candle_snapshots(
