@@ -122,8 +122,21 @@ class SQLiteStateStore:
             self.db.execute("INSERT INTO account(id,balance,realized_pnl,day,daily_pnl,initial_balance) VALUES(1,?,'0',?,'0',?)", (starting, datetime.now(KYIV).date().isoformat(), starting))
         self.db.execute("INSERT INTO releases(digest,payload,activated_at_ms) VALUES(?,?,?) ON CONFLICT(digest) DO NOTHING", (digest, serialized, int(time.time() * 1000)))
         self.db.execute("INSERT INTO portfolio_strategies(strategy_id,kind,digest,payload,enabled,added_at_ms,name) VALUES(?,?,?,?,1,?,?) ON CONFLICT(strategy_id) DO UPDATE SET enabled=1,name=excluded.name", (digest, kind, digest, serialized, int(time.time() * 1000), name or payload["release_id"]))
+        # Each strategy keeps the budget configured in its own release. The shared
+        # account is the sum of those budgets, with PnL still booked once globally.
+        self._sync_portfolio_budget()
         self.db.commit()
         return digest
+
+    def _sync_portfolio_budget(self) -> None:
+        account = self.account()
+        if account is None:
+            return
+        allocations = [Decimal(json.loads(row[0])["execution"]["starting_balance_usdt"]) for row in self.db.execute("SELECT payload FROM portfolio_strategies")]
+        portfolio_budget = sum(allocations, Decimal(0))
+        previous_budget = Decimal(account["initial_balance"])
+        if portfolio_budget != previous_budget:
+            self.db.execute("UPDATE account SET balance=?,initial_balance=? WHERE id=1", (str(Decimal(account["balance"]) + portfolio_budget - previous_budget), str(portfolio_budget)))
 
     def active_strategy_run(self, strategy_id: str) -> sqlite3.Row | None:
         return self.db.execute(
@@ -133,6 +146,7 @@ class SQLiteStateStore:
 
     def begin_strategy_runs(self, minimum_equity_percent: Decimal, now_ms: int | None = None) -> None:
         now_ms = now_ms or int(time.time() * 1000)
+        self._sync_portfolio_budget()
         rows = self.db.execute("SELECT * FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
         pending = [row for row in rows if self.active_strategy_run(row["strategy_id"]) is None]
         if not pending:
@@ -140,15 +154,13 @@ class SQLiteStateStore:
         account = self.account()
         if account is None:
             return
-        active = self.db.execute("SELECT allocation_usdt FROM strategy_runs WHERE status IN ('running','stopping')").fetchall()
-        available = max(Decimal(0), Decimal(account["initial_balance"]) - sum((Decimal(row[0]) for row in active), Decimal(0)))
-        allocation = available / len(pending)
-        if allocation <= 0:
-            return
         last_trade_id = int(self.db.execute("SELECT COALESCE(MAX(id),0) FROM trades").fetchone()[0])
         with self.db:
             for row in pending:
                 payload = json.loads(row["payload"])
+                allocation = Decimal(payload["execution"]["starting_balance_usdt"])
+                if allocation <= 0:
+                    continue
                 name = row["name"] or payload.get("release_id", row["strategy_id"])
                 self.db.execute(
                     "INSERT INTO strategy_runs(strategy_id,strategy_name,kind,started_at_ms,status,allocation_usdt,peak_equity_usdt,last_equity_usdt,minimum_equity_percent,starting_trade_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -316,7 +328,7 @@ class SQLiteStateStore:
         latest = self.db.execute("SELECT type,ts FROM events ORDER BY id DESC LIMIT 1").fetchone()
         recent_trades = [dict(row) for row in self.db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")]
         recent_events = [{"id": row["id"], "timestamp_ms": row["ts"], "type": row["type"], "symbol": row["symbol"], "payload": json.loads(row["payload"])} for row in self.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 100")]
-        portfolio = [{"strategy_id": row["strategy_id"], "kind": row["kind"], "digest": row["digest"], "enabled": bool(row["enabled"]), "name": row["name"] or row["strategy_id"], "symbols": json.loads(row["payload"])["market"]["symbols"]} for row in self.db.execute("SELECT * FROM portfolio_strategies ORDER BY added_at_ms")] if "portfolio_strategies" in tables else []
+        portfolio = [{"strategy_id": row["strategy_id"], "kind": row["kind"], "digest": row["digest"], "enabled": bool(row["enabled"]), "name": row["name"] or row["strategy_id"], "symbols": json.loads(row["payload"])["market"]["symbols"], "allocation_usdt": json.loads(row["payload"])["execution"]["starting_balance_usdt"]} for row in self.db.execute("SELECT * FROM portfolio_strategies ORDER BY added_at_ms")] if "portfolio_strategies" in tables else []
         account_columns = {row[1] for row in self.db.execute("PRAGMA table_info(account)")}
         initial_balance = account["initial_balance"] if "initial_balance" in account_columns else account["balance"]
         return {"mode": execution_mode, "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "initial_balance_usdt": initial_balance, "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "recent_trades": recent_trades, "recent_events": recent_events, "latest_event": None if latest is None else dict(latest), "portfolio_strategies": portfolio, "strategy_runs": self.strategy_runs()}
@@ -513,11 +525,15 @@ class PortfolioExecutor:
         self.entries_paused = False
         self.close_requested = False
         self.minimum_equity_percent = minimum_equity_percent
+        self.shared_exposure_limit = Decimal(0)
         self.refresh()
 
     def refresh(self) -> None:
         self.store.begin_strategy_runs(self.minimum_equity_percent)
         rows = self.store.db.execute("SELECT p.strategy_id,p.kind,p.payload FROM portfolio_strategies p WHERE p.enabled=1 OR EXISTS (SELECT 1 FROM strategy_runs r WHERE r.strategy_id=p.strategy_id AND r.status='stopping') ORDER BY p.added_at_ms").fetchall()
+        total_balance = Decimal((self.store.account() or {"initial_balance": "0"})["initial_balance"])
+        configured_exposure = sum((Decimal(json.loads(row["payload"])["risk"]["max_total_exposure_usdt"]) for row in rows), Decimal(0))
+        self.shared_exposure_limit = min(total_balance, configured_exposure)
         active_ids: set[str] = set()
         for row in rows:
             strategy_id, payload = row["strategy_id"], json.loads(row["payload"])
@@ -526,7 +542,9 @@ class PortfolioExecutor:
                 continue
             active_ids.add(strategy_id)
             if row["kind"] == "hedge":
-                self.hedges[strategy_id] = payload
+                scaled_hedge = json.loads(json.dumps(payload))
+                scaled_hedge["risk"]["max_total_exposure_usdt"] = str(self.shared_exposure_limit)
+                self.hedges[strategy_id] = scaled_hedge
                 self.executors.pop(strategy_id, None)
                 continue
             self.hedges.pop(strategy_id, None)
@@ -534,8 +552,7 @@ class PortfolioExecutor:
             allocation = Decimal(run["allocation_usdt"])
             scaled["execution"]["starting_balance_usdt"] = str(allocation)
             scaled["risk"]["max_order_notional_usdt"] = str(min(Decimal(scaled["risk"]["max_order_notional_usdt"]), allocation))
-            total_balance = Decimal((self.store.account() or {"initial_balance": "0"})["initial_balance"])
-            scaled["risk"]["max_total_exposure_usdt"] = str(min(Decimal(scaled["risk"]["max_total_exposure_usdt"]), total_balance))
+            scaled["risk"]["max_total_exposure_usdt"] = str(self.shared_exposure_limit)
             self.executors[strategy_id] = PaperExecutor(scaled, self.store, stale_after_seconds=self.stale_after_seconds, strategy_id=strategy_id, activate=False)
         self.executors = {key: value for key, value in self.executors.items() if key in active_ids}
         self.hedges = {key: value for key, value in self.hedges.items() if key in active_ids}
@@ -598,7 +615,7 @@ class PortfolioExecutor:
             return
         open_rows = self.store.db.execute("SELECT quantity,entry_price FROM positions").fetchall()
         exposure = sum((Decimal(row["quantity"]) * Decimal(row["entry_price"]) for row in open_rows), Decimal(0))
-        maximum_exposure = min(Decimal(account["initial_balance"] if account else "0"), Decimal(payload["risk"]["max_total_exposure_usdt"]))
+        maximum_exposure = self.shared_exposure_limit
         if exposure + allocation > maximum_exposure:
             self.store.event("risk_block", {"reason": "exposure_limit", "current_usdt": str(exposure), "requested_usdt": str(allocation)}, long_quote.symbol, long_quote.timestamp_ms)
             return

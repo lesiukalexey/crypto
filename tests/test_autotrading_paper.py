@@ -138,7 +138,9 @@ class PaperExecutorTests(unittest.TestCase):
     def test_two_portfolio_strategies_share_balance_and_keep_separate_positions(self) -> None:
         store = SQLiteStateStore(self.path)
         first = json.loads(json.dumps(self.payload))
+        first["execution"]["starting_balance_usdt"] = "10"
         second = json.loads(json.dumps(self.payload))
+        second["execution"]["starting_balance_usdt"] = "10"
         second["release_id"] = "second-strategy"
         second["market"]["symbols"] = ["BTCUSDT"]
         store.add_portfolio_strategy(first, name="Первая")
@@ -146,11 +148,13 @@ class PaperExecutorTests(unittest.TestCase):
         executor = PortfolioExecutor(store)
         executor.on_quotes([self.quote("99.9", "100", 1_000_000)], now_ms=1_000_000)
         health = store.health()
-        self.assertEqual(health["initial_balance_usdt"], "100")
+        self.assertEqual(health["initial_balance_usdt"], "20")
         self.assertEqual(health["open_positions"], 2)
         self.assertEqual(len({position["strategy_id"] for position in health["positions"]}), 2)
+        runs = {run["strategy_id"]: run for run in health["strategy_runs"]}
+        self.assertEqual({run["allocation_usdt"] for run in runs.values()}, {"10"})
         exposure = sum(Decimal(row["quantity"]) * Decimal(row["entry_price"]) for row in store.db.execute("SELECT quantity,entry_price FROM positions"))
-        self.assertLessEqual(exposure, Decimal("100"))
+        self.assertLessEqual(exposure, Decimal("20"))
         store.close()
 
     def test_favorite_hedge_opens_and_closes_both_legs_together(self) -> None:
