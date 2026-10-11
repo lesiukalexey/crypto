@@ -1,4 +1,4 @@
-"""Local Linux process and file controls for the paper executor."""
+"""Local Linux process and file controls for the portfolio executor."""
 
 from __future__ import annotations
 
@@ -44,20 +44,23 @@ def service_status(pid_file: str | Path, state: str | Path) -> dict[str, Any]:
     pid_path, state_path = Path(pid_file), Path(state)
     record = read_json(pid_path, {})
     pid = record.get("pid")
-    running = isinstance(pid, int) and _process_matches(pid, state_path)
+    recorded_state = Path(str(record.get("state", state_path))).resolve()
+    running = isinstance(pid, int) and _process_matches(pid, recorded_state)
     if not running and record:
         try:
             pid_path.unlink()
         except OSError:
             pass
     mode = None
+    execution_mode = None
     if running and isinstance(pid, int):
         try:
             command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
             mode = "portfolio" if "-m autotrading portfolio-run" in command else "single"
+            execution_mode = "live" if "--mode live" in command else "demo" if "--mode demo" in command else "paper"
         except OSError:
             mode = None
-    return {"running": running, "pid": pid if running else None, "mode": mode}
+    return {"running": running, "pid": pid if running else None, "mode": mode, "execution_mode": execution_mode}
 
 
 def start_service(release: str | Path, state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float) -> dict[str, Any]:
@@ -68,15 +71,21 @@ def start_service(release: str | Path, state: str | Path, control: str | Path, p
         return _start_service(release, state, control, pid_file, log, interval)
 
 
-def start_portfolio_service(state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float) -> dict[str, Any]:
+def start_portfolio_service(state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float, *, mode: str = "paper", enable_live: bool = False) -> dict[str, Any]:
+    if mode not in {"paper", "demo", "live"}:
+        raise ValueError("Portfolio mode must be paper, demo, or live")
+    if mode == "live" and not enable_live:
+        raise ValueError("Live mode requires the explicit live start acknowledgement")
+    if mode != "live" and enable_live:
+        raise ValueError("The live acknowledgement is only valid for live mode")
     pid_path = Path(pid_file)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     with pid_path.with_suffix(pid_path.suffix + ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return _start_service(None, state, control, pid_file, log, interval)
+        return _start_service(None, state, control, pid_file, log, interval, mode=mode, enable_live=enable_live)
 
 
-def _start_service(release: str | Path | None, state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float) -> dict[str, Any]:
+def _start_service(release: str | Path | None, state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float, *, mode: str = "paper", enable_live: bool = False) -> dict[str, Any]:
     release_path, state_path = Path(release).resolve() if release is not None else None, Path(state).resolve()
     control_path, pid_path, log_path = Path(control).resolve(), Path(pid_file).resolve(), Path(log).resolve()
     status = service_status(pid_path, state_path)
@@ -94,13 +103,17 @@ def _start_service(release: str | Path | None, state: str | Path, control: str |
     if release_path is not None:
         command.append(str(release_path))
     command.extend(["--state", str(state_path), "--control", str(control_path), "--interval", str(interval)])
+    if release_path is None:
+        command.extend(["--mode", mode])
+        if enable_live:
+            command.append("--enable-live")
     process = subprocess.Popen(
         command,
         cwd=package_root, env=env, stdin=subprocess.DEVNULL, stdout=log_handle, stderr=subprocess.STDOUT,
         start_new_session=True, close_fds=True,
     )
     log_handle.close()
-    write_json_atomic(pid_path, {"pid": process.pid, "state": str(state_path), "started_at_ms": int(time.time() * 1000)})
+    write_json_atomic(pid_path, {"pid": process.pid, "state": str(state_path), "mode": mode if release_path is None else "paper", "started_at_ms": int(time.time() * 1000)})
     time.sleep(0.15)
     if process.poll() is not None:
         pid_path.unlink(missing_ok=True)
@@ -121,11 +134,13 @@ def _stop_service(pid_file: str | Path, state: str | Path, timeout_seconds: floa
     if not status["running"]:
         return {"stopped": False, "already_stopped": True}
     pid = status["pid"]
+    record = read_json(pid_file, {})
+    actual_state = Path(str(record.get("state", state))).resolve()
     os.kill(pid, signal.SIGTERM)
     until = time.monotonic() + timeout_seconds
-    while time.monotonic() < until and _process_matches(pid, Path(state)):
+    while time.monotonic() < until and _process_matches(pid, actual_state):
         time.sleep(0.1)
-    stopped = not _process_matches(pid, Path(state))
+    stopped = not _process_matches(pid, actual_state)
     if stopped:
         Path(pid_file).unlink(missing_ok=True)
     return {"stopped": stopped, "pid": pid}

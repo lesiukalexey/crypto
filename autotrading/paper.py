@@ -35,6 +35,8 @@ class SQLiteStateStore:
           CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, exit_price TEXT NOT NULL, entry_ts INTEGER NOT NULL, exit_ts INTEGER NOT NULL, pnl TEXT NOT NULL, release_digest TEXT NOT NULL DEFAULT '', strategy_id TEXT NOT NULL DEFAULT 'legacy', leg TEXT NOT NULL DEFAULT 'single');
           CREATE TABLE IF NOT EXISTS account(id INTEGER PRIMARY KEY CHECK(id=1), balance TEXT NOT NULL, realized_pnl TEXT NOT NULL, day TEXT NOT NULL, daily_pnl TEXT NOT NULL, initial_balance TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS portfolio_strategies(strategy_id TEXT PRIMARY KEY, kind TEXT NOT NULL, digest TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, added_at_ms INTEGER NOT NULL, name TEXT NOT NULL DEFAULT '');
+          CREATE TABLE IF NOT EXISTS exchange_orders(client_order_id TEXT PRIMARY KEY, mode TEXT NOT NULL, strategy_id TEXT NOT NULL, symbol TEXT NOT NULL, leg TEXT NOT NULL, intent TEXT NOT NULL, side TEXT NOT NULL, requested_qty TEXT NOT NULL, status TEXT NOT NULL, order_id TEXT, reason TEXT NOT NULL, digest TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS exchange_fills(trade_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT NOT NULL, fee TEXT NOT NULL, timestamp_ms INTEGER NOT NULL);
         """)
         position_columns = {row[1] for row in self.db.execute("PRAGMA table_info(positions)")}
         if "strategy_id" not in position_columns:
@@ -160,12 +162,14 @@ class SQLiteStateStore:
         return self.db.execute("SELECT * FROM account WHERE id=1").fetchone()
 
     def health(self) -> dict[str, Any]:
+        mode_row = self.db.execute("SELECT value FROM runtime_meta WHERE key='execution_mode'").fetchone()
+        execution_mode = str(mode_row[0]) if mode_row and mode_row[0] in {"paper", "demo", "live"} else "paper"
         account = self.account()
         active = self.db.execute("SELECT r.payload,r.digest FROM runtime_meta m JOIN releases r ON r.digest=m.value WHERE m.key='active_release_digest'").fetchone()
         if active is None:
             active = self.db.execute("SELECT payload,digest FROM releases ORDER BY activated_at_ms DESC LIMIT 1").fetchone()
         if account is None:
-            return {"mode": "paper", "initialized": False, "active_release_digest": active["digest"] if active else None, "open_positions": 0, "positions": [], "unrealized_pnl_usdt": "0", "trades": 0, "recent_trades": [], "recent_events": [], "latest_event": None}
+            return {"mode": execution_mode, "initialized": False, "active_release_digest": active["digest"] if active else None, "open_positions": 0, "positions": [], "unrealized_pnl_usdt": "0", "trades": 0, "recent_trades": [], "recent_events": [], "latest_event": None}
         positions: list[dict[str, Any]] = []
         unrealized = Decimal(0)
         tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -207,7 +211,7 @@ class SQLiteStateStore:
         portfolio = [{"strategy_id": row["strategy_id"], "kind": row["kind"], "digest": row["digest"], "enabled": bool(row["enabled"]), "name": row["name"] or row["strategy_id"], "symbols": json.loads(row["payload"])["market"]["symbols"]} for row in self.db.execute("SELECT * FROM portfolio_strategies ORDER BY added_at_ms")] if "portfolio_strategies" in tables else []
         account_columns = {row[1] for row in self.db.execute("PRAGMA table_info(account)")}
         initial_balance = account["initial_balance"] if "initial_balance" in account_columns else account["balance"]
-        return {"mode": "paper", "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "initial_balance_usdt": initial_balance, "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "recent_trades": recent_trades, "recent_events": recent_events, "latest_event": None if latest is None else dict(latest), "portfolio_strategies": portfolio}
+        return {"mode": execution_mode, "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "initial_balance_usdt": initial_balance, "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "recent_trades": recent_trades, "recent_events": recent_events, "latest_event": None if latest is None else dict(latest), "portfolio_strategies": portfolio}
 
     def close(self) -> None:
         self.db.close()

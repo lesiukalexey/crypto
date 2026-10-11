@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 session_set_cookie_params(['httponly' => true, 'samesite' => 'Strict', 'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off']);
 session_start();
+$savedAccountMode = $_SESSION['autotrading_account_mode'] ?? 'paper';
+$accountMode = is_string($savedAccountMode) && in_array($savedAccountMode, ['paper', 'demo', 'real'], true) ? $savedAccountMode : 'paper';
 header('Cache-Control: no-store');
 
 function h(string $value): string { return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
@@ -47,7 +49,7 @@ function exitDescription(string $config): string {
 }
 function runPython(array $arguments, string $root, string $python): array {
     $environment = array_merge(['PYTHONPATH' => $root], $GLOBALS['autotrading_demo_env'] ?? []);
-    foreach (['BITGET_DEMO_ENV_FILE', 'BITGET_DEMO_API_KEY', 'BITGET_DEMO_API_SECRET', 'BITGET_DEMO_API_PASSPHRASE'] as $name) {
+    foreach (['BITGET_DEMO_ENV_FILE', 'BITGET_DEMO_API_KEY', 'BITGET_DEMO_API_SECRET', 'BITGET_DEMO_API_PASSPHRASE', 'BITGET_LIVE_ENV_FILE', 'BITGET_LIVE_TRADING_ENABLED'] as $name) {
         $value = getenv($name);
         if ($value !== false && $value !== '') $environment[$name] = $value;
     }
@@ -61,13 +63,20 @@ function runPython(array $arguments, string $root, string $python): array {
 
 $root = dirname(__DIR__);
 $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
+$userHome = getenv('HOME') ?: '/home/alex';
 $demoEnvFile = getenv('BITGET_DEMO_ENV_FILE') ?: '';
-if ($demoEnvFile === '' && ($userHome = getenv('HOME')) !== false) {
+if ($demoEnvFile === '') {
     $localDemoEnv = rtrim($userHome, '/') . '/.ai/home/.local/bitget-autotrading-demo.env';
     if (is_file($localDemoEnv)) $demoEnvFile = $localDemoEnv;
 }
 $demoEnvironment = [];
 if ($demoEnvFile !== '') $demoEnvironment['BITGET_DEMO_ENV_FILE'] = $demoEnvFile;
+$liveEnvFile = getenv('BITGET_LIVE_ENV_FILE') ?: '';
+if ($liveEnvFile === '') {
+    $localLiveEnv = rtrim($userHome, '/') . '/.ai/home/.local/bitget-autotrading-live.env';
+    if (is_file($localLiveEnv)) $liveEnvFile = $localLiveEnv;
+}
+if ($liveEnvFile !== '') $demoEnvironment['BITGET_LIVE_ENV_FILE'] = $liveEnvFile;
 $GLOBALS['autotrading_demo_env'] = $demoEnvironment;
 $uid = function_exists('posix_geteuid') ? posix_geteuid() : getmyuid();
 $runtimeRoot = getenv('BITGET_AUTOTRADING_DIR') ?: '/var/tmp';
@@ -75,10 +84,10 @@ $runtime = rtrim($runtimeRoot, '/') . '/bitget-autotrading-' . $uid;
 if (!is_dir($runtime) && !mkdir($runtime, 0700, true) && !is_dir($runtime)) throw new RuntimeException('Не удалось создать каталог локального состояния.');
 if (is_link($runtime) || fileowner($runtime) !== $uid) throw new RuntimeException('Каталог локального состояния имеет неподходящего владельца.');
 chmod($runtime, 0700);
-$statePath = $runtime . '/state.sqlite';
-$controlPath = $runtime . '/controls.json';
+$statePath = $runtime . ($accountMode === 'paper' ? '/state.sqlite' : ($accountMode === 'demo' ? '/state-demo.sqlite' : '/state-live.sqlite'));
+$controlPath = $runtime . '/controls-' . $accountMode . '.json';
 $pidPath = $runtime . '/paper.pid.json';
-$logPath = $runtime . '/paper.log';
+$logPath = $runtime . '/autotrading-' . $accountMode . '.log';
 $activeReleasePath = $runtime . '/active-release.json';
 $favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
 $releaseDir = $runtime . '/releases';
@@ -90,8 +99,6 @@ $csrf = (string) $_SESSION['autotrading_csrf'];
 $message = '';
 $messageType = 'info';
 $demoReconciliation = is_array($_SESSION['autotrading_demo_status'] ?? null) ? $_SESSION['autotrading_demo_status'] : null;
-$savedAccountMode = $_SESSION['autotrading_account_mode'] ?? 'paper';
-$accountMode = is_string($savedAccountMode) && in_array($savedAccountMode, ['paper', 'demo', 'real'], true) ? $savedAccountMode : 'paper';
 $isLocal = in_array((string) ($_SERVER['REMOTE_ADDR'] ?? ''), ['127.0.0.1', '::1'], true);
 $params = static fn (string $name, string $default = ''): string => trim((string) ($_GET[$name] ?? $default));
 $symbol = strtoupper($params('symbol', (string) ($config['symbols'][0] ?? 'BTCUSDT')));
@@ -126,13 +133,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'account-mode') {
             $requestedMode = (string) ($_POST['account_mode'] ?? '');
             if (!in_array($requestedMode, ['paper', 'demo', 'real'], true)) throw new RuntimeException('Выбран неизвестный режим счёта.');
+            [$serviceCode, $serviceOut] = runPython(['status', '--state', $statePath, '--pid-file', $pidPath], $root, $python);
+            $serviceHealth = $serviceCode === 0 ? json_decode($serviceOut, true) : null;
+            if (is_array($serviceHealth) && !empty($serviceHealth['service']['running'])) throw new RuntimeException('Сначала остановите работающий исполнитель, затем переключите режим счёта.');
             $_SESSION['autotrading_account_mode'] = $requestedMode;
             $accountMode = $requestedMode;
             $message = $requestedMode === 'paper'
                 ? 'Выбран Paper: запустится виртуальный портфель без ордеров на Bitget.'
                 : ($requestedMode === 'demo'
-                    ? 'Demo выбран как целевой счёт. Исполнитель пока работает только в Paper; Demo доступен только для сверки.'
-                    : 'Реальный счёт выбран как целевой. Запуск заблокирован, пока production адаптер не подключён к общему портфелю.');
+                    ? 'Выбран Bitget Demo: после запуска портфель будет выставлять Demo ордера и сверять их исполнения.'
+                    : 'Выбран Bitget Real: запуск требует отдельного переключателя сервера и точного подтверждения каждого запуска.');
             $messageType = $requestedMode === 'paper' ? 'success' : 'warning';
         } elseif ($action === 'add_favorite') {
             [$currentCode, $currentOut] = runPython(array_merge(['status'], $argsBase), $root, $python);
@@ -245,10 +255,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = 'Стратегия добавлена в общий paper портфель: ' . $releaseId . '.';
             $messageType = 'success';
         } elseif ($action === 'demo-reconcile') {
-            $demoSymbol = strtoupper((string) ($_POST['symbol'] ?? $symbol));
-            if (!preg_match('/^[A-Z0-9]{2,40}$/', $demoSymbol)) throw new RuntimeException('Выбран некорректный тикер для проверки Demo.');
+            $demoStatePath = $runtime . '/state-demo.sqlite';
+            [$demoStatusCode, $demoStatusOut] = runPython(['status', '--state', $demoStatePath, '--pid-file', $pidPath], $root, $python);
+            $demoLocalStatus = $demoStatusCode === 0 ? json_decode($demoStatusOut, true) : null;
+            if (is_array($demoLocalStatus) && !empty($demoLocalStatus['service']['running']) && ($demoLocalStatus['service']['execution_mode'] ?? '') === 'demo') throw new RuntimeException('Для ручной сверки сначала остановите Demo исполнитель.');
+            $demoSymbols = [(string) ($_POST['symbol'] ?? $symbol)];
+            foreach (($demoLocalStatus['portfolio_strategies'] ?? []) as $strategy) foreach (($strategy['symbols'] ?? []) as $strategySymbol) $demoSymbols[] = (string) $strategySymbol;
+            $demoSymbols = array_values(array_unique(array_map('strtoupper', $demoSymbols)));
+            foreach ($demoSymbols as $demoSymbol) if (!preg_match('/^[A-Z0-9]{2,40}$/', $demoSymbol)) throw new RuntimeException('В портфеле есть некорректный тикер для проверки Demo.');
             unset($_SESSION['autotrading_demo_status']);
-            [$code, $out, $err] = runPython(['demo-reconcile', '--symbols', $demoSymbol], $root, $python);
+            [$code, $out, $err] = runPython(['demo-reconcile', '--symbols', implode(',', $demoSymbols), '--state', $demoStatePath], $root, $python);
             $report = json_decode($out, true);
             if (!is_array($report) || ($report['mode'] ?? null) !== 'demo') throw new RuntimeException('Не удалось получить результат проверки Demo API: ' . ($err ?: $out ?: 'пустой ответ исполнителя.'));
             $_SESSION['autotrading_demo_status'] = $report;
@@ -256,20 +272,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = ($report['matched'] ?? false) ? 'Demo сверка завершена: расхождений нет.' : 'Demo сверка завершена: обнаружено расхождение или ошибка подключения.';
             $messageType = ($report['matched'] ?? false) ? 'success' : 'warning';
         } elseif ($action === 'start') {
-            if ($accountMode !== 'paper') throw new RuntimeException('Запуск биржевого режима заблокирован: общий исполнитель пока поддерживает только Paper. Выберите Paper, чтобы запустить виртуальный портфель.');
+            $enableLive = false;
+            if ($accountMode === 'real') {
+                if ((string) ($_POST['live_acknowledgement'] ?? '') !== 'I_ACKNOWLEDGE_LIVE_ORDERS') throw new RuntimeException('Для запуска Real введите подтверждение I_ACKNOWLEDGE_LIVE_ORDERS.');
+                if (getenv('BITGET_LIVE_TRADING_ENABLED') !== '1') throw new RuntimeException('В окружении исполнителя не включён BITGET_LIVE_TRADING_ENABLED=1.');
+                $enableLive = true;
+            }
+            if ($accountMode !== 'paper') {
+                [$copyCode, $copyOut, $copyErr] = runPython(['portfolio-copy', '--state', $statePath, '--source-state', $runtime . '/state.sqlite'], $root, $python);
+                if ($copyCode !== 0) throw new RuntimeException($copyErr ?: $copyOut ?: 'Не удалось синхронизировать выбранные стратегии с общим портфелем.');
+            }
             [$listCode, $listOut] = runPython(['status', '--state', $statePath], $root, $python);
             $portfolioState = $listCode === 0 ? json_decode($listOut, true) : null;
             if ((!is_array($portfolioState) || empty($portfolioState['portfolio_strategies'])) && is_file($activeReleasePath)) {
                 [$addCode, $addOut, $addErr] = runPython(['portfolio-add', '--state', $statePath, '--release', $activeReleasePath, '--kind', 'strategy', '--name', (string) ($published['release_id'] ?? 'Ранее опубликованная стратегия')], $root, $python);
                 if ($addCode !== 0) throw new RuntimeException($addErr ?: $addOut ?: 'Не удалось перенести опубликованную стратегию в общий портфель.');
             }
-            [$code, $out, $err] = runPython(['portfolio-start', '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--interval', '5'], $root, $python);
+            $startArgs = ['portfolio-start', '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--interval', '5', '--mode', $accountMode];
+            if ($enableLive) $startArgs[] = '--enable-live';
+            [$code, $out, $err] = runPython($startArgs, $root, $python);
             if ($code !== 0) throw new RuntimeException($err ?: $out ?: 'Служба не запустилась.');
-            $message = 'Общий paper портфель запущен. Все добавленные стратегии используют единый виртуальный баланс.'; $messageType = 'success';
+            $message = $accountMode === 'paper'
+                ? 'Общий Paper портфель запущен. Стратегии используют единый виртуальный баланс.'
+                : ($accountMode === 'demo' ? 'Общий портфель запущен на Bitget Demo. Проверяйте журнал ордеров и сверку.' : 'Общий портфель запущен на Bitget Real после явного подтверждения.');
+            $messageType = 'success';
         } elseif ($action === 'stop') {
             [$code, $out, $err] = runPython(['service-stop', '--state', $statePath, '--pid-file', $pidPath], $root, $python);
             if ($code !== 0) throw new RuntimeException($err ?: $out ?: 'Не удалось остановить службу.');
-            $message = 'Paper процесс остановлен. Сохранённые виртуальные позиции останутся в состоянии и восстановятся при следующем запуске.'; $messageType = 'success';
+            $message = 'Исполнитель остановлен. Состояние и позиции сохранены для выбранного режима.'; $messageType = 'success';
         } elseif ($action === 'pause' || $action === 'resume' || $action === 'close') {
             [$statusCode, $statusOut] = runPython(array_merge(['status'], $argsBase), $root, $python);
             $health = $statusCode === 0 ? json_decode($statusOut, true) : null;
@@ -328,24 +358,24 @@ $postHidden = [
 </style></head><body><main class="wrap">
 <div class="muted">Bitget · локальный исполнитель</div><h1>Автоторговля</h1>
 <nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="autotrading.php" aria-current="page">Автоторговля</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
-<section class="panel how-to"><h2>Общий paper портфель</h2><ol><li>Добавьте выбранную конфигурацию из «Базовых проверок» или нажмите «Добавить в автоторговлю» у записи в «Избранном».</li><li>Добавляйте несколько стратегий и хедж-пар. Их позиции и результат учитываются в одном виртуальном балансе; лимит на вход каждой стратегии автоматически ограничен её долей портфеля.</li><li>Нажмите «Запустить общий портфель». Сервис будет обрабатывать их вместе на одном потоке публичных котировок.</li></ol><p class="note">Это paper-режим: ордера на Bitget не отправляются. Избранный хедж открывает long и short одновременно и закрывает обе ноги вместе при команде «Закрыть paper позиции».</p></section>
+<section class="panel how-to"><h2>Общий портфель</h2><ol><li>Добавьте конфигурации из «Базовых проверок» или «Избранного».</li><li>Выберите Paper, Bitget Demo или Bitget Real. Для Demo/Real портфельные стратегии копируются в отдельное состояние выбранного счёта.</li><li>Запустите портфель. Исполнитель применяет стратегические сигналы и ведёт отдельный журнал фактических биржевых исполнений.</li></ol><p class="note">Demo и Real требуют один-way режима и crossed margin в Bitget. Для Real дополнительно нужны отдельный ключ, BITGET_LIVE_TRADING_ENABLED=1 и точное подтверждение при запуске.</p></section>
 <?php if ($message !== ''): ?><p class="status <?= h($messageType) ?>" role="status"><?= h($message) ?></p><?php endif; ?>
 <?php if (!$isLocal): ?><p class="status warning">Просмотр доступен, но управление работает только при открытии страницы с этого компьютера.</p><?php endif; ?>
 <section class="panel"><h2>Режим счёта</h2><div class="actions" role="group" aria-label="Выбор режима счёта">
 <?php foreach (['paper' => 'Paper', 'demo' => 'Bitget Demo', 'real' => 'Bitget Real'] as $modeKey => $modeLabel): ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="account-mode"><input type="hidden" name="account_mode" value="<?= h($modeKey) ?>"><button class="<?= $accountMode === $modeKey ? '' : 'secondary' ?>" aria-pressed="<?= $accountMode === $modeKey ? 'true' : 'false' ?>" <?= !$isLocal ? 'disabled' : '' ?>><?= h($modeLabel) ?><?= $accountMode === $modeKey ? ' · выбран' : '' ?></button></form><?php endforeach; ?>
 </div>
-<?php if ($accountMode === 'paper'): ?><p class="note">Исполнитель сейчас действительно работает в Paper. Этот режим использует общий виртуальный баланс и публичные котировки.</p>
-<?php elseif ($accountMode === 'demo'): ?><p class="status warning">Выбран Bitget Demo, но торговый адаптер ещё не подключён к общему портфелю. Сейчас для Demo доступна только чтение и сверка аккаунта; запуск исполнителя заблокирован.</p>
-<?php else: ?><p class="status warning">Выбран Bitget Real, но общий портфель пока не связан с production адаптером. Запуск заблокирован до интеграции реальных ордеров, сверки позиций и восстановления после перезапуска. Сам выбор режима не отправляет ордера.</p><?php endif; ?></section>
+<?php if ($accountMode === 'paper'): ?><p class="note">Paper использует виртуальные позиции и публичные котировки; ордера на Bitget не отправляются.</p>
+<?php elseif ($accountMode === 'demo'): ?><p class="note">Demo отправляет ордера только в Bitget Demo с paptrading: 1. Перед запуском проверьте, что у выбранного аккаунта нет посторонних позиций и ордеров по портфельным тикерам.</p>
+<?php else: ?><p class="status warning">Real отправляет реальные USDT futures ордера. Для запуска обязательны производственный API ключ с правом торговли, BITGET_LIVE_TRADING_ENABLED=1 и точная строка подтверждения ниже.</p><?php endif; ?></section>
 <?php if (is_array($selectedFavorite)): $favoriteParams = is_array($selectedFavorite['params'] ?? null) ? $selectedFavorite['params'] : []; $favoriteName = (string) ($selectedFavorite['name'] ?? 'Избранное'); $favoriteKind = (string) ($selectedFavorite['type'] ?? '') === 'hedge' ? 'Хедж-пара' : 'Стратегия'; $favoriteTicker = $favoriteKind === 'Хедж-пара' ? 'Лонг ' . (string) ($favoriteParams['long_symbol'] ?? '—') . ' / шорт ' . (string) ($favoriteParams['short_symbol'] ?? '—') : (string) ($favoriteParams['symbol'] ?? '—'); ?>
 <section class="panel"><h2>Добавить запись из избранного</h2><p><strong><?= h($favoriteName) ?></strong> · <?= h($favoriteKind) ?> · <?= h($favoriteTicker) ?></p><p class="note">В общий портфель попадёт эта конфигурация; для хедж-пары обе ноги используют равные части её доли капитала.</p><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_favorite"><input type="hidden" name="favorite_id" value="<?= h($selectedFavoriteId) ?>"><button <?= !$isLocal ? 'disabled' : '' ?>>Добавить в общий портфель</button></form></section>
 <?php endif; ?>
 <section class="panel"><h2>Состояние исполнителя</h2><div class="grid">
 <div class="stat"><span>Процесс</span><strong><?= ($status['service']['running'] ?? false) ? (($status['service']['mode'] ?? '') === 'portfolio' ? 'Портфель работает' : 'Старая одиночная служба') : 'Остановлен' ?></strong></div>
-<div class="stat"><span>Режим</span><strong>Paper</strong></div><div class="stat"><span>Общий баланс</span><strong><?= h((string) ($status['balance_usdt'] ?? ($published['execution']['starting_balance_usdt'] ?? '—'))) ?> USDT</strong></div>
+<div class="stat"><span>Фактический режим</span><strong><?= h(['paper' => 'Paper', 'demo' => 'Bitget Demo', 'live' => 'Bitget Real'][$status['mode'] ?? 'paper'] ?? 'неизвестен') ?></strong></div><div class="stat"><span>Общий лимит портфеля</span><strong><?= h((string) ($status['initial_balance_usdt'] ?? ($published['execution']['starting_balance_usdt'] ?? '—'))) ?> USDT</strong></div>
 <div class="stat"><span>Реализованный результат</span><strong><?= h((string) ($status['realized_pnl_usdt'] ?? '0')) ?> USDT</strong></div>
 <div class="stat"><span>Плавающий результат</span><strong><?= h((string) ($status['unrealized_pnl_usdt'] ?? '0')) ?> USDT</strong></div>
-<div class="stat"><span>Paper сделки</span><strong><?= h((string) ($status['trades'] ?? 0)) ?></strong></div>
+<div class="stat"><span>Закрытые сделки</span><strong><?= h((string) ($status['trades'] ?? 0)) ?></strong></div>
 </div><p class="note">Стратегия: <?= h((string) ($published['release_id'] ?? 'не опубликована')) ?> · PID <?= h((string) ($status['service']['pid'] ?? '—')) ?> · открытых позиций: <?= h((string) ($status['open_positions'] ?? 0)) ?></p>
 <?php if (($status['portfolio_strategies'] ?? []) !== []): ?><div class="table-wrap"><table><thead><tr><th>Стратегия портфеля</th><th>Тип</th><th>Состояние</th><th>Тикеры</th></tr></thead><tbody><?php foreach ($status['portfolio_strategies'] as $portfolioStrategy): ?><tr><td><?= h((string) ($portfolioStrategy['name'] ?? $portfolioStrategy['strategy_id'])) ?></td><td><?= ($portfolioStrategy['kind'] ?? '') === 'hedge' ? 'Хедж' : 'Стратегия' ?></td><td><?= !empty($portfolioStrategy['enabled']) ? 'В работе' : 'Выключена' ?></td><td><?= h(implode(', ', array_map('strval', $portfolioStrategy['symbols'] ?? []))) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
 <?php if (is_array($published)): ?>
@@ -363,15 +393,15 @@ $postHidden = [
 </section>
 <?php else: ?><p class="status warning">Стратегия ещё не опубликована. Сначала выберите и опубликуйте её в блоке ниже.</p><?php endif; ?>
 <div class="actions">
-<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><button <?= !$isLocal || $accountMode !== 'paper' || (empty($status['portfolio_strategies']) && !is_array($published)) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? ((($status['service']['mode'] ?? '') === 'portfolio') ? 'Общий портфель уже запущен' : 'Остановите старую одиночную службу') : 'Запустить общий портфель' ?></button></form>
+<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><?php if ($accountMode === 'real'): ?><label class="field">Для реального запуска введите I_ACKNOWLEDGE_LIVE_ORDERS<input name="live_acknowledgement" autocomplete="off" required pattern="I_ACKNOWLEDGE_LIVE_ORDERS"></label><?php endif; ?><button <?= !$isLocal || (empty($status['portfolio_strategies']) && !is_array($published) && $accountMode === 'paper') || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? 'Портфель уже запущен' : ($accountMode === 'paper' ? 'Запустить Paper портфель' : ($accountMode === 'demo' ? 'Запустить Bitget Demo' : 'Запустить Bitget Real')) ?></button></form>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="stop"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Остановить процесс</button></form>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="<?= ($status['controls']['entries_paused'] ?? false) ? 'resume' : 'pause' ?>"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['controls']['entries_paused'] ?? false) ? 'Возобновить новые входы' : 'Приостановить новые входы' ?></button></form>
-<form method="post" onsubmit="return confirm('Закрыть все открытые paper позиции по ближайшим свежим котировкам?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="close"><button class="danger" <?= !$isLocal || !($status['service']['running'] ?? false) || ($status['open_positions'] ?? 0) < 1 ? 'disabled' : '' ?>>Закрыть paper позиции</button></form>
-</div><p class="note">«Остановить процесс» сохраняет состояние и оставляет виртуальные позиции открытыми. «Приостановить новые входы» оставляет работающий процесс и управление текущей позицией. Закрытие выполняется по следующей свежей котировке.</p></section>
+<form method="post" onsubmit="return confirm('Отправить ордера для закрытия всех открытых позиций выбранного режима?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="close"><button class="danger" <?= !$isLocal || !($status['service']['running'] ?? false) || ($status['open_positions'] ?? 0) < 1 ? 'disabled' : '' ?>><?= $accountMode === 'paper' ? 'Закрыть paper позиции' : 'Закрыть позиции на Bitget' ?></button></form>
+</div><p class="note">Остановка сохраняет локальные позиции и журнал ордеров. При Demo/Real новые входы блокируются командой «Приостановить», а закрытие проходит биржевым ордером с последующей сверкой.</p></section>
 
 <section class="panel"><h2>Сверка Bitget Demo</h2>
-<p class="note">Запрос только читает Demo аккаунт и сравнивает его с пустым локальным журналом Demo. Paper позиции хранятся отдельно. Если на бирже есть открытая позиция или ордер, он будет показан как расхождение. Проверка не отправляет и не закрывает ордера.</p>
-<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="demo-reconcile"><input type="hidden" name="symbol" value="<?= h($symbol) ?>"><button class="secondary" <?= !$isLocal ? 'disabled' : '' ?>>Проверить Demo аккаунт · <?= h($symbol) ?></button></form>
+<p class="note">Проверка читает Demo аккаунт и сравнивает его с сохранёнными Demo позициями и ордерами. Она не отправляет и не закрывает ордера. Для ручной сверки остановите Demo исполнитель.</p>
+<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="demo-reconcile"><input type="hidden" name="symbol" value="<?= h($symbol) ?>"><button class="secondary" <?= !$isLocal || (($status['service']['running'] ?? false) && ($status['service']['execution_mode'] ?? '') === 'demo') ? 'disabled' : '' ?>>Проверить Demo аккаунт и портфель</button></form>
 <?php if (is_array($demoReconciliation)): ?>
 <p class="status <?= !empty($demoReconciliation['matched']) ? 'success' : 'warning' ?>" role="status">
 <?= !empty($demoReconciliation['matched']) ? 'Совпадает' : 'Нужно проверить' ?> · проверено <?= h((string) ($demoReconciliation['checked_at_utc'] ?? '—')) ?> UTC

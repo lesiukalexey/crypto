@@ -12,14 +12,103 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
-from .contracts import load_strategy_release, release_digest
+from .contracts import Position, load_strategy_release, release_digest
 from .bitget_demo import BitgetDemoAdapter, BitgetAPIError
+from .bitget_production import BitgetProductionAdapter, LIVE_ORDER_ACKNOWLEDGEMENT, LIVE_SWITCH_ENV, LiveRiskSnapshot, LiveTradingDisabled
+from .exchange_portfolio import ExchangePortfolioExecutor
 from .market import BitgetPublicTickerPoller
-from .paper import PaperExecutor, PortfolioExecutor, SQLiteStateStore
+from .paper import KYIV, PaperExecutor, PortfolioExecutor, SQLiteStateStore
 from .pi_sync import pull_status as pi_pull_status, remote_stage_release, remote_status, stage_release as pi_stage_release
 from .service import read_json, service_status, set_controls, start_portfolio_service, start_service, stop_service
+
+
+def _load_private_environment(mode: str) -> dict[str, str]:
+    prefix = "BITGET_DEMO" if mode == "demo" else "BITGET_LIVE"
+    names = (f"{prefix}_API_KEY", f"{prefix}_API_SECRET", f"{prefix}_API_PASSPHRASE")
+    values = {name: os.getenv(name, "") for name in names}
+    env_file_name = "BITGET_DEMO_ENV_FILE" if mode == "demo" else "BITGET_LIVE_ENV_FILE"
+    env_file = os.getenv(env_file_name, "")
+    if not all(values.values()) and env_file:
+        path = Path(env_file)
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+            raise ValueError(f"{mode.title()} credentials file must be a regular file with owner-only permissions")
+        file_values: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith("#"):
+                continue
+            name, separator, value = line.partition("=")
+            if not separator or name in file_values or name not in names:
+                raise ValueError(f"{mode.title()} credentials file has an invalid format")
+            file_values[name] = value
+        values = {name: values[name] or file_values.get(name, "") for name in names}
+    if not all(values.values()):
+        raise ValueError(f"{mode.title()} API credentials are not configured for this local process")
+    return values
+
+
+def _make_exchange_adapter(mode: str, store: SQLiteStateStore, enable_live: bool):
+    if mode not in {"demo", "live"}:
+        raise ValueError("Exchange adapter mode must be Demo or Real")
+    rows = store.db.execute("SELECT payload FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
+    payloads = [json.loads(row["payload"]) for row in rows]
+    if not payloads:
+        raise ValueError("Add at least one strategy to the portfolio before starting exchange execution")
+    symbols = sorted({symbol for payload in payloads for symbol in payload["market"]["symbols"]})
+    credentials = _load_private_environment(mode)
+    if mode == "demo":
+        return BitgetDemoAdapter(
+            symbols,
+            api_key=credentials["BITGET_DEMO_API_KEY"],
+            secret=credentials["BITGET_DEMO_API_SECRET"],
+            passphrase=credentials["BITGET_DEMO_API_PASSPHRASE"],
+        )
+    if not enable_live:
+        raise LiveTradingDisabled("Starting Real execution requires the exact dashboard acknowledgement")
+    if os.getenv(LIVE_SWITCH_ENV) != "1":
+        raise LiveTradingDisabled(f"Real execution requires {LIVE_SWITCH_ENV}=1 in the executor environment")
+
+    risks = [payload["risk"] for payload in payloads]
+    account = store.account()
+    initial_balance = Decimal(account["initial_balance"] if account else "0")
+    risk_limits = {
+        "max_order_notional_usdt": str(max(Decimal(item["max_order_notional_usdt"]) for item in risks)),
+        "max_total_exposure_usdt": str(min(initial_balance, sum((Decimal(item["max_total_exposure_usdt"]) for item in risks), Decimal(0)))),
+        "max_daily_loss_usdt": str(sum((Decimal(item["max_daily_loss_usdt"]) for item in risks), Decimal(0))),
+        "max_open_positions": sum(int(item["max_open_positions"]) for item in risks),
+    }
+
+    def daily_risk_snapshot() -> LiveRiskSnapshot:
+        now_ms = int(time.time() * 1000)
+        account_row = store.account()
+        day = datetime.now(KYIV).date().isoformat()
+        realized_today = Decimal(account_row["daily_pnl"]) if account_row and account_row["day"] == day else Decimal(0)
+        unrealized = Decimal(0)
+        for position in store.db.execute("SELECT * FROM positions").fetchall():
+            quote_row = store.db.execute("SELECT bid,ask,ts FROM quotes WHERE symbol=? ORDER BY ts DESC LIMIT 1", (position["symbol"],)).fetchone()
+            if quote_row is None or now_ms - int(quote_row["ts"]) > 60_000:
+                raise RuntimeError("Fresh quote required for the live daily-risk snapshot")
+            close_price = Decimal(quote_row["ask"] if position["side"] == "short" else quote_row["bid"])
+            quantity, entry = Decimal(position["quantity"]), Decimal(position["entry_price"])
+            gross = quantity * (entry - close_price if position["side"] == "short" else close_price - entry)
+            unrealized += gross - Decimal(position["entry_fee"])
+        return LiveRiskSnapshot(realized_today + unrealized, now_ms)
+
+    max_slippage = max(int(Decimal(payload["execution"]["slippage_bps"])) for payload in payloads)
+    return BitgetProductionAdapter(
+        symbols,
+        risk_limits,
+        daily_risk_snapshot=daily_risk_snapshot,
+        api_key=credentials["BITGET_LIVE_API_KEY"],
+        secret=credentials["BITGET_LIVE_API_SECRET"],
+        passphrase=credentials["BITGET_LIVE_API_PASSPHRASE"],
+        allow_live_orders=True,
+        live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT,
+        max_slippage_bps=max_slippage,
+    )
 
 
 def main() -> int:
@@ -40,6 +129,8 @@ def main() -> int:
     portfolio_run.add_argument("--interval", type=float, default=5)
     portfolio_run.add_argument("--stale-seconds", type=int, default=30)
     portfolio_run.add_argument("--control")
+    portfolio_run.add_argument("--mode", choices=("paper", "demo", "live"), default="paper")
+    portfolio_run.add_argument("--enable-live", action="store_true", help="explicitly arm live mode; process switch is also required")
     status = commands.add_parser("status", help="show local paper executor state")
     status.add_argument("--state", required=True, help="SQLite state path")
     status.add_argument("--pid-file", help="managed service PID file")
@@ -59,12 +150,18 @@ def main() -> int:
     portfolio_add.add_argument("--release", required=True)
     portfolio_add.add_argument("--kind", choices=("strategy", "hedge"), default="strategy")
     portfolio_add.add_argument("--name", default="")
-    portfolio_start = commands.add_parser("portfolio-start", help="start the shared paper portfolio service")
+    portfolio_copy = commands.add_parser("portfolio-copy", help="copy missing strategy releases from another mode's portfolio")
+    portfolio_copy.add_argument("--state", required=True, help="target mode SQLite state")
+    portfolio_copy.add_argument("--source-state", required=True, help="source portfolio SQLite state")
+    portfolio_start = commands.add_parser("portfolio-start", help="start the shared portfolio service in Paper, Demo, or Real mode")
     for option in ("state", "control", "pid-file", "log"):
         portfolio_start.add_argument("--" + option, required=True)
     portfolio_start.add_argument("--interval", type=float, default=5)
+    portfolio_start.add_argument("--mode", choices=("paper", "demo", "live"), default="paper")
+    portfolio_start.add_argument("--enable-live", action="store_true", help="explicitly arm live mode")
     demo_reconcile = commands.add_parser("demo-reconcile", help="read-only reconciliation of a Bitget Demo account")
     demo_reconcile.add_argument("--symbols", required=True, help="comma-separated uppercase USDT-futures symbols")
+    demo_reconcile.add_argument("--state", help="Demo portfolio state used as the local reconciliation ledger")
     pi_status = commands.add_parser("pi-status", help="pull paper executor status over verified SSH")
     pi_status.add_argument("--target", required=True, help="SSH host alias from the local SSH config")
     pi_publish = commands.add_parser("pi-stage-release", help="send a validated paper strategy to Raspberry Pi over SSH")
@@ -78,32 +175,19 @@ def main() -> int:
     remote_stage_parser.add_argument("--release", required=True)
     args = parser.parse_args()
     if args.command == "demo-reconcile":
+        store = None
         try:
             symbols = [symbol.strip() for symbol in args.symbols.split(",") if symbol.strip()]
-            api_key = os.getenv("BITGET_DEMO_API_KEY", "")
-            secret = os.getenv("BITGET_DEMO_API_SECRET", "")
-            passphrase = os.getenv("BITGET_DEMO_API_PASSPHRASE", "")
-            env_file = os.getenv("BITGET_DEMO_ENV_FILE", "")
-            if not all((api_key, secret, passphrase)) and env_file:
-                path = Path(env_file)
-                metadata = path.lstat()
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
-                    raise ValueError("Demo credentials file must be a regular file with owner-only permissions")
-                values: dict[str, str] = {}
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if not line or line.startswith("#"):
-                        continue
-                    name, separator, value = line.partition("=")
-                    if not separator or name in values:
-                        raise ValueError("Demo credentials file has an invalid format")
-                    values[name] = value
-                api_key = api_key or values.get("BITGET_DEMO_API_KEY", "")
-                secret = secret or values.get("BITGET_DEMO_API_SECRET", "")
-                passphrase = passphrase or values.get("BITGET_DEMO_API_PASSPHRASE", "")
-            if not all((api_key, secret, passphrase)):
-                raise ValueError("Demo API credentials are not configured for this local process")
-            adapter = BitgetDemoAdapter(symbols, api_key=api_key, secret=secret, passphrase=passphrase)
-            result = adapter.reconcile(expected_positions=[], pending_orders=[])
+            if args.state:
+                store = SQLiteStateStore.read_only(args.state)
+                symbols = sorted(set(symbols) | {row[0] for row in store.db.execute("SELECT DISTINCT symbol FROM positions")})
+                expected = [Position(row["symbol"], row["side"], Decimal(row["quantity"]), Decimal(row["entry_price"])) for row in store.db.execute("SELECT symbol,side,quantity,entry_price FROM positions")]
+                pending = [(row["symbol"], row["client_order_id"]) for row in store.db.execute("SELECT symbol,client_order_id FROM exchange_orders WHERE status IN ('submitting','uncertain','submitted','partial')")]
+            else:
+                expected, pending = [], []
+            credentials = _load_private_environment("demo")
+            adapter = BitgetDemoAdapter(symbols, api_key=credentials["BITGET_DEMO_API_KEY"], secret=credentials["BITGET_DEMO_API_SECRET"], passphrase=credentials["BITGET_DEMO_API_PASSPHRASE"])
+            result = adapter.reconcile(expected_positions=expected, pending_orders=pending)
             report = {
                 "mode": "demo",
                 "checked_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -116,7 +200,7 @@ def main() -> int:
                 ],
                 "pending_orders": len(result.orders),
                 "fills": len(result.fills),
-                "basis": "empty_local_demo_ledger",
+                "basis": "local_demo_portfolio_ledger" if args.state else "empty_local_demo_ledger",
             }
             print(json.dumps(report, ensure_ascii=False))
             return 0 if result.matched else 1
@@ -128,6 +212,9 @@ def main() -> int:
                 "error": str(exc)[:500],
             }, ensure_ascii=False))
             return 1
+        finally:
+            if store is not None:
+                store.close()
     if args.command == "pi-status":
         try:
             print(json.dumps(pi_pull_status(args.target), ensure_ascii=False))
@@ -186,12 +273,36 @@ def main() -> int:
         finally:
             store.close()
         return 0
+    if args.command == "portfolio-copy":
+        source = target = None
+        try:
+            source = SQLiteStateStore(args.source_state)
+            target = SQLiteStateStore(args.state)
+            source_rows = source.db.execute("SELECT strategy_id,kind,payload,name FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
+            existing = {row[0] for row in target.db.execute("SELECT strategy_id FROM portfolio_strategies WHERE enabled=1")}
+            missing = [row for row in source_rows if row["strategy_id"] not in existing]
+            if missing and target.health()["open_positions"]:
+                raise ValueError("Close the selected mode's open positions before syncing newly added portfolio strategies")
+            for row in missing:
+                target.add_portfolio_strategy(json.loads(row["payload"]), kind=row["kind"], name=row["name"])
+            source_account, target_account = source.account(), target.account()
+            if target_account and source_account and not target.db.execute("SELECT 1 FROM positions LIMIT 1").fetchone():
+                target.db.execute("UPDATE account SET balance=?,initial_balance=? WHERE id=1", (source_account["initial_balance"], source_account["initial_balance"]))
+                target.db.commit()
+            print(json.dumps({"copied": len(missing), "strategies": len(source_rows)}))
+            return 0
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Could not copy portfolio strategies: {exc}", file=sys.stderr)
+            return 2
+        finally:
+            if source is not None: source.close()
+            if target is not None: target.close()
     if args.command == "portfolio-start":
         try:
-            print(json.dumps(start_portfolio_service(args.state, args.control, args.pid_file, args.log, args.interval)))
+            print(json.dumps(start_portfolio_service(args.state, args.control, args.pid_file, args.log, args.interval, mode=args.mode, enable_live=args.enable_live)))
             return 0
         except (ValueError, OSError, RuntimeError) as exc:
-            print(f"Could not start paper portfolio: {exc}", file=sys.stderr)
+            print(f"Could not start portfolio: {exc}", file=sys.stderr)
             return 2
     if args.command == "service-start":
         try:
@@ -222,7 +333,14 @@ def main() -> int:
         store = SQLiteStateStore(args.state)
         is_portfolio = args.command == "portfolio-run"
         release = None if is_portfolio else load_strategy_release(args.release)
-        executor = PortfolioExecutor(store, stale_after_seconds=args.stale_seconds) if is_portfolio else PaperExecutor(release, store, stale_after_seconds=args.stale_seconds)
+        mode = args.mode if is_portfolio else "paper"
+        if is_portfolio and mode == "paper":
+            executor = PortfolioExecutor(store, stale_after_seconds=args.stale_seconds)
+        elif is_portfolio:
+            executor = ExchangePortfolioExecutor(store, _make_exchange_adapter(mode, store, args.enable_live), mode=mode, stale_after_seconds=args.stale_seconds)
+        else:
+            executor = PaperExecutor(release, store, stale_after_seconds=args.stale_seconds)
+        store.db.execute("INSERT INTO runtime_meta(key,value) VALUES('execution_mode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (mode,)); store.db.commit()
         symbols = executor.symbols() if is_portfolio else release["market"]["symbols"]
         poller = BitgetPublicTickerPoller("USDT-FUTURES" if is_portfolio else release["market"]["category"], interval_seconds=args.interval)
         control_path = args.control or str(Path(args.state).with_suffix(".control.json"))
@@ -235,8 +353,8 @@ def main() -> int:
         signal.signal(signal.SIGINT, stop)
         signal.signal(signal.SIGTERM, stop)
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-        store.event("service_started", {"mode": "paper", "portfolio": is_portfolio})
-        print("Paper portfolio running; Ctrl+C to stop" if is_portfolio else f"Paper executor running for {release['release_id']} ({release_digest(release)}); Ctrl+C to stop")
+        store.event("service_started", {"mode": mode, "portfolio": is_portfolio})
+        print(f"{mode.title()} portfolio running; Ctrl+C to stop" if is_portfolio else f"Paper executor running for {release['release_id']} ({release_digest(release)}); Ctrl+C to stop")
         while not stopped:
             began = time.monotonic()
             try:
@@ -263,10 +381,10 @@ def main() -> int:
                 logging.exception("Public quote cycle failed")
                 store.event("market_data_error", {"message": str(exc)[:500]})
             time.sleep(max(0, args.interval - (time.monotonic() - began)))
-        store.event("service_stopped", {"mode": "paper"})
+        store.event("service_stopped", {"mode": mode})
         return 0
-    except (ValueError, OSError) as exc:
-        print(f"Paper executor error: {exc}", file=sys.stderr)
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(f"Autotrading executor error: {exc}", file=sys.stderr)
         return 2
     finally:
         if store is not None:

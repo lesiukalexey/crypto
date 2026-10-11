@@ -15,7 +15,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Callable, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -242,6 +242,31 @@ class BitgetDemoAdapter:
         maximum = _decimal(maximum_value, "maximum market order quantity")
         if quantity < minimum or quantity > maximum or quantity % step != 0:
             raise ValueError(f"Quantity for {symbol} violates Bitget contract size rules")
+
+    def normalize_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        """Round a proposed base quantity down to contract step and validate it."""
+        self._check_symbol(symbol)
+        response = self._request("GET", "/api/v2/mix/market/contracts", params={"productType": PRODUCT_TYPE, "symbol": symbol})
+        rows = response.get("data")
+        contract = next((row for row in rows if isinstance(row, dict) and row.get("symbol") == symbol), None) if isinstance(rows, list) else None
+        if contract is None:
+            raise BitgetAPIError("Bitget returned no demo contract metadata")
+        step = _decimal(contract.get("sizeMultiplier"), "contract size multiplier")
+        minimum = _decimal(contract.get("minTradeNum"), "minimum contract quantity")
+        maximum_value = contract.get("maxMarketOrderQty")
+        if not maximum_value:
+            query = urlencode(sorted({"productType": PRODUCT_TYPE, "symbol": symbol}.items()))
+            public_response = self._transport("GET", f"{API_BASE}/api/v2/mix/market/contracts?{query}", {"Accept": "application/json"}, None, self.timeout_seconds)
+            public_rows = public_response.get("data") if isinstance(public_response, dict) and public_response.get("code") == "00000" else None
+            public_contract = next((row for row in public_rows if isinstance(row, dict) and row.get("symbol") == symbol), None) if isinstance(public_rows, list) else None
+            maximum_value = public_contract.get("maxMarketOrderQty") if public_contract else None
+        maximum = _decimal(maximum_value, "maximum market order quantity")
+        normalized = (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
+        if normalized < minimum or normalized > maximum:
+            raise ValueError(f"Quantity for {symbol} violates Bitget contract size rules")
+        if normalized != quantity:
+            self._validate_contract_size(symbol, normalized)
+        return normalized
 
     def fills(self, symbol: str, order_id: str) -> tuple[dict[str, Any], ...]:
         self._check_symbol(symbol)

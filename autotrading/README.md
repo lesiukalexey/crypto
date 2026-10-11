@@ -55,10 +55,10 @@ will match the analytics backtest.
 
 ## Bitget demo adapter (API building block)
 
-`autotrading.bitget_demo.BitgetDemoAdapter` is a separate adapter for the
-Bitget Classic USDT futures demo environment. It is not wired into `paper-run`
-or the dashboard, so the existing service continues to place no exchange
-orders. The adapter has a fixed Bitget API host, always sends
+`autotrading.bitget_demo.BitgetDemoAdapter` is the exchange adapter for the
+Bitget Classic USDT futures demo environment. The shared portfolio runner uses
+it when the dashboard is set to **Bitget Demo**. The adapter has a fixed
+Bitget API host, always sends
 `paptrading: 1`, and accepts demo credentials only from the executor
 environment (`BITGET_DEMO_API_KEY`, `BITGET_DEMO_API_SECRET`,
 `BITGET_DEMO_API_PASSPHRASE`). Keep those variables in a protected local
@@ -101,35 +101,35 @@ as the same local web-server user; the PID file is checked against the actual
 and logs are stored in the per-user runtime directory with restrictive file
 permissions.
 
-The dashboard's **Сверка Bitget Demo** panel runs a read-only check against
-the selected symbol and compares the exchange with an empty local Demo ledger.
-It reports account mode issues, untracked positions and pending orders; it does
-not connect the paper executor to exchange execution. Configure
+The dashboard's **Сверка Bitget Demo** panel runs a read-only check against the
+portfolio's saved Demo ledger, including open positions and unresolved order
+IDs. Stop the Demo service before running this separate check. Configure
 `BITGET_DEMO_ENV_FILE` for the local web process to point at a regular,
 owner-only environment file with the three `BITGET_DEMO_API_*` variables. On a
 workstation, the page also checks for the protected file under
 `$HOME/.ai/home/.local/bitget-autotrading-demo.env`; on another machine, set the
 environment variable to that machine's protected path. The CLI check is
-`python3 -m autotrading demo-reconcile --symbols BTCUSDT`.
+`python3 -m autotrading demo-reconcile --symbols BTCUSDT --state /path/to/state-demo.sqlite`.
 
-## Bitget production adapter (disabled)
+## Bitget production adapter
 
 `BitgetProductionAdapter` is separate from the Demo adapter and reads only
 `BITGET_LIVE_API_KEY`, `BITGET_LIVE_API_SECRET`, and
 `BITGET_LIVE_API_PASSPHRASE`. It never adds `paptrading: 1`. Order submission
-is off by default and requires all three explicit gates: a caller-provided
-`allow_live_orders=True`, `BITGET_LIVE_TRADING_ENABLED=1`, and the exact
-`I_ACKNOWLEDGE_LIVE_ORDERS` acknowledgement. The environment switch is checked
-again at each submission. No production credentials are configured, and the
-dashboard and paper service do not construct this adapter.
+is off by default and requires independent gates: the managed service's
+`--enable-live` flag, `BITGET_LIVE_TRADING_ENABLED=1`, and the dashboard's exact
+`I_ACKNOWLEDGE_LIVE_ORDERS` confirmation for each start. The environment
+switch is checked again at each submission. The service reads only the
+separate production environment file; no production credential or live-order
+smoke test was used for this integration.
 
-The Autotrading page has a Paper / Bitget Demo / Bitget Real selector. It
-records the selected target in the browser session and clearly shows the
-executor's actual mode. Only Paper currently starts: Demo is limited to
-read-only reconciliation, and Demo/Real starts are rejected both in the UI and
-server action until the shared portfolio runner has exchange order lifecycle,
-account reconciliation, and restart recovery connected to those adapters.
-Selecting a mode does not enable or submit orders.
+The Autotrading page has a Paper / Bitget Demo / Bitget Real selector. The
+managed shared portfolio runner uses the selected adapter and mode-specific
+SQLite state; the page displays the executor's actual mode. Demo and Real
+orders are submitted only after position/order reconciliation, and local
+positions, fills, and realized PnL are updated only from exchange fills. A
+lost submission response is recovered through its deterministic client order
+ID. Paper continues to simulate fills from public quotes.
 
 The adapter requires a successful one-way/crossed reconciliation, validates
 the symbol/quantity and release risk limits, checks a fresh daily-loss snapshot
@@ -148,3 +148,29 @@ create such a key or activate live trading. See Bitget's
 [API key and security guidance](https://www.bitget.com/docs/classic/rest-api),
 [USDT futures order endpoint](https://www.bitget.com/api-doc/classic/contract/trade/Place-Order),
 and [futures market price endpoint](https://www.bitget.com/docs/catalog/classic-contract-market/classic-contract-market).
+
+## Запуск Demo и Real
+
+1. Добавьте в общий портфель нужные стратегии и хедж-пары из избранного. При
+   первом запуске Demo или Real включённые записи из Paper копируются в базу
+   выбранного режима.
+2. Для Demo сохраните три значения `BITGET_DEMO_API_*` в защищённый env-файл,
+   переведите аккаунт Bitget в one-way и crossed margin и проверьте, что на
+   тикерах портфеля нет посторонних позиций или ордеров. Выберите **Bitget
+   Demo** и нажмите запуск портфеля.
+3. Для Real отдельно настройте `BITGET_LIVE_API_KEY`,
+   `BITGET_LIVE_API_SECRET`, `BITGET_LIVE_API_PASSPHRASE` и включите
+   `BITGET_LIVE_TRADING_ENABLED=1` в окружении локального сервиса. Выберите
+   **Bitget Real**, введите точное подтверждение на форме запуска и запустите
+   портфель. Одно переключение режима не отправляет ордера.
+4. Проверяйте **Фактический режим**, открытые позиции, журнал и лог сервиса.
+   Приостановка блокирует новые входы. **Закрыть позиции на Bitget** отправляет
+   reduce-only ордера; дождитесь сверки фактических исполнений. Перед отдельной
+   ручной сверкой Demo остановите сервис.
+
+Биржевой исполнитель поддерживает только USDT futures в режимах one-way и
+crossed, без funding и мартингейла. Один тикер может принадлежать только одной
+активной стратегии, поскольку Bitget объединяет позиции в one-way режиме.
+Хедж-пара открывает и закрывает ноги последовательно. Если нога исполнена
+частично или соединение потеряно, новые ордера блокируются до сверки журнала с
+биржей; две ноги не являются атомарной парной заявкой.
