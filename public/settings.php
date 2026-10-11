@@ -90,20 +90,22 @@ $quoteSets = loadQuoteSets($config);
 </style>
 <style>
 .market-cap-status{margin:8px 0;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}.ticker-row-main{min-width:0}.ticker-cap-rank{margin-top:2px;color:#aebbe0;font-size:12px;font-variant-numeric:tabular-nums}.ticker-cap-unranked{color:var(--muted)}@media(max-width:600px){.ticker-row{gap:10px}.ticker-cap-rank{max-width:calc(100vw - 118px);overflow-wrap:anywhere}}
-.quote-sets-panel{padding:18px 20px}.quote-sets-panel h2{margin:2px 0 6px;font-size:20px}.quote-sets-intro{margin:0 0 14px;color:var(--muted);font-size:13px}.quote-set-create,.quote-set-add{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.quote-set-create input,.quote-set-add select{min-width:220px;padding:9px 11px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.quote-set-create button,.quote-set-add button{min-width:0;padding:9px 13px;border:0;border-radius:9px;background:#607df4;color:#fff;font:inherit;font-weight:700;cursor:pointer}.quote-set-list{display:grid;gap:12px;margin-top:16px}.quote-set-card{padding:14px;border:1px solid var(--line);border-radius:12px;background:#0e1527}.quote-set-card h3{margin:0 0 10px;font-size:16px}.quote-set-members{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px;padding:0;list-style:none}.quote-set-members li{display:inline-flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #34415e;border-radius:8px;color:#dce5ff;font-size:13px}.quote-set-remove{padding:0;border:0;background:none;color:#ff9eaa;font:inherit;cursor:pointer}.quote-set-empty{margin:0 0 12px;color:var(--muted);font-size:13px}.quote-set-status{min-height:20px;margin:10px 0 0;color:var(--muted);font-size:13px}.quote-set-status.error{color:#ff9eaa}@media(max-width:600px){.quote-sets-panel{padding:14px}.quote-set-create input,.quote-set-add select{min-width:0;width:100%}.quote-set-create button,.quote-set-add button{width:100%}}
+.quote-sets-panel{padding:18px 20px}.quote-sets-panel h2{margin:2px 0 6px;font-size:20px}.quote-sets-intro{margin:0 0 14px;color:var(--muted);font-size:13px}.quote-set-create,.quote-set-add{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.quote-set-create input,.quote-set-add select{min-width:220px;padding:9px 11px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.quote-set-create button,.quote-set-add button{min-width:0;padding:9px 13px;border:0;border-radius:9px;background:#607df4;color:#fff;font:inherit;font-weight:700;cursor:pointer}.quote-set-list{display:grid;gap:12px;margin-top:16px}.quote-set-card{padding:14px;border:1px solid var(--line);border-radius:12px;background:#0e1527}.quote-set-card h3{margin:0 0 10px;font-size:16px}.quote-set-members{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px;padding:0;list-style:none}.quote-set-members li{display:inline-flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #34415e;border-radius:8px;color:#dce5ff;font-size:13px}.quote-set-remove{padding:0;border:0;background:none;color:#ff9eaa;font:inherit;cursor:pointer}.quote-set-empty{margin:0 0 12px;color:var(--muted);font-size:13px}.quote-set-status{min-height:20px;margin:10px 0 0;color:var(--muted);font-size:13px}.quote-set-status.error{color:#ff9eaa}.ranking-cache-reset{padding:9px 13px;border:1px solid #6b5263;border-radius:9px;background:#211b2c;color:#f0d7e1;font:inherit;font-weight:700;cursor:pointer}.ranking-cache-reset:disabled{cursor:progress;opacity:.65}.ranking-cache-status{min-height:20px;margin:10px 0 0;color:var(--muted);font-size:13px}.ranking-cache-status.error{color:#ff9eaa}@media(max-width:600px){.quote-sets-panel{padding:14px}.quote-set-create input,.quote-set-add select{min-width:0;width:100%}.quote-set-create button,.quote-set-add button{width:100%}}
 .settings-subnav{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 4px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.settings-subnav a{padding:8px 13px;border-radius:8px;color:#b7c1d5;text-decoration:none}.settings-subnav a:hover,.settings-subnav a:focus-visible{background:#263968;color:#fff;outline:none}.settings-section{scroll-margin-top:18px}.settings-section>h2{margin:2px 0 8px;font-size:20px}@media(max-width:600px){.settings-subnav{width:100%}.settings-subnav a{flex:1;text-align:center}}
 </style>
 </head>
 <body><main class="wrap">
 <nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php" aria-current="page">Настройки</a></nav>
 <h1>Настройки</h1><p class="intro">Выключенные тикеры продолжают собираться и сохраняться в MySQL, но скрыты на других страницах и исключены из расчётов. История котировок и избранное остаются на месте.</p><p class="market-cap-status" id="market-cap-status" role="status" aria-live="polite">Загружаю капитализацию тикеров…</p>
-<nav class="settings-subnav" aria-label="Разделы настроек"><a href="#ticker-lists">Списки тикеров</a><a href="#active-tickers">Активные тикеры</a></nav>
+<nav class="settings-subnav" aria-label="Разделы настроек"><a href="#ticker-lists">Списки тикеров</a><a href="#active-tickers">Активные тикеры</a><a href="#ranking-cache">Кэш рейтингов</a></nav>
 <section class="panel quote-sets-panel settings-section" id="ticker-lists" aria-labelledby="quote-sets-heading"><h2 id="quote-sets-heading">Списки тикеров</h2><p class="quote-sets-intro">Создавайте списки и добавляйте в каждый нужные тикеры по одному.</p><form class="quote-set-create" id="quote-set-create"><input type="text" name="name" maxlength="100" placeholder="Название списка" aria-label="Название нового списка тикеров" required><button type="submit">Создать список</button></form><p class="quote-set-status" id="quote-set-status" role="status" aria-live="polite"></p><div class="quote-set-list" id="quote-set-list"></div></section>
 <section class="panel settings-section" id="active-tickers" aria-labelledby="active-tickers-heading"><h2 id="active-tickers-heading">Активные тикеры</h2>
 <?php foreach ($configuredSymbols as $symbol): $isEnabled = isset($enabledLookup[$symbol]); ?>
 <div class="ticker-row"><div class="ticker-row-main"><div class="ticker-name"><?= settingsH($symbol) ?></div><div class="ticker-cap-rank" data-market-cap-for="<?= settingsH($symbol) ?>">Загружаю капитализацию…</div><div class="ticker-state" data-state-for="<?= settingsH($symbol) ?>"><?= $isEnabled ? 'Включён' : 'Выключен' ?></div></div><label class="switch"><input type="checkbox" role="switch" data-symbol="<?= settingsH($symbol) ?>" aria-label="Участвует тикер <?= settingsH($symbol) ?>" <?= $isEnabled ? 'checked' : '' ?>><span class="switch-track"></span></label></div>
 <?php endforeach; ?>
-</section><p class="settings-status" id="settings-status" role="status" aria-live="polite"></p>
+</section>
+<section class="panel settings-section ranking-cache-panel" id="ranking-cache" aria-labelledby="ranking-cache-heading"><h2 id="ranking-cache-heading">Кэш рейтингов</h2><p class="quote-sets-intro">Остановить текущие расчёты и очистить очередь, затем сбросить кэш для всех периодов и списков тикеров. История котировок и сохранённые общие рейтинги останутся. После сброса обновите уже открытые страницы рейтингов.</p><button class="ranking-cache-reset" type="button" id="reset-ranking-cache">🧹 Сбросить кэш рейтингов по всем данным</button><p class="ranking-cache-status" id="ranking-cache-status" role="status" aria-live="polite"></p></section>
+<p class="settings-status" id="settings-status" role="status" aria-live="polite"></p>
 </main><script>
 const statusNode=document.querySelector('#settings-status');
 const quoteSetStatusNode=document.querySelector('#quote-set-status');
@@ -163,6 +165,30 @@ quoteSetListNode.addEventListener('submit',async event=>{
 quoteSetListNode.addEventListener('click',event=>{
     const button=event.target.closest('[data-remove-symbol]');if(!button)return;
     saveQuoteSetAction({action:'set_remove_symbol',set_id:button.dataset.setId,symbol:button.dataset.removeSymbol});
+});
+const rankingCacheResetButton=document.querySelector('#reset-ranking-cache');
+const rankingCacheStatusNode=document.querySelector('#ranking-cache-status');
+rankingCacheResetButton.addEventListener('click',async()=>{
+    rankingCacheResetButton.disabled=true;
+    rankingCacheResetButton.textContent='Сбрасываю…';
+    rankingCacheStatusNode.classList.remove('error');
+    rankingCacheStatusNode.textContent='Останавливаю расчёты и сбрасываю кэш рейтингов…';
+    let stopped=null;
+    try{
+        const stopResponse=await fetch('stop-ranking-jobs.php',{method:'POST',headers:{Accept:'application/json'},cache:'no-store'});
+        stopped=await stopResponse.json();
+        if(!stopResponse.ok||stopped.status!=='ready')throw new Error(stopped.message||'Не удалось остановить расчёты и очистить очередь.');
+        const resetResponse=await fetch('reset-strategy-ranking-cache.php',{method:'POST',headers:{Accept:'application/json'},cache:'no-store'});
+        const reset=await resetResponse.json();
+        if(!resetResponse.ok||reset.status!=='ready')throw new Error(reset.message||'Не удалось сбросить кэш рейтингов.');
+        rankingCacheStatusNode.textContent=`Расчёты остановлены: ${Number(stopped.stopped_processes)||0}; удалено из очереди: ${Number(stopped.cancelled_jobs)||0}. Кэш рейтингов сброшен для всех периодов и списков. Обновите открытые страницы рейтингов.`;
+    }catch(error){
+        rankingCacheStatusNode.textContent=stopped?.status==='ready'?'Расчёты остановлены, но кэш не сброшен: '+(error.message||'ошибка сброса кэша.'):(error.message||'Не удалось сбросить кэш рейтингов.');
+        rankingCacheStatusNode.classList.add('error');
+    }finally{
+        rankingCacheResetButton.disabled=false;
+        rankingCacheResetButton.textContent='🧹 Сбросить кэш рейтингов по всем данным';
+    }
 });
 const marketCapStatusNode=document.querySelector('#market-cap-status');
 const marketCapNumberFormat=new Intl.NumberFormat('ru-RU',{notation:'compact',maximumFractionDigits:1});

@@ -1074,13 +1074,13 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head .ranking-title-toggle{display:flex;align-items:center;gap:9px;flex:1;min-width:0;padding:0;border:0;border-radius:0;background:transparent;color:var(--text);font-size:17px;font-weight:700;text-align:left;cursor:pointer}.portfolio-ranking-head .ranking-title-toggle:hover{background:transparent;color:#b9c7ff}.ranking-disclosure-arrow{display:inline-block;flex:0 0 auto;font-size:13px;line-height:1;transform:rotate(90deg);transition:transform .16s ease}.ranking-title-toggle[aria-expanded="false"] .ranking-disclosure-arrow{transform:rotate(0deg)}.portfolio-ranking-head .refresh-symbols{margin-left:0}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
 .portfolio-ranking-diagnostics{margin:0 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#0c1222;color:var(--muted);font-size:13px;white-space:pre-line;font-variant-numeric:tabular-nums}
-.symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.symbol-select-block{display:grid;gap:6px}.symbol-select-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.symbol-select-heading label{color:var(--muted);font-size:13px}.symbol-select-heading button{padding:5px 10px;font-size:12px;white-space:nowrap}.reset-symbol-cache{flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:18px;line-height:1}.reset-symbol-cache:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}}
+.symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.symbol-select-block{display:grid;gap:6px}.symbol-select-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.symbol-select-heading label{color:var(--muted);font-size:13px}.symbol-select-heading button{padding:5px 10px;font-size:12px;white-space:nowrap}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}}
 .ranking-parameters{position:relative;--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{padding-right:44px;cursor:pointer;color:var(--text);font-weight:700}.reset-ranking-parameters{position:absolute;top:7px;right:12px;flex:0 0 36px;width:36px;height:36px;min-width:36px;padding:0;background:transparent;color:var(--muted);font-size:21px;line-height:1}.reset-ranking-parameters:hover{background:#273653;color:var(--text)}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-segment-editor{margin:10px 0}.ranking-segment-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px)) 36px;justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-segment-row>span{padding-bottom:11px;color:#b7c1d5;font-size:12px}.ranking-segment-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-segment-row input{width:100%;min-width:0}.ranking-segment-row button,.add-range-segment{min-width:36px;width:36px;padding:7px;background:#263653;color:#dce5ff}.ranking-segment-row button:disabled{opacity:.45;cursor:not-allowed}.add-range-segment{width:auto;min-width:0;margin:2px 0 10px}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}.ranking-segment-row{grid-template-columns:repeat(3,minmax(0,120px)) 36px}.ranking-segment-row>span{grid-column:1/-1;padding:0}.ranking-segment-row input{padding:9px 6px}}
 .martingale-block{flex-basis:100%;min-width:0;margin:4px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px}.martingale-block>summary{color:var(--text);font-weight:700;cursor:pointer}.martingale-controls{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin-top:12px}.martingale-block .field select{min-width:190px}.martingale-block #apply-martingale-settings{align-self:end;margin-bottom:1px}@media(max-width:600px){.martingale-block,.martingale-block .field{width:100%}.martingale-controls,.martingale-block .field{width:100%}.martingale-block .field select{width:100%}}
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
-.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .reset-symbol-cache,.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings,.favorite-readonly .collector-status{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
+.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings,.favorite-readonly .collector-status{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
 .ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}
 </style>
 </head><body><main class="wrap">
@@ -1120,7 +1120,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
 <input type="hidden" name="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>">
 <input type="hidden" name="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>">
-<div class="symbol-select-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><select name="symbol" id="symbol-select" required><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></div><button class="reset-symbol-cache" type="button" id="reset-symbol-cache" aria-label="Сбросить кэш рейтингов" title="Сбросить кэш рейтингов">🧹</button></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
+<div class="symbol-select-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><select name="symbol" id="symbol-select" required><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></div></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <div class="date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><div class="history-import-actions"><button class="history-import-button" type="button" id="import-selected-symbol" data-import-scope="symbol" title="Скачать минутные свечи выбранной пары из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>↻ <?= h($symbol) ?></button><button class="history-import-button" type="button" id="import-all-active-symbols" data-import-scope="all" title="Скачать минутные свечи всех активных пар из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>↻ Все активные пары</button></div><p class="history-import-status" id="history-import-status" data-status="" role="status" aria-live="polite"></p></div>
 
@@ -1175,7 +1175,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?= rankingSegmentEditor('Только Stop Loss (%)', 'loss', $rankingRanges['loss'], $defaultRankingRanges['loss'], true) ?>
 <p class="small-note">Для каждого параметра можно добавить несколько диапазонов. Внутри каждого задайте «от», «до» и шаг; граничные значения включаются.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 <p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Для исполнения используются действующие правила контракта Bitget (плечо 1×, шаг количества, минимумы и максимум рыночной заявки), комиссия за market/taker и указанное проскальзывание. К историческим сделкам применяются текущие правила контракта. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
-<section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты рейтинга и очищает очередь. «Остановить загрузку» прекращает загрузку исторических свечей. 🧹 дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="stop-history-import" type="button" id="stop-history-import" hidden>■ Остановить загрузку</button><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
+<section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты рейтинга и очищает очередь. «Остановить загрузку» прекращает загрузку исторических свечей. В «Настройках» можно дополнительно сбросить кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="stop-history-import" type="button" id="stop-history-import" hidden>■ Остановить загрузку</button><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><section class="ranking-history" id="portfolio-ranking-history" aria-live="polite" hidden><div class="ranking-history-header"><h3 class="ranking-history-title">Сохранённые общие рейтинги</h3><button class="ranking-history-delete" type="button" id="delete-portfolio-ranking-history" hidden>Удалить все</button></div><p class="ranking-history-status">Откройте вкладку, чтобы загрузить список расчётов для выбранного списка тикеров.</p></section><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head chart-info-line"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count" title="<?= $visibleQuoteCount ?> исходных снимков; <?= $chartPointCount ?> точек в графике"><?= $visibleQuoteCount ?> снимков<?php if ($chartPointCount < $visibleQuoteCount): ?> · график <?= $chartPointCount ?><?php endif; ?></span><span class="chart-info-item"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
 <?php if ($hasHistoricalCandles): ?><p class="hint">Исторические минутные свечи: Bid, Ask и Last восстановлены по цене Close; биржевой спред в этих данных отсутствует.</p><?php endif; ?>
@@ -1356,7 +1356,6 @@ async function loadCachedTickerBestResults() {
     } catch (_) {}
 }
 const refreshSymbolsButton = document.querySelector('#refresh-symbols');
-const resetSymbolCacheButton = document.querySelector('#reset-symbol-cache');
 const stopCalculationQueueButton = document.querySelector('#stop-calculation-queue');
 const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel');
 const portfolioRankingContent = document.querySelector('#portfolio-ranking-content');
@@ -2057,7 +2056,7 @@ function renderEntryOptions(entries, selected) {
 }
 let exitRankingRequestVersion = 0;
 let refreshAfterExitRanking = false;
-let isResettingSymbolCache = false;
+let rankingMaintenancePending = false;
 async function handleMartingaleSettingsChange() {
     const nextSettings = readAppliedMartingaleSettings();
     if (JSON.stringify(nextSettings) === JSON.stringify(lastMartingaleSettings) || martingaleSettingsResetPending) return;
@@ -2072,7 +2071,7 @@ async function handleMartingaleSettingsChange() {
     }
 
     martingaleSettingsResetPending = true;
-    isResettingSymbolCache = true;
+    rankingMaintenancePending = true;
     exitRankingRequestVersion++;
     replayRequest?.abort();
     resetPortfolioRankingForRelevantFilterChange();
@@ -2080,7 +2079,6 @@ async function handleMartingaleSettingsChange() {
     exitConfigSelect.disabled = true;
     martingaleControls.forEach(control => { control.disabled = true; });
     martingaleApplyButton.disabled = true;
-    resetSymbolCacheButton.disabled = true;
     stopCalculationQueueButton.disabled = true;
     martingaleCacheStatus.hidden = false;
     martingaleCacheStatus.textContent = 'Останавливаю старые расчёты и обновляю рейтинг мартингейла…';
@@ -2104,12 +2102,11 @@ async function handleMartingaleSettingsChange() {
         updateMartingaleInitialNotional();
         martingaleCacheStatus.textContent = (error.message || 'Не удалось сбросить предыдущие рейтинги') + '. Настройки восстановлены.';
     } finally {
-        isResettingSymbolCache = false;
+        rankingMaintenancePending = false;
         martingaleSettingsResetPending = false;
         entryConfigSelect.disabled = false;
         exitConfigSelect.disabled = false;
         martingaleControls.forEach(control => { control.disabled = false; });
-        resetSymbolCacheButton.disabled = false;
         stopCalculationQueueButton.disabled = false;
         updateMartingaleDraftState();
     }
@@ -2121,7 +2118,7 @@ martingaleApplyButton.addEventListener('click', () => {
 });
 const exitConfirmationSnapshotCounts = [1, 2, 3, 5, 10, 20, 30, 40, 60, 80];
 async function loadExitRanking(preferredExit = null, isPoll = false) {
-    if (isResettingSymbolCache) return;
+    if (rankingMaintenancePending) return;
     const params = new URLSearchParams(new FormData(filtersForm));
     if (!isPoll) params.set('retry_cancelled', '1');
     if (!isPoll) {
@@ -2153,7 +2150,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             const ranking = await response.json();
             return {snapshots, ranking, httpOk: response.ok};
         }));
-        if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
+        if (requestVersion !== exitRankingRequestVersion || rankingMaintenancePending) return;
 
         const pending = responses.filter(({ranking}) => ranking.status === 'pending');
         const elapsedSeconds = Math.max(0, ...responses.map(({ranking}) => Number(ranking.elapsed_seconds) || 0));
@@ -2274,7 +2271,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         }
         if (pending.length) {
             window.setTimeout(() => {
-                if (requestVersion === exitRankingRequestVersion && !isResettingSymbolCache) loadExitRanking(null, true);
+                if (requestVersion === exitRankingRequestVersion && !rankingMaintenancePending) loadExitRanking(null, true);
             }, 1500);
             return;
         }
@@ -2308,7 +2305,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         }
         void loadCachedTickerBestResults();
     } catch (_) {
-        if (requestVersion !== exitRankingRequestVersion || isResettingSymbolCache) return;
+        if (requestVersion !== exitRankingRequestVersion || rankingMaintenancePending) return;
         strategyRankingTimer.finish('Общее время до ошибки', {persist: false});
         exitConfigSelect.replaceChildren();
         const errorOption = document.createElement('option');
@@ -2322,61 +2319,9 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         }
     }
 }
-resetSymbolCacheButton.addEventListener('click', async () => {
-    if (isResettingSymbolCache) return;
-    isResettingSymbolCache = true;
-    let resetSucceeded = false;
-    let resetError = '';
-    let broomStoppedProcesses = 0;
-    let broomCancelledJobs = 0;
-    exitRankingRequestVersion++;
-    portfolioRankingRequestVersion++;
-    strategyRankingTimer.finish('Остановлено метлой', {persist: false});
-    portfolioRankingTimer.finish('Остановлено метлой');
-    refreshSymbolsButton.disabled = true;
-    portfolioRankingStatus.textContent = 'Останавливаю расчёты, очищаю очередь и сбрасываю кэш рейтингов…';
-    resetSymbolCacheButton.disabled = true;
-    stopCalculationQueueButton.disabled = true;
-    resetSymbolCacheButton.textContent = '…';
-    resetSymbolCacheButton.title = 'Сбрасываю кэш рейтингов…';
-    try {
-        const stopResponse = await fetch('stop-ranking-jobs.php', {
-            method: 'POST',
-            headers: {Accept: 'application/json'},
-            cache: 'no-store',
-        });
-        const stopped = await stopResponse.json();
-        if (!stopResponse.ok || stopped.status !== 'ready') throw new Error(stopped.message || 'Не удалось остановить расчёты и очистить очередь');
-        broomStoppedProcesses = Number(stopped.stopped_processes) || 0;
-        broomCancelledJobs = Number(stopped.cancelled_jobs) || 0;
-        const response = await fetch('reset-strategy-ranking-cache.php', {
-            method: 'POST',
-            headers: {Accept: 'application/json'},
-            cache: 'no-store',
-        });
-        const result = await response.json();
-        if (!response.ok || result.status !== 'ready') throw new Error(result.message || 'Не удалось сбросить кэш рейтингов');
-        rankingGenerationInput.value = result.generation;
-        resetSucceeded = true;
-        symbolSortMode.value = '';
-        const params = new URLSearchParams(new FormData(filtersForm));
-        history.replaceState(null, '', location.pathname + '?' + params.toString());
-    } catch (error) {
-        resetError = error.message || 'Не удалось сбросить кэш рейтингов';
-    } finally {
-        isResettingSymbolCache = false;
-        resetSymbolCacheButton.disabled = false;
-        stopCalculationQueueButton.disabled = false;
-        resetRefreshButton(resetSucceeded ? 'Расчёты остановлены, очередь очищена, кэш рейтингов сброшен.' : 'Не удалось остановить расчёты и сбросить кэш');
-        resetSymbolCacheButton.textContent = '🧹';
-        resetSymbolCacheButton.title = resetSucceeded
-            ? `Расчёты остановлены: ${broomStoppedProcesses}; удалено из очереди: ${broomCancelledJobs}. Кэш сброшен.`
-            : resetError || 'Остановить расчёты, очистить очередь и сбросить кэш рейтингов';
-    }
-});
 stopCalculationQueueButton.addEventListener('click', async () => {
-    if (isResettingSymbolCache) return;
-    isResettingSymbolCache = true;
+    if (rankingMaintenancePending) return;
+    rankingMaintenancePending = true;
     let stoppedProcesses = 0;
     let cancelledJobs = 0;
     let stopError = '';
@@ -2386,7 +2331,6 @@ stopCalculationQueueButton.addEventListener('click', async () => {
     portfolioRankingTimer.finish('Остановлено кнопкой очереди');
     refreshSymbolsButton.disabled = true;
     portfolioRankingStatus.textContent = 'Останавливаю расчёты и очищаю очередь…';
-    resetSymbolCacheButton.disabled = true;
     stopCalculationQueueButton.disabled = true;
     stopCalculationQueueButton.textContent = '…';
     stopCalculationQueueButton.title = 'Останавливаю расчёты и очищаю очередь…';
@@ -2405,8 +2349,7 @@ stopCalculationQueueButton.addEventListener('click', async () => {
     } catch (error) {
         stopError = error.message || 'Не удалось остановить расчёты и очистить очередь';
     } finally {
-        isResettingSymbolCache = false;
-        resetSymbolCacheButton.disabled = false;
+        rankingMaintenancePending = false;
         stopCalculationQueueButton.disabled = false;
         stopCalculationQueueButton.textContent = '↻';
         stopCalculationQueueButton.title = stopError || `Остановлено расчётов: ${stoppedProcesses}; удалено из очереди: ${cancelledJobs}. Кэш сохранён.`;
@@ -2998,7 +2941,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
     }
 }
 refreshSymbolsButton.addEventListener('click', () => {
-    if (isResettingSymbolCache) return;
+    if (rankingMaintenancePending) return;
     setPortfolioRankingCollapsed(false);
     symbolSortMode.value = 'profit';
     loadPortfolioRanking();
