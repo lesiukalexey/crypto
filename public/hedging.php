@@ -104,7 +104,7 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <style>
 :root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149;--green:#42d6a4;--red:#ff7188;--blue:#86a8ff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:none;margin:0 auto;padding:30px 20px}.page-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:14px}.eyebrow{color:#8ea5ff;text-transform:uppercase;letter-spacing:.13em;font-size:12px;font-weight:700}.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.panel{background:color-mix(in srgb,var(--panel) 95%,transparent);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px;box-shadow:0 18px 50px #0003}.filters{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.field{display:grid;gap:7px;color:var(--muted);font-size:13px;font-weight:600}.field select,.field input{font:inherit;color:var(--text);background:#0c1222;border:1px solid #34415e;border-radius:10px;padding:11px 13px;min-width:160px}.field.pair-field select{min-width:360px}.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:0 0 18px}.stat{background:#0c1222;border:1px solid var(--line);border-radius:12px;padding:13px 15px;min-width:0}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.gain{color:var(--green)}.loss{color:var(--red)}.chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}.chart-head h2{font-size:17px;margin:0}.count,.small-note,.status{color:var(--muted);font-size:13px}.legend{display:flex;gap:18px;flex-wrap:wrap;color:#b7c1d5;font-size:13px;margin:14px 0}.legend span{display:inline-flex;gap:7px;align-items:center}.dot{width:9px;height:9px;border-radius:50%}.chart-wrap{position:relative}#hedge-chart{width:100%;height:clamp(260px,38vw,520px);display:block;overflow:visible}#tooltip{position:absolute;display:none;z-index:2;pointer-events:none;min-width:190px;padding:10px 12px;border:1px solid #394765;border-radius:10px;background:#0b1020f2;font-size:12px;white-space:nowrap}.status.error{color:#ffb3bf}.empty{display:grid;place-items:center;min-height:230px;color:var(--muted);text-align:center;padding:20px}.small-note{margin:12px 0 0}@media(max-width:650px){.wrap{padding:22px 14px}.panel{padding:16px}.page-heading{align-items:flex-start}.field,.field select,.field input,.field.pair-field select{width:100%;min-width:0}.filters{align-items:stretch}.view-nav{width:100%}.view-nav a{flex:1;text-align:center}#hedge-chart{height:70vw}}
 .chart-mode{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.chart-mode button{border:1px solid #34415e;border-radius:9px;padding:9px 13px;background:#0c1222;color:#b7c1d5;font:inherit;cursor:pointer}.chart-mode button[aria-pressed="true"]{background:#263968;border-color:#5974bd;color:#fff}.chart-mode button:focus-visible{outline:2px solid #86a8ff;outline-offset:2px}
-.ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}
+.ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}.stat small{display:block;color:var(--muted);font-size:12px;font-weight:400;margin-top:3px}
 </style>
 </head>
 <body><main class="wrap">
@@ -141,6 +141,7 @@ let chartView=new URLSearchParams(location.search).get('chart_view')==='ticker'?
 const fmt=(n,d=4)=>Number(n).toLocaleString('ru-RU',{minimumFractionDigits:d,maximumFractionDigits:d});
 const money=n=>(Number(n)>0?'+':'')+fmt(n)+' USDT';
 const signed=(n,d=2)=>(Number(n)>0?'+':Number(n)<0?'−':'')+fmt(Math.abs(Number(n)),d);
+const durationLabel=milliseconds=>{let minutes=Math.floor(Math.max(0,Number(milliseconds))/60000);const days=Math.floor(minutes/1440);minutes%=1440;const hours=Math.floor(minutes/60);minutes%=60;const parts=[];if(days)parts.push(`${days} д`);if(hours)parts.push(`${hours} ч`);if(minutes)parts.push(`${minutes} мин`);return parts.join(' ')||'меньше минуты'};
 const pairRankingStatus=document.querySelector('#pair-ranking-status');
 let pairRankingRequest=0;
 const pairWasRequestedOnPageLoad=<?= $pairWasRequested ? 'true' : 'false' ?>;
@@ -160,17 +161,19 @@ function render(data){
   chartTitle.textContent=netView?'Чистая доходность по хеджированию':'Хеджирование между тикерами';
   chart.setAttribute('aria-label',netView?'График чистой доходности в USDT во времени':'График доходности лонга, шорта и общего баланса');
   chartModeButtons.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartView===(netView?'net':'ticker'))));
-  chartLegend.innerHTML=series.map(item=>`<span><i class="dot" style="background:${item.color}"></i>${item.label}</span>`).join('');
+  chartLegend.innerHTML=series.map(item=>`<span><i class="dot" style="background:${item.color}"></i>${item.label}</span>`).join('')+(netView?'<span><i class="dot" style="background:#86a8ff"></i>Максимум за период</span><span><i class="dot" style="background:#ff7188"></i>Снижение после максимума</span>':'');
   chartNote.textContent=netView
-    ? 'По вертикали — чистый результат в USDT с учётом комиссий открытия и расчётного закрытия. Позиции открываются на первом синхронизированном снимке выбранного периода.'
+    ? 'По вертикали — чистый результат в USDT с учётом комиссий открытия и расчётного закрытия. Синяя точка — максимум периода, красная линия — снижение до минимума после него. Позиции открываются на первом синхронизированном снимке.'
     : 'Индексы начинаются около 100. Общий баланс включает комиссии открытия и предполагаемого закрытия на последнем синхронизированном снимке.';
   const points=data.points||[];
+  const summary=data.summary;
   if(points.length<2){summaryNode.hidden=true;statusNode.textContent=data.message||'Недостаточно синхронизированных снимков для графика.';pointCount.textContent='';return}
   const width=Math.max(700,chart.clientWidth||1000),height=Math.max(260,chart.clientHeight||420),pad={l:96,r:28,t:24,b:44};
   chart.setAttribute('viewBox',`0 0 ${width} ${height}`);
   chart.setAttribute('preserveAspectRatio','none');
   const times=points.map(point=>Number(point.t));
   const values=points.flatMap(point=>series.map(item=>Number(point[item.key])));
+  if(netView){values.push(Number(data.summary.maximum_net_pnl),Number(data.summary.minimum_after_maximum_net_pnl));}
   const xmin=Math.min(...times),xmax=Math.max(...times),ymin=Math.min(...values),ymax=Math.max(...values);
   const range=netView?Math.max(Math.abs(ymax-ymin),Math.abs(ymin),Math.abs(ymax),0.01):Math.max(1,ymax-ymin);
   const low=netView?Math.min(0,ymin-range*.12):ymin-range*.12;
@@ -193,6 +196,18 @@ function render(data){
     const path=points.map((point,index)=>`${index?'L':'M'}${X(Number(point.t)).toFixed(2)},${Y(Number(point[item.key])).toFixed(2)}`).join(' ');
     add('path',{d:path,fill:'none',stroke:item.color,'stroke-width':item.key==='equity_index'||netView?3:2,'stroke-linejoin':'round','stroke-linecap':'round'});
   }
+  if(netView){
+    const peakX=X(Number(summary.maximum_time_ms)),peakY=Y(Number(summary.maximum_net_pnl));
+    const lowX=X(Number(summary.minimum_after_maximum_time_ms)),lowY=Y(Number(summary.minimum_after_maximum_net_pnl));
+    add('line',{x1:peakX,y1:peakY,x2:lowX,y2:lowY,stroke:'#ff7188','stroke-width':2,'stroke-dasharray':'5 4'});
+    const peakMarker=add('circle',{cx:peakX,cy:peakY,r:6,fill:'#86a8ff',stroke:'#0b1020','stroke-width':2});
+    const peakTitle=document.createElementNS(ns,'title');
+    peakTitle.textContent=`Максимум ${money(summary.maximum_net_pnl)} · ${new Date(summary.maximum_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев`;
+    peakMarker.append(peakTitle);
+    add('circle',{cx:lowX,cy:lowY,r:5,fill:'#ff7188',stroke:'#0b1020','stroke-width':2});
+    const labelX=peakX>width-pad.r-170?peakX-10:peakX+10;
+    add('text',{x:labelX,y:Math.max(pad.t+14,peakY-12),'text-anchor':labelX<peakX?'end':'start',fill:'#c7d5ff','font-size':12,'font-weight':700},'Максимум '+money(summary.maximum_net_pnl));
+  }
   const cursor=add('line',{y1:pad.t,y2:height-pad.b,stroke:'#d5defa','stroke-dasharray':'4 5',visibility:'hidden'});
   const hit=add('rect',{x:pad.l,y:pad.t,width:width-pad.l-pad.r,height:height-pad.t-pad.b,fill:'transparent'});
   hit.addEventListener('pointermove',event=>{
@@ -212,8 +227,12 @@ function render(data){
     tooltip.style.top=`${Math.max(2,event.clientY-rect.top-tooltip.offsetHeight-10)}px`;
   });
   hit.addEventListener('pointerleave',()=>{cursor.setAttribute('visibility','hidden');tooltip.style.display='none'});
-  const summary=data.summary,stat=(label,value,cls='')=>`<div class="stat"><span>${label}</span><strong class="${cls}">${value}</strong></div>`;
-  summaryNode.innerHTML=stat('Стартовый баланс',fmt(data.starting_balance,2)+' USDT')+stat('Лонг '+data.long_symbol,money(summary.long_pnl),Number(summary.long_pnl)>=0?'gain':'loss')+stat('Шорт '+data.short_symbol,money(summary.short_pnl),Number(summary.short_pnl)>=0?'gain':'loss')+stat('Общий итог',money(summary.net_pnl),Number(summary.net_pnl)>=0?'gain':'loss')+stat('Баланс после закрытия',fmt(summary.ending_balance,4)+' USDT')+stat('Размеры позиций',fmt(summary.long_notional,2)+' / '+fmt(summary.short_notional,2)+' USDT');
+  const stat=(label,value,cls='')=>`<div class="stat"><span>${label}</span><strong class="${cls}">${value}</strong></div>`;
+  const declineClass=Number(summary.decline_after_maximum)>0?'loss':'gain';
+  const maxTime=new Date(summary.maximum_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+  const lowTime=new Date(summary.minimum_after_maximum_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+  const declineDuration=durationLabel(Number(summary.minimum_after_maximum_time_ms)-Number(summary.maximum_time_ms));
+  summaryNode.innerHTML=stat('Стартовый баланс',fmt(data.starting_balance,2)+' USDT')+stat('Лонг '+data.long_symbol,money(summary.long_pnl),Number(summary.long_pnl)>=0?'gain':'loss')+stat('Шорт '+data.short_symbol,money(summary.short_pnl),Number(summary.short_pnl)>=0?'gain':'loss')+stat('Общий итог',money(summary.net_pnl),Number(summary.net_pnl)>=0?'gain':'loss')+`<div class="stat"><span>Максимум за период</span><strong>${money(summary.maximum_net_pnl)}</strong><small>${maxTime} · Киев</small></div>`+`<div class="stat"><span>Снижение после максимума</span><strong class="${declineClass}">${fmt(summary.decline_after_maximum,4)} USDT · ${fmt(summary.decline_after_maximum_percent,2)}%</strong><small>Длительность: ${declineDuration}<br>От стартового баланса · минимум ${money(summary.minimum_after_maximum_net_pnl)} · ${lowTime}</small></div>`+stat('Баланс после закрытия',fmt(summary.ending_balance,4)+' USDT')+stat('Размеры позиций',fmt(summary.long_notional,2)+' / '+fmt(summary.short_notional,2)+' USDT');
   summaryNode.hidden=false;
   statusNode.textContent=`Вход ${new Date(summary.entry_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · последний общий снимок ${new Date(summary.last_aligned_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · комиссия входа ${fmt(summary.entry_fees,4)} USDT`;
   const interval=value=>Number(value).toLocaleString('ru-RU',{maximumFractionDigits:2});

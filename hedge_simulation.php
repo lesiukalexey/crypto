@@ -20,6 +20,8 @@ function simulate_cross_hedge(
     $points = [];
     $firstPoint = null;
     $lastPoint = null;
+    $maximumPoint = null;
+    $minimumAfterMaximumPoint = null;
     $alignedPoints = 0;
     $chartPointLimit = 25000;
     $chartRangeStarts = [];
@@ -93,6 +95,12 @@ function simulate_cross_hedge(
         ];
         $firstPoint ??= $point;
         $lastPoint = $point;
+        if ($maximumPoint === null || $point['net_pnl'] > $maximumPoint['net_pnl']) {
+            $maximumPoint = $point;
+            $minimumAfterMaximumPoint = $point;
+        } elseif ($point['net_pnl'] < $minimumAfterMaximumPoint['net_pnl']) {
+            $minimumAfterMaximumPoint = $point;
+        }
         $alignedPoints++;
         $bucket = $chartEndMs > $chartStartMs
             ? (int) floor(($timestampMs - $chartStartMs) * ($chartPointLimit - 1) / ($chartEndMs - $chartStartMs))
@@ -122,6 +130,13 @@ function simulate_cross_hedge(
             'short_pnl' => $last['short_pnl'],
             'net_pnl' => $last['net_pnl'],
             'ending_balance' => $startingBalance + $last['net_pnl'],
+            'maximum_net_pnl' => $maximumPoint['net_pnl'],
+            'maximum_time_ms' => $maximumPoint['t'],
+            'minimum_after_maximum_net_pnl' => $minimumAfterMaximumPoint['net_pnl'],
+            'minimum_after_maximum_time_ms' => $minimumAfterMaximumPoint['t'],
+            'decline_after_maximum' => $maximumPoint['net_pnl'] - $minimumAfterMaximumPoint['net_pnl'],
+            'decline_after_maximum_percent' => ($maximumPoint['net_pnl'] - $minimumAfterMaximumPoint['net_pnl'])
+                / $startingBalance * 100.0,
             'entry_fees' => $entry['long_entry_fee'] + $entry['short_entry_fee'],
             'estimated_exit_fees' => (
                 (float) $last['long_close'] * $entry['long_quantity']

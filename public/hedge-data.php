@@ -119,7 +119,11 @@ try {
     $summary = $simulation['summary'];
     $summary['entry_fees'] = round($summary['entry_fees'], 10);
     $summary['estimated_exit_fees'] = round($summary['estimated_exit_fees'], 10);
-    foreach (['long_notional', 'short_notional', 'long_quantity', 'short_quantity', 'long_pnl', 'short_pnl', 'net_pnl', 'ending_balance'] as $field) {
+    foreach ([
+        'long_notional', 'short_notional', 'long_quantity', 'short_quantity', 'long_pnl', 'short_pnl',
+        'net_pnl', 'ending_balance', 'maximum_net_pnl', 'minimum_after_maximum_net_pnl',
+        'decline_after_maximum', 'decline_after_maximum_percent',
+    ] as $field) {
         $summary[$field] = round($summary[$field], 10);
     }
     $points = $simulation['points'];
