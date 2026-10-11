@@ -17,9 +17,9 @@ from pathlib import Path
 from .contracts import load_strategy_release, release_digest
 from .bitget_demo import BitgetDemoAdapter, BitgetAPIError
 from .market import BitgetPublicTickerPoller
-from .paper import PaperExecutor, SQLiteStateStore
+from .paper import PaperExecutor, PortfolioExecutor, SQLiteStateStore
 from .pi_sync import pull_status as pi_pull_status, remote_stage_release, remote_status, stage_release as pi_stage_release
-from .service import read_json, service_status, set_controls, start_service, stop_service
+from .service import read_json, service_status, set_controls, start_portfolio_service, start_service, stop_service
 
 
 def main() -> int:
@@ -35,6 +35,11 @@ def main() -> int:
     run.add_argument("--interval", type=float, default=5, help="public ticker polling interval in seconds")
     run.add_argument("--stale-seconds", type=int, default=30, help="maximum accepted quote age")
     run.add_argument("--control", help="local JSON control file")
+    portfolio_run = commands.add_parser("portfolio-run", help="run all local paper strategies against one shared account")
+    portfolio_run.add_argument("--state", required=True)
+    portfolio_run.add_argument("--interval", type=float, default=5)
+    portfolio_run.add_argument("--stale-seconds", type=int, default=30)
+    portfolio_run.add_argument("--control")
     status = commands.add_parser("status", help="show local paper executor state")
     status.add_argument("--state", required=True, help="SQLite state path")
     status.add_argument("--pid-file", help="managed service PID file")
@@ -49,6 +54,15 @@ def main() -> int:
     control = commands.add_parser("control", help="pause entries or close paper positions")
     control.add_argument("--control", required=True)
     control.add_argument("action", choices=("pause_entries", "resume_entries", "close_positions"))
+    portfolio_add = commands.add_parser("portfolio-add", help="add a validated paper strategy to the shared account")
+    portfolio_add.add_argument("--state", required=True)
+    portfolio_add.add_argument("--release", required=True)
+    portfolio_add.add_argument("--kind", choices=("strategy", "hedge"), default="strategy")
+    portfolio_add.add_argument("--name", default="")
+    portfolio_start = commands.add_parser("portfolio-start", help="start the shared paper portfolio service")
+    for option in ("state", "control", "pid-file", "log"):
+        portfolio_start.add_argument("--" + option, required=True)
+    portfolio_start.add_argument("--interval", type=float, default=5)
     demo_reconcile = commands.add_parser("demo-reconcile", help="read-only reconciliation of a Bitget Demo account")
     demo_reconcile.add_argument("--symbols", required=True, help="comma-separated uppercase USDT-futures symbols")
     pi_status = commands.add_parser("pi-status", help="pull paper executor status over verified SSH")
@@ -164,6 +178,21 @@ def main() -> int:
         finally:
             store.close()
         return 0
+    if args.command == "portfolio-add":
+        store = SQLiteStateStore(args.state)
+        try:
+            digest = store.add_portfolio_strategy(load_strategy_release(args.release), kind=args.kind, name=args.name)
+            print(json.dumps({"added": True, "strategy_id": digest, "kind": args.kind}))
+        finally:
+            store.close()
+        return 0
+    if args.command == "portfolio-start":
+        try:
+            print(json.dumps(start_portfolio_service(args.state, args.control, args.pid_file, args.log, args.interval)))
+            return 0
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"Could not start paper portfolio: {exc}", file=sys.stderr)
+            return 2
     if args.command == "service-start":
         try:
             print(json.dumps(start_service(args.release, args.state, args.control, args.pid_file, args.log, args.interval)))
@@ -190,10 +219,12 @@ def main() -> int:
         return 0
     store = None
     try:
-        release = load_strategy_release(args.release)
         store = SQLiteStateStore(args.state)
-        executor = PaperExecutor(release, store, stale_after_seconds=args.stale_seconds)
-        poller = BitgetPublicTickerPoller(release["market"]["category"], interval_seconds=args.interval)
+        is_portfolio = args.command == "portfolio-run"
+        release = None if is_portfolio else load_strategy_release(args.release)
+        executor = PortfolioExecutor(store, stale_after_seconds=args.stale_seconds) if is_portfolio else PaperExecutor(release, store, stale_after_seconds=args.stale_seconds)
+        symbols = executor.symbols() if is_portfolio else release["market"]["symbols"]
+        poller = BitgetPublicTickerPoller("USDT-FUTURES" if is_portfolio else release["market"]["category"], interval_seconds=args.interval)
         control_path = args.control or str(Path(args.state).with_suffix(".control.json"))
         stopped = False
 
@@ -204,20 +235,26 @@ def main() -> int:
         signal.signal(signal.SIGINT, stop)
         signal.signal(signal.SIGTERM, stop)
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-        store.event("service_started", {"mode": "paper", "release_id": release["release_id"], "digest": release_digest(release)})
-        print(f"Paper executor running for {release['release_id']} ({release_digest(release)}); Ctrl+C to stop")
+        store.event("service_started", {"mode": "paper", "portfolio": is_portfolio})
+        print("Paper portfolio running; Ctrl+C to stop" if is_portfolio else f"Paper executor running for {release['release_id']} ({release_digest(release)}); Ctrl+C to stop")
         while not stopped:
             began = time.monotonic()
             try:
                 controls = read_json(control_path, {"entries_paused": False, "close_positions": False})
                 close_requested = bool(controls.get("close_positions"))
+                if is_portfolio:
+                    executor.refresh()
                 executor.set_controls(entries_paused=bool(controls.get("entries_paused")), close_positions=close_requested)
-                quotes = poller.fetch(release["market"]["symbols"])
+                symbols = executor.symbols() if is_portfolio else release["market"]["symbols"]
+                quotes = poller.fetch(symbols)
                 received = {quote.symbol for quote in quotes}
-                for missing in set(release["market"]["symbols"]) - received:
+                for missing in set(symbols) - received:
                     store.event("missing_quote", {"reason": "ticker_missing_from_response"}, missing)
-                for quote in quotes:
-                    executor.on_quote(quote)
+                if is_portfolio:
+                    executor.on_quotes(quotes)
+                else:
+                    for quote in quotes:
+                        executor.on_quote(quote)
                 if close_requested and store.health()["open_positions"] == 0:
                     controls["close_positions"] = False
                     from .service import write_json_atomic

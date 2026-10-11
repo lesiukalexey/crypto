@@ -31,13 +31,33 @@ class SQLiteStateStore:
           CREATE TABLE IF NOT EXISTS runtime_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS quotes(symbol TEXT NOT NULL, ts INTEGER NOT NULL, bid TEXT NOT NULL, ask TEXT NOT NULL, last TEXT NOT NULL, PRIMARY KEY(symbol,ts));
           CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, type TEXT NOT NULL, symbol TEXT, payload TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS positions(symbol TEXT PRIMARY KEY, side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, entry_fee TEXT NOT NULL, entry_ts INTEGER NOT NULL, pending_exit TEXT, pending_count INTEGER NOT NULL DEFAULT 0);
-          CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, exit_price TEXT NOT NULL, entry_ts INTEGER NOT NULL, exit_ts INTEGER NOT NULL, pnl TEXT NOT NULL, release_digest TEXT NOT NULL DEFAULT '');
-          CREATE TABLE IF NOT EXISTS account(id INTEGER PRIMARY KEY CHECK(id=1), balance TEXT NOT NULL, realized_pnl TEXT NOT NULL, day TEXT NOT NULL, daily_pnl TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS positions(strategy_id TEXT NOT NULL, symbol TEXT NOT NULL, leg TEXT NOT NULL DEFAULT 'single', side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, entry_fee TEXT NOT NULL, entry_ts INTEGER NOT NULL, pending_exit TEXT, pending_count INTEGER NOT NULL DEFAULT 0, release_digest TEXT NOT NULL DEFAULT '', PRIMARY KEY(strategy_id,symbol,leg));
+          CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, exit_price TEXT NOT NULL, entry_ts INTEGER NOT NULL, exit_ts INTEGER NOT NULL, pnl TEXT NOT NULL, release_digest TEXT NOT NULL DEFAULT '', strategy_id TEXT NOT NULL DEFAULT 'legacy', leg TEXT NOT NULL DEFAULT 'single');
+          CREATE TABLE IF NOT EXISTS account(id INTEGER PRIMARY KEY CHECK(id=1), balance TEXT NOT NULL, realized_pnl TEXT NOT NULL, day TEXT NOT NULL, daily_pnl TEXT NOT NULL, initial_balance TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS portfolio_strategies(strategy_id TEXT PRIMARY KEY, kind TEXT NOT NULL, digest TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, added_at_ms INTEGER NOT NULL, name TEXT NOT NULL DEFAULT '');
         """)
+        position_columns = {row[1] for row in self.db.execute("PRAGMA table_info(positions)")}
+        if "strategy_id" not in position_columns:
+            self.db.execute("ALTER TABLE positions RENAME TO positions_single_strategy")
+            self.db.execute("CREATE TABLE positions(strategy_id TEXT NOT NULL, symbol TEXT NOT NULL, leg TEXT NOT NULL DEFAULT 'single', side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, entry_fee TEXT NOT NULL, entry_ts INTEGER NOT NULL, pending_exit TEXT, pending_count INTEGER NOT NULL DEFAULT 0, release_digest TEXT NOT NULL DEFAULT '', PRIMARY KEY(strategy_id,symbol,leg))")
+            active = self.db.execute("SELECT value FROM runtime_meta WHERE key='active_release_digest'").fetchone()
+            strategy_id = str(active[0]) if active else "legacy"
+            self.db.execute("INSERT INTO positions(strategy_id,symbol,leg,side,quantity,entry_price,entry_fee,entry_ts,pending_exit,pending_count,release_digest) SELECT ?,symbol,'single',side,quantity,entry_price,entry_fee,entry_ts,pending_exit,pending_count,? FROM positions_single_strategy", (strategy_id, strategy_id if strategy_id != "legacy" else ""))
+            self.db.execute("DROP TABLE positions_single_strategy")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(trades)")}
         if "release_digest" not in columns:
             self.db.execute("ALTER TABLE trades ADD COLUMN release_digest TEXT NOT NULL DEFAULT ''")
+        if "strategy_id" not in columns:
+            self.db.execute("ALTER TABLE trades ADD COLUMN strategy_id TEXT NOT NULL DEFAULT 'legacy'")
+        if "leg" not in columns:
+            self.db.execute("ALTER TABLE trades ADD COLUMN leg TEXT NOT NULL DEFAULT 'single'")
+        account_columns = {row[1] for row in self.db.execute("PRAGMA table_info(account)")}
+        if "initial_balance" not in account_columns:
+            self.db.execute("ALTER TABLE account ADD COLUMN initial_balance TEXT NOT NULL DEFAULT '0'")
+            self.db.execute("UPDATE account SET initial_balance=balance WHERE initial_balance='0'")
+        portfolio_columns = {row[1] for row in self.db.execute("PRAGMA table_info(portfolio_strategies)")}
+        if "name" not in portfolio_columns:
+            self.db.execute("ALTER TABLE portfolio_strategies ADD COLUMN name TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
     @classmethod
@@ -59,9 +79,9 @@ class SQLiteStateStore:
         if active and active["digest"] != digest and self.db.execute("SELECT COUNT(*) FROM positions").fetchone()[0]:
             raise ValueError("Cannot switch strategy release while paper positions are open")
         if active and active["digest"] != digest:
-            self.db.execute("UPDATE account SET balance=?,realized_pnl='0',daily_pnl='0',day=? WHERE id=1", (payload["execution"]["starting_balance_usdt"], datetime.now(KYIV).date().isoformat()))
+            self.db.execute("UPDATE account SET balance=?,initial_balance=?,realized_pnl='0',daily_pnl='0',day=? WHERE id=1", (payload["execution"]["starting_balance_usdt"], payload["execution"]["starting_balance_usdt"], datetime.now(KYIV).date().isoformat()))
         self.db.execute("INSERT INTO releases VALUES(?,?,?) ON CONFLICT(digest) DO UPDATE SET activated_at_ms=excluded.activated_at_ms", (digest, json.dumps(payload, sort_keys=True), int(time.time() * 1000)))
-        self.db.execute("INSERT OR IGNORE INTO account VALUES(1,?,?,?,?)", (payload["execution"]["starting_balance_usdt"], "0", datetime.now(KYIV).date().isoformat(), "0"))
+        self.db.execute("INSERT OR IGNORE INTO account(id,balance,realized_pnl,day,daily_pnl,initial_balance) VALUES(1,?,?,?,?,?)", (payload["execution"]["starting_balance_usdt"], "0", datetime.now(KYIV).date().isoformat(), "0", payload["execution"]["starting_balance_usdt"]))
         self.db.execute("INSERT INTO runtime_meta VALUES('active_release_digest',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (digest,))
         self.db.commit()
         return digest
@@ -83,20 +103,53 @@ class SQLiteStateStore:
         rows = self.db.execute("SELECT * FROM quotes WHERE symbol=? AND ts<? ORDER BY ts DESC LIMIT ?", (symbol, before, limit)).fetchall()
         return [Quote(row["symbol"], Decimal(row["bid"]), Decimal(row["ask"]), Decimal(row["last"]), row["ts"]) for row in reversed(rows)]
 
-    def position(self, symbol: str) -> sqlite3.Row | None:
-        return self.db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
+    def position(self, symbol: str, strategy_id: str | None = None, leg: str = "single") -> sqlite3.Row | None:
+        if strategy_id is None:
+            return self.db.execute("SELECT * FROM positions WHERE symbol=? ORDER BY entry_ts LIMIT 1", (symbol,)).fetchone()
+        return self.db.execute("SELECT * FROM positions WHERE symbol=? AND strategy_id=? AND leg=?", (symbol, strategy_id, leg)).fetchone()
 
-    def open_position(self, symbol: str, side: str, quantity: Decimal, price: Decimal, fee: Decimal, ts: int) -> None:
-        self.db.execute("INSERT INTO positions(symbol,side,quantity,entry_price,entry_fee,entry_ts) VALUES(?,?,?,?,?,?)", (symbol, side, str(quantity), str(price), str(fee), ts))
+    def add_portfolio_strategy(self, release: dict[str, Any], *, kind: str = "strategy", name: str = "") -> str:
+        payload = PaperExecutor.validate_release(release)
+        digest = release_digest(payload)
+        serialized = json.dumps(payload, sort_keys=True)
+        row = self.db.execute("SELECT initial_balance FROM account WHERE id=1").fetchone()
+        if row is None:
+            starting = payload["execution"]["starting_balance_usdt"]
+            self.db.execute("INSERT INTO account(id,balance,realized_pnl,day,daily_pnl,initial_balance) VALUES(1,?,'0',?,'0',?)", (starting, datetime.now(KYIV).date().isoformat(), starting))
+        self.db.execute("INSERT INTO releases(digest,payload,activated_at_ms) VALUES(?,?,?) ON CONFLICT(digest) DO NOTHING", (digest, serialized, int(time.time() * 1000)))
+        self.db.execute("INSERT INTO portfolio_strategies(strategy_id,kind,digest,payload,enabled,added_at_ms,name) VALUES(?,?,?,?,1,?,?) ON CONFLICT(strategy_id) DO UPDATE SET enabled=1,name=excluded.name", (digest, kind, digest, serialized, int(time.time() * 1000), name or payload["release_id"]))
+        self.db.commit()
+        return digest
+
+    def open_position(self, symbol: str, side: str, quantity: Decimal, price: Decimal, fee: Decimal, ts: int, strategy_id: str = "legacy", leg: str = "single", digest: str = "") -> None:
+        self.db.execute("INSERT INTO positions(strategy_id,symbol,leg,side,quantity,entry_price,entry_fee,entry_ts,release_digest) VALUES(?,?,?,?,?,?,?,?,?)", (strategy_id, symbol, leg, side, str(quantity), str(price), str(fee), ts, digest))
         self.db.commit()
 
-    def update_pending(self, symbol: str, kind: str | None, count: int) -> None:
-        self.db.execute("UPDATE positions SET pending_exit=?,pending_count=? WHERE symbol=?", (kind, count, symbol)); self.db.commit()
+    def open_hedge_positions(self, positions: list[tuple[str, str, str, Decimal, Decimal, Decimal, int]], strategy_id: str, digest: str) -> None:
+        with self.db:
+            self.db.executemany("INSERT INTO positions(strategy_id,symbol,leg,side,quantity,entry_price,entry_fee,entry_ts,release_digest) VALUES(?,?,?,?,?,?,?,?,?)", [(strategy_id, symbol, leg, side, str(quantity), str(price), str(fee), ts, digest) for symbol, leg, side, quantity, price, fee, ts in positions])
+
+    def close_hedge_positions(self, trades: list[tuple[sqlite3.Row, Quote, Decimal, Decimal]]) -> Decimal:
+        total_pnl = sum((trade[3] for trade in trades), Decimal(0))
+        with self.db:
+            account = self.account()
+            day = datetime.fromtimestamp(max(item[1].timestamp_ms for item in trades) / 1000, KYIV).date().isoformat()
+            daily = Decimal(account["daily_pnl"]) + total_pnl if account["day"] == day else total_pnl
+            for pos, quote, price, pnl in trades:
+                self.db.execute("INSERT INTO trades(symbol,side,quantity,entry_price,exit_price,entry_ts,exit_ts,pnl,release_digest,strategy_id,leg) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (pos["symbol"], pos["side"], pos["quantity"], pos["entry_price"], str(price), pos["entry_ts"], quote.timestamp_ms, str(pnl), pos["release_digest"], pos["strategy_id"], pos["leg"]))
+                self.db.execute("DELETE FROM positions WHERE strategy_id=? AND symbol=? AND leg=?", (pos["strategy_id"], pos["symbol"], pos["leg"]))
+            self.db.execute("UPDATE account SET balance=?,realized_pnl=?,daily_pnl=?,day=? WHERE id=1", (str(Decimal(account["balance"]) + total_pnl), str(Decimal(account["realized_pnl"]) + total_pnl), str(daily), day))
+        return total_pnl
+
+    def update_pending(self, symbol: str, kind: str | None, count: int, strategy_id: str = "legacy", leg: str = "single") -> None:
+        self.db.execute("UPDATE positions SET pending_exit=?,pending_count=? WHERE symbol=? AND strategy_id=? AND leg=?", (kind, count, symbol, strategy_id, leg)); self.db.commit()
 
     def close_position(self, pos: sqlite3.Row, quote: Quote, price: Decimal, pnl: Decimal) -> None:
-        active = self.db.execute("SELECT value FROM runtime_meta WHERE key='active_release_digest'").fetchone()
-        self.db.execute("INSERT INTO trades(symbol,side,quantity,entry_price,exit_price,entry_ts,exit_ts,pnl,release_digest) VALUES(?,?,?,?,?,?,?,?,?)", (pos["symbol"], pos["side"], pos["quantity"], pos["entry_price"], str(price), pos["entry_ts"], quote.timestamp_ms, str(pnl), active["value"] if active else ""))
-        self.db.execute("DELETE FROM positions WHERE symbol=?", (pos["symbol"],))
+        digest = pos["release_digest"] if "release_digest" in pos.keys() else ""
+        strategy_id = pos["strategy_id"] if "strategy_id" in pos.keys() else "legacy"
+        leg = pos["leg"] if "leg" in pos.keys() else "single"
+        self.db.execute("INSERT INTO trades(symbol,side,quantity,entry_price,exit_price,entry_ts,exit_ts,pnl,release_digest,strategy_id,leg) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (pos["symbol"], pos["side"], pos["quantity"], pos["entry_price"], str(price), pos["entry_ts"], quote.timestamp_ms, str(pnl), digest, strategy_id, leg))
+        self.db.execute("DELETE FROM positions WHERE symbol=? AND strategy_id=? AND leg=?", (pos["symbol"], strategy_id, leg))
         account = self.account()
         day = datetime.fromtimestamp(quote.timestamp_ms / 1000, KYIV).date().isoformat()
         daily = Decimal(account["daily_pnl"]) + pnl if account["day"] == day else pnl
@@ -115,10 +168,28 @@ class SQLiteStateStore:
             return {"mode": "paper", "initialized": False, "active_release_digest": active["digest"] if active else None, "open_positions": 0, "positions": [], "unrealized_pnl_usdt": "0", "trades": 0, "recent_trades": [], "recent_events": [], "latest_event": None}
         positions: list[dict[str, Any]] = []
         unrealized = Decimal(0)
+        tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        strategies = {row["strategy_id"]: json.loads(row["payload"]) for row in self.db.execute("SELECT strategy_id,payload FROM portfolio_strategies WHERE enabled=1")} if "portfolio_strategies" in tables else {}
         if active:
-            execution = json.loads(active["payload"])["execution"]
-            fee_rate, slip = Decimal(execution["taker_fee_rate"]), Decimal(execution["slippage_bps"]) / 10000
-            for pos in self.db.execute("SELECT * FROM positions ORDER BY symbol"):
+            strategies.setdefault(active["digest"], json.loads(active["payload"]))
+        position_columns = {row[1] for row in self.db.execute("PRAGMA table_info(positions)")}
+        position_order = "strategy_id,symbol,leg" if "strategy_id" in position_columns else "symbol"
+        if strategies:
+            for pos in self.db.execute(f"SELECT * FROM positions ORDER BY {position_order}"):
+                strategy_id = pos["strategy_id"] if "strategy_id" in position_columns else (active["digest"] if active else "legacy")
+                leg = pos["leg"] if "leg" in position_columns else "single"
+                position_digest = pos["release_digest"] if "release_digest" in position_columns else ""
+                strategy = strategies.get(strategy_id)
+                if strategy is None:
+                    row_release = self.db.execute("SELECT payload FROM releases WHERE digest=?", (position_digest,)).fetchone()
+                    strategy = json.loads(row_release["payload"]) if row_release else None
+                if strategy is None and active:
+                    strategy = json.loads(active["payload"])
+                if strategy is None:
+                    positions.append({"strategy_id": strategy_id, "leg": leg, "symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None, "quote_timestamp_ms": None})
+                    continue
+                execution = strategy["execution"]
+                fee_rate, slip = Decimal(execution["taker_fee_rate"]), Decimal(execution["slippage_bps"]) / 10000
                 row = self.db.execute("SELECT * FROM quotes WHERE symbol=? ORDER BY ts DESC LIMIT 1", (pos["symbol"],)).fetchone()
                 pnl = None
                 ts = None
@@ -129,18 +200,21 @@ class SQLiteStateStore:
                     pnl = qty * (entry - exit_price if pos["side"] == "short" else exit_price - entry) - Decimal(pos["entry_fee"]) - qty * exit_price * fee_rate
                     unrealized += pnl
                     ts = row["ts"]
-                positions.append({"symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None if pnl is None else str(pnl), "quote_timestamp_ms": ts})
+                positions.append({"strategy_id": strategy_id, "leg": leg, "symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None if pnl is None else str(pnl), "quote_timestamp_ms": ts})
         latest = self.db.execute("SELECT type,ts FROM events ORDER BY id DESC LIMIT 1").fetchone()
         recent_trades = [dict(row) for row in self.db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")]
         recent_events = [{"id": row["id"], "timestamp_ms": row["ts"], "type": row["type"], "symbol": row["symbol"], "payload": json.loads(row["payload"])} for row in self.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 100")]
-        return {"mode": "paper", "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "recent_trades": recent_trades, "recent_events": recent_events, "latest_event": None if latest is None else dict(latest)}
+        portfolio = [{"strategy_id": row["strategy_id"], "kind": row["kind"], "digest": row["digest"], "enabled": bool(row["enabled"]), "name": row["name"] or row["strategy_id"], "symbols": json.loads(row["payload"])["market"]["symbols"]} for row in self.db.execute("SELECT * FROM portfolio_strategies ORDER BY added_at_ms")] if "portfolio_strategies" in tables else []
+        account_columns = {row[1] for row in self.db.execute("PRAGMA table_info(account)")}
+        initial_balance = account["initial_balance"] if "initial_balance" in account_columns else account["balance"]
+        return {"mode": "paper", "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "initial_balance_usdt": initial_balance, "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "recent_trades": recent_trades, "recent_events": recent_events, "latest_event": None if latest is None else dict(latest), "portfolio_strategies": portfolio}
 
     def close(self) -> None:
         self.db.close()
 
 
 class PaperExecutor:
-    def __init__(self, release: dict[str, Any], store: SQLiteStateStore, *, stale_after_seconds: int = 30) -> None:
+    def __init__(self, release: dict[str, Any], store: SQLiteStateStore, *, stale_after_seconds: int = 30, strategy_id: str | None = None, activate: bool = True) -> None:
         self.release = self.validate_release(release)
         self.store = store
         self.stale_after_ms = stale_after_seconds * 1000
@@ -149,7 +223,9 @@ class PaperExecutor:
         self.take, self.stop = self._parse_exit(strategy["exit_config"])
         self.entries_paused = False
         self.close_requested = False
-        self.store.activate(self.release)
+        self.strategy_id = strategy_id or release_digest(self.release)
+        if activate:
+            self.store.activate(self.release)
 
     @classmethod
     def validate_release(cls, release: dict[str, Any]) -> dict[str, Any]:
@@ -188,7 +264,7 @@ class PaperExecutor:
             return Decimal(profit.group(1)) / 1000, None
         raise ValueError(f"Unsupported exit_config for paper v1: {value}")
 
-    def on_quote(self, quote: Quote, *, now_ms: int | None = None) -> None:
+    def on_quote(self, quote: Quote, *, now_ms: int | None = None, record_quote: bool = True) -> None:
         now_ms = now_ms or int(time.time() * 1000)
         if quote.symbol not in self.release["market"]["symbols"]:
             raise ValueError("Quote symbol is outside the release allowlist")
@@ -199,10 +275,10 @@ class PaperExecutor:
         if latest is not None and quote.timestamp_ms < latest:
             self.store.event("out_of_order_quote", {"quote_ts": quote.timestamp_ms, "latest_ts": latest}, quote.symbol, quote.timestamp_ms)
             return
-        if not self.store.quote(quote):
+        if record_quote and not self.store.quote(quote):
             self.store.event("duplicate_quote", {"quote_ts": quote.timestamp_ms}, quote.symbol, quote.timestamp_ms)
             return
-        pos = self.store.position(quote.symbol)
+        pos = self.store.position(quote.symbol, self.strategy_id)
         if pos:
             if self.close_requested:
                 self._close_position(pos, quote, "manual_close")
@@ -259,15 +335,17 @@ class PaperExecutor:
         daily_pnl = Decimal(account["daily_pnl"]) if account["day"] == day else Decimal(0)
         if daily_pnl <= -Decimal(risk["max_daily_loss_usdt"]):
             self.store.event("risk_block", {"reason": "daily_loss_limit"}, quote.symbol, quote.timestamp_ms); return
-        notional = min(Decimal(execution["starting_balance_usdt"]) * Decimal(execution["leverage"]), Decimal(risk["max_order_notional_usdt"]))
+        allocation = Decimal(execution["starting_balance_usdt"])
+        notional = min(allocation * Decimal(execution["leverage"]), Decimal(risk["max_order_notional_usdt"]), allocation)
         open_rows = self.store.db.execute("SELECT quantity,entry_price FROM positions").fetchall()
+        strategy_position_count = int(self.store.db.execute("SELECT COUNT(*) FROM positions WHERE strategy_id=?", (self.strategy_id,)).fetchone()[0])
         open_exposure = sum((Decimal(row["quantity"]) * Decimal(row["entry_price"]) for row in open_rows), Decimal(0))
-        if len(open_rows) >= risk["max_open_positions"] or open_exposure + notional > Decimal(risk["max_total_exposure_usdt"]):
+        if strategy_position_count >= risk["max_open_positions"] or open_exposure + notional > Decimal(risk["max_total_exposure_usdt"]):
             self.store.event("risk_block", {"reason": "exposure_limit"}, quote.symbol, quote.timestamp_ms); return
         price = quote.bid * (1 - Decimal(execution["slippage_bps"]) / 10000) if side == "short" else quote.ask * (1 + Decimal(execution["slippage_bps"]) / 10000)
         qty = notional / price
         fee = notional * Decimal(execution["taker_fee_rate"])
-        self.store.open_position(quote.symbol, side, qty, price, fee, quote.timestamp_ms)
+        self.store.open_position(quote.symbol, side, qty, price, fee, quote.timestamp_ms, self.strategy_id, "single", release_digest(self.release))
         self.store.event("paper_entry", {"side": side, "quantity": str(qty), "price": str(price), "fee": str(fee)}, quote.symbol, quote.timestamp_ms)
 
     def _manage_position(self, pos: sqlite3.Row, quote: Quote) -> None:
@@ -288,12 +366,12 @@ class PaperExecutor:
         kind = "take_profit" if take else "stop_loss" if stop else None
         if kind is None:
             if pos["pending_exit"]:
-                self.store.update_pending(quote.symbol, None, 0)
+                self.store.update_pending(quote.symbol, None, 0, self.strategy_id)
             return
         count = pos["pending_count"] + 1 if pos["pending_exit"] == kind else 1
         needed = self.release["strategy"]["exit_confirmation_snapshots"] if mode != "immediate" else 0
         if count <= needed:
-            self.store.update_pending(quote.symbol, kind, count); return
+            self.store.update_pending(quote.symbol, kind, count, self.strategy_id); return
         self._close_position(pos, quote, kind, exit_price=exit_price, pnl=pnl)
 
     def _close_position(self, pos: sqlite3.Row, quote: Quote, reason: str, *, exit_price: Decimal | None = None, pnl: Decimal | None = None) -> None:
@@ -307,3 +385,104 @@ class PaperExecutor:
             pnl = gross - Decimal(pos["entry_fee"]) - quantity * exit_price * Decimal(execution["taker_fee_rate"])
         self.store.close_position(pos, quote, exit_price, pnl)
         self.store.event("paper_exit", {"reason": reason, "pnl": str(pnl), "price": str(exit_price)}, quote.symbol, quote.timestamp_ms)
+
+
+class PortfolioExecutor:
+    """Runs multiple strategies against one virtual account and quote stream."""
+
+    def __init__(self, store: SQLiteStateStore, *, stale_after_seconds: int = 30) -> None:
+        self.store, self.stale_after_seconds = store, stale_after_seconds
+        self.executors: dict[str, PaperExecutor] = {}
+        self.hedges: dict[str, dict[str, Any]] = {}
+        self.entries_paused = False
+        self.close_requested = False
+        self.refresh()
+
+    def refresh(self) -> None:
+        rows = self.store.db.execute("SELECT strategy_id,kind,payload FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
+        allocation = Decimal((self.store.account() or {"initial_balance": "0"})["initial_balance"]) / max(1, len(rows))
+        active_ids: set[str] = set()
+        for row in rows:
+            strategy_id, payload = row["strategy_id"], json.loads(row["payload"])
+            active_ids.add(strategy_id)
+            if row["kind"] == "hedge":
+                self.hedges[strategy_id] = payload
+                self.executors.pop(strategy_id, None)
+                continue
+            self.hedges.pop(strategy_id, None)
+            scaled = json.loads(json.dumps(payload))
+            scaled["execution"]["starting_balance_usdt"] = str(allocation)
+            scaled["risk"]["max_order_notional_usdt"] = str(min(Decimal(scaled["risk"]["max_order_notional_usdt"]), allocation))
+            total_balance = Decimal((self.store.account() or {"initial_balance": "0"})["initial_balance"])
+            scaled["risk"]["max_total_exposure_usdt"] = str(min(Decimal(scaled["risk"]["max_total_exposure_usdt"]), total_balance))
+            self.executors[strategy_id] = PaperExecutor(scaled, self.store, stale_after_seconds=self.stale_after_seconds, strategy_id=strategy_id, activate=False)
+        self.executors = {key: value for key, value in self.executors.items() if key in active_ids}
+        self.hedges = {key: value for key, value in self.hedges.items() if key in active_ids}
+
+    def symbols(self) -> list[str]:
+        symbols = {symbol for executor in self.executors.values() for symbol in executor.release["market"]["symbols"]}
+        symbols.update(symbol for payload in self.hedges.values() for symbol in payload["market"]["symbols"])
+        return sorted(symbols)
+
+    def set_controls(self, *, entries_paused: bool, close_positions: bool) -> None:
+        for executor in self.executors.values():
+            executor.set_controls(entries_paused=entries_paused, close_positions=close_positions)
+        self.entries_paused, self.close_requested = entries_paused, close_positions
+
+    def on_quotes(self, quotes: list[Quote], *, now_ms: int | None = None) -> None:
+        fresh = {quote.symbol: quote for quote in quotes if self.store.quote(quote)}
+        for executor in self.executors.values():
+            for quote in fresh.values():
+                if quote.symbol in executor.release["market"]["symbols"]:
+                    executor.on_quote(quote, now_ms=now_ms, record_quote=False)
+        for strategy_id, payload in self.hedges.items():
+            long_symbol, short_symbol = payload["market"]["symbols"]
+            long_quote, short_quote = fresh.get(long_symbol), fresh.get(short_symbol)
+            positions = self.store.db.execute("SELECT * FROM positions WHERE strategy_id=? ORDER BY leg", (strategy_id,)).fetchall()
+            if positions:
+                if self.close_requested and long_quote and short_quote:
+                    self._close_hedge(strategy_id, positions, {long_symbol: long_quote, short_symbol: short_quote}, payload)
+                continue
+            if self.entries_paused or not long_quote or not short_quote or abs(long_quote.timestamp_ms - short_quote.timestamp_ms) > 120_000:
+                continue
+            self._open_hedge(strategy_id, long_quote, short_quote, payload)
+
+    def _open_hedge(self, strategy_id: str, long_quote: Quote, short_quote: Quote, payload: dict[str, Any]) -> None:
+        account = self.store.account()
+        count = max(1, int(self.store.db.execute("SELECT COUNT(*) FROM portfolio_strategies WHERE enabled=1").fetchone()[0]))
+        allocation = Decimal(account["initial_balance"] if account else "0") / count
+        day = datetime.fromtimestamp(long_quote.timestamp_ms / 1000, KYIV).date().isoformat()
+        daily = Decimal(account["daily_pnl"]) if account and account["day"] == day else Decimal(0)
+        if daily <= -Decimal(payload["risk"]["max_daily_loss_usdt"]):
+            self.store.event("risk_block", {"reason": "daily_loss_limit"}, long_quote.symbol, long_quote.timestamp_ms)
+            return
+        open_rows = self.store.db.execute("SELECT quantity,entry_price FROM positions").fetchall()
+        exposure = sum((Decimal(row["quantity"]) * Decimal(row["entry_price"]) for row in open_rows), Decimal(0))
+        maximum_exposure = min(Decimal(account["initial_balance"] if account else "0"), Decimal(payload["risk"]["max_total_exposure_usdt"]))
+        if exposure + allocation > maximum_exposure:
+            self.store.event("risk_block", {"reason": "exposure_limit", "current_usdt": str(exposure), "requested_usdt": str(allocation)}, long_quote.symbol, long_quote.timestamp_ms)
+            return
+        per_leg = allocation / 2
+        execution = payload["execution"]
+        fee_rate, slip = Decimal(execution["taker_fee_rate"]), Decimal(execution["slippage_bps"]) / 10000
+        opening: list[tuple[str, str, str, Decimal, Decimal, Decimal, int]] = []
+        for leg, quote, side in (("long", long_quote, "long"), ("short", short_quote, "short")):
+            price = quote.ask * (1 + slip) if side == "long" else quote.bid * (1 - slip)
+            quantity = per_leg / price
+            opening.append((quote.symbol, leg, side, quantity, price, per_leg * fee_rate, quote.timestamp_ms))
+        self.store.open_hedge_positions(opening, strategy_id, release_digest(payload))
+        self.store.event("paper_hedge_entry", {"long_symbol": long_quote.symbol, "short_symbol": short_quote.symbol, "allocation_usdt": str(allocation)}, long_quote.symbol, long_quote.timestamp_ms)
+
+    def _close_hedge(self, strategy_id: str, positions: list[sqlite3.Row], quotes: dict[str, Quote], payload: dict[str, Any]) -> None:
+        execution = payload["execution"]
+        slip, fee_rate = Decimal(execution["slippage_bps"]) / 10000, Decimal(execution["taker_fee_rate"])
+        closed: list[tuple[sqlite3.Row, Quote, Decimal, Decimal]] = []
+        for pos in positions:
+            quote = quotes[pos["symbol"]]
+            quantity, entry = Decimal(pos["quantity"]), Decimal(pos["entry_price"])
+            market = quote.ask if pos["side"] == "short" else quote.bid
+            price = market * (1 + slip) if pos["side"] == "short" else market * (1 - slip)
+            pnl = quantity * (entry - price if pos["side"] == "short" else price - entry) - Decimal(pos["entry_fee"]) - quantity * price * fee_rate
+            closed.append((pos, quote, price, pnl))
+        total_pnl = self.store.close_hedge_positions(closed)
+        self.store.event("paper_hedge_exit", {"pnl_usdt": str(total_pnl), "strategy_id": strategy_id}, positions[0]["symbol"] if positions else None)

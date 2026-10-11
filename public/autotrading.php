@@ -80,6 +80,7 @@ $controlPath = $runtime . '/controls.json';
 $pidPath = $runtime . '/paper.pid.json';
 $logPath = $runtime . '/paper.log';
 $activeReleasePath = $runtime . '/active-release.json';
+$favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
 $releaseDir = $runtime . '/releases';
 $python = getenv('BITGET_AUTOTRADING_PYTHON') ?: (is_executable($root . '/.venv/bin/python') ? $root . '/.venv/bin/python' : '/usr/bin/python3');
 if (!is_executable($python)) $python = 'python3';
@@ -120,7 +121,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!hash_equals($csrf, (string) ($_POST['csrf'] ?? ''))) throw new RuntimeException('Сессия формы истекла. Обновите страницу и повторите действие.');
         $action = (string) ($_POST['action'] ?? '');
         $argsBase = ['--state', $statePath, '--pid-file', $pidPath, '--control', $controlPath];
-        if ($action === 'publish') {
+        if ($action === 'add_favorite') {
+            [$currentCode, $currentOut] = runPython(array_merge(['status'], $argsBase), $root, $python);
+            $currentStatus = $currentCode === 0 ? json_decode($currentOut, true) : null;
+            if (is_array($currentStatus) && !empty($currentStatus['service']['running']) && ($currentStatus['service']['mode'] ?? '') !== 'portfolio') throw new RuntimeException('Сейчас работает старый одиночный paper процесс. Остановите его, добавьте избранное и запустите общий портфель.');
+            $favoriteId = trim((string) ($_POST['favorite_id'] ?? ''));
+            $favorites = is_file($favoritesPath) ? json_decode((string) file_get_contents($favoritesPath), true) : [];
+            $favorite = null;
+            foreach (is_array($favorites) ? $favorites : [] as $candidate) if (is_array($candidate) && (string) ($candidate['id'] ?? '') === $favoriteId) { $favorite = $candidate; break; }
+            if (!is_array($favorite)) throw new RuntimeException('Запись избранного не найдена. Обновите страницу и попробуйте снова.');
+            $favoriteParams = is_array($favorite['params'] ?? null) ? $favorite['params'] : [];
+            $kind = (string) ($favorite['type'] ?? 'strategy') === 'hedge' ? 'hedge' : 'strategy';
+            $symbols = $kind === 'hedge'
+                ? [strtoupper((string) ($favoriteParams['long_symbol'] ?? '')), strtoupper((string) ($favoriteParams['short_symbol'] ?? ''))]
+                : [strtoupper((string) ($favoriteParams['symbol'] ?? ''))];
+            $enabled = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
+            if (in_array('', $symbols, true) || count(array_unique($symbols)) !== count($symbols) || count(array_filter($symbols, static fn (string $value): bool => isset($enabled[$value]))) !== count($symbols)) throw new RuntimeException('В избранном есть тикер, который выключен или не поддерживается настройками.');
+            $starting = decimalInput($favoriteParams['balance'] ?? '10', 'Стартовый баланс', false);
+            $fee = decimalInput($favoriteParams['fee'] ?? '0.06', 'Комиссия');
+            $entry = $kind === 'hedge' ? 'immediate:long' : (string) ($favoriteParams['entry_config'] ?? $favoriteParams['ranking_entry_config'] ?? '');
+            $exit = $kind === 'hedge' ? 'fixed:100:100' : (string) ($favoriteParams['exit_config'] ?? '');
+            if ($entry === '' || $exit === '') throw new RuntimeException('В избранном отсутствует условие входа или выхода для paper стратегии.');
+            $releaseId = 'favorite-' . gmdate('Ymd-His') . '-' . bin2hex(random_bytes(3));
+            $release = [
+                'schema_version' => 1, 'release_id' => $releaseId, 'created_at_utc' => gmdate('Y-m-d\\TH:i:s\\Z'),
+                'market' => ['category' => 'USDT-FUTURES', 'symbols' => $symbols, 'margin_coin' => 'USDT'],
+                'strategy' => [
+                    'entry_config' => $entry, 'entry_signal_mode' => (string) ($favoriteParams['entry_signal_mode'] ?? 'exact'), 'entry_direction_mode' => (string) ($favoriteParams['entry_direction_mode'] ?? 'follow'),
+                    'exit_config' => $exit, 'martingale_mode' => 'none', 'martingale_timing' => 'immediate', 'martingale_attempts' => 3, 'martingale_target_policy' => 'scaled',
+                    'max_chain_loss_usdt' => '0', 'max_day_loss_usdt' => '0', 'exit_confirmation_mode' => 'immediate', 'exit_confirmation_snapshots' => 0,
+                ],
+                'execution' => ['starting_balance_usdt' => $starting, 'leverage' => '1', 'taker_fee_rate' => bcdiv($fee, '100', 24), 'slippage_bps' => '0', 'include_funding' => false],
+                'risk' => ['max_order_notional_usdt' => $starting, 'max_total_exposure_usdt' => $starting, 'max_daily_loss_usdt' => decimalInput((string) max(0.01, (float) $starting * 0.1), 'Дневной лимит', false), 'max_open_positions' => 1],
+                'backtest' => ['start_date' => (string) ($favoriteParams['start_day'] ?? $favoriteParams['start_date'] ?? date('Y-m-d', strtotime('-30 days'))), 'end_date' => (string) ($favoriteParams['end_day'] ?? $favoriteParams['end_date'] ?? date('Y-m-d')), 'result_key' => hash('sha256', $favoriteId), 'net_result_usdt' => '0', 'trade_count' => 0],
+            ];
+            if ($kind === 'hedge') $release['risk']['max_order_notional_usdt'] = $starting;
+            if (!is_dir($releaseDir) && !mkdir($releaseDir, 0700, true) && !is_dir($releaseDir)) throw new RuntimeException('Не удалось создать каталог стратегий.');
+            if (is_link($releaseDir) || fileowner($releaseDir) !== $uid) throw new RuntimeException('Каталог стратегий имеет неподходящего владельца.');
+            $releasePath = $releaseDir . '/' . $releaseId . '.json';
+            if (file_put_contents($releasePath, json_encode($release, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", LOCK_EX) === false) throw new RuntimeException('Не удалось сохранить paper стратегию.');
+            chmod($releasePath, 0600);
+            [$checkCode, $checkOut, $checkError] = runPython(['paper-check', $releasePath], $root, $python);
+            if ($checkCode !== 0) throw new RuntimeException('Избранное не прошло проверку paper: ' . ($checkError ?: $checkOut));
+            [$addCode, $addOut, $addError] = runPython(['portfolio-add', '--state', $statePath, '--release', $releasePath, '--kind', $kind, '--name', (string) ($favorite['name'] ?? $releaseId)], $root, $python);
+            if ($addCode !== 0) throw new RuntimeException($addError ?: $addOut ?: 'Не удалось добавить избранное в портфель.');
+            $message = ($kind === 'hedge' ? 'Хедж-пара' : 'Стратегия') . ' «' . (string) ($favorite['name'] ?? $releaseId) . '» добавлена в общий paper портфель.';
+            $messageType = 'success';
+        } elseif ($action === 'publish') {
+            [$currentCode, $currentOut] = runPython(array_merge(['status'], $argsBase), $root, $python);
+            $currentStatus = $currentCode === 0 ? json_decode($currentOut, true) : null;
+            if (is_array($currentStatus) && !empty($currentStatus['service']['running']) && ($currentStatus['service']['mode'] ?? '') !== 'portfolio') throw new RuntimeException('Сейчас работает старый одиночный paper процесс. Остановите его, затем добавьте стратегию в общий портфель.');
             $strategyValues = [
                 'category' => (string) ($_POST['category'] ?? ''), 'symbol' => strtoupper((string) ($_POST['symbol'] ?? '')),
                 'start_date' => (string) ($_POST['start_date'] ?? ''), 'end_date' => (string) ($_POST['end_date'] ?? ''),
@@ -144,10 +194,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($strategyValues['include_funding']) throw new RuntimeException('В текущей paper версии funding не моделируется. Вернитесь в «Базовые проверки», отключите funding и откройте эту страницу снова.');
             if ($strategyValues['martingale_mode'] !== 'none') throw new RuntimeException('В текущей paper версии мартингейл не поддерживается. Выберите «Без мартингейла» и откройте эту страницу снова.');
             if ($strategyValues['category'] !== 'USDT-FUTURES' || !preg_match('/^[A-Z0-9]{2,40}$/', $strategyValues['symbol'])) throw new RuntimeException('Paper v1 сейчас поддерживает линейные USDT futures. Выбранный рынок или тикер не поддерживается.');
-            $healthArgs = array_merge(['status'], $argsBase);
-            [$statusCode, $statusOut] = runPython($healthArgs, $root, $python);
-            $health = $statusCode === 0 ? json_decode($statusOut, true) : null;
-            if (is_array($health) && ($health['service']['running'] ?? false)) throw new RuntimeException('Сначала остановите paper процесс, затем публикуйте новую версию стратегии.');
             $created = gmdate('Y-m-d\TH:i:s\Z');
             $releaseId = 'paper-' . gmdate('Ymd-His') . '-' . bin2hex(random_bytes(3));
             $release = [
@@ -175,13 +221,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             chmod($releasePath, 0600);
             [$validateCode, $validateOut, $validateError] = runPython(['paper-check', $releasePath], $root, $python);
             if ($validateCode !== 0) { unlink($releasePath); throw new RuntimeException('Стратегия не прошла проверку: ' . ($validateError ?: $validateOut)); }
+            [$addCode, $addOut, $addError] = runPython(['portfolio-add', '--state', $statePath, '--release', $releasePath, '--kind', 'strategy', '--name', $releaseId], $root, $python);
+            if ($addCode !== 0) throw new RuntimeException($addError ?: $addOut ?: 'Не удалось добавить стратегию в общий портфель.');
             $activeTemporary = $runtime . '/.active-release.' . bin2hex(random_bytes(4)) . '.tmp';
             if (!copy($releasePath, $activeTemporary) || !rename($activeTemporary, $activeReleasePath)) {
                 @unlink($activeTemporary);
                 throw new RuntimeException('Не удалось выбрать опубликованную версию.');
             }
             chmod($activeReleasePath, 0600);
-            $message = 'Стратегия опубликована: ' . $releaseId . '. Её можно запускать в paper режиме.';
+            $message = 'Стратегия добавлена в общий paper портфель: ' . $releaseId . '.';
             $messageType = 'success';
         } elseif ($action === 'demo-reconcile') {
             $demoSymbol = strtoupper((string) ($_POST['symbol'] ?? $symbol));
@@ -195,10 +243,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = ($report['matched'] ?? false) ? 'Demo сверка завершена: расхождений нет.' : 'Demo сверка завершена: обнаружено расхождение или ошибка подключения.';
             $messageType = ($report['matched'] ?? false) ? 'success' : 'warning';
         } elseif ($action === 'start') {
-            if (!is_file($activeReleasePath)) throw new RuntimeException('Сначала опубликуйте выбранную стратегию.');
-            [$code, $out, $err] = runPython(['service-start', '--release', $activeReleasePath, '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--interval', '5'], $root, $python);
+            [$listCode, $listOut] = runPython(['status', '--state', $statePath], $root, $python);
+            $portfolioState = $listCode === 0 ? json_decode($listOut, true) : null;
+            if ((!is_array($portfolioState) || empty($portfolioState['portfolio_strategies'])) && is_file($activeReleasePath)) {
+                [$addCode, $addOut, $addErr] = runPython(['portfolio-add', '--state', $statePath, '--release', $activeReleasePath, '--kind', 'strategy', '--name', (string) ($published['release_id'] ?? 'Ранее опубликованная стратегия')], $root, $python);
+                if ($addCode !== 0) throw new RuntimeException($addErr ?: $addOut ?: 'Не удалось перенести опубликованную стратегию в общий портфель.');
+            }
+            [$code, $out, $err] = runPython(['portfolio-start', '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--interval', '5'], $root, $python);
             if ($code !== 0) throw new RuntimeException($err ?: $out ?: 'Служба не запустилась.');
-            $message = 'Paper исполнитель запущен. Он использует только публичные котировки.'; $messageType = 'success';
+            $message = 'Общий paper портфель запущен. Все добавленные стратегии используют единый виртуальный баланс.'; $messageType = 'success';
         } elseif ($action === 'stop') {
             [$code, $out, $err] = runPython(['service-stop', '--state', $statePath, '--pid-file', $pidPath], $root, $python);
             if ($code !== 0) throw new RuntimeException($err ?: $out ?: 'Не удалось остановить службу.');
@@ -233,7 +286,13 @@ if ($message === '' && is_array($_SESSION['autotrading_flash'] ?? null)) {
 $status = ['mode' => 'paper', 'initialized' => false, 'open_positions' => 0, 'positions' => [], 'unrealized_pnl_usdt' => '0', 'recent_trades' => [], 'recent_events' => [], 'trades' => 0, 'service' => ['running' => false], 'controls' => ['entries_paused' => false, 'close_positions' => false]];
 [$statusCode, $statusOut] = runPython(['status', '--state', $statePath, '--pid-file', $pidPath, '--control', $controlPath], $root, $python);
 if ($statusCode === 0 && is_array($decoded = json_decode($statusOut, true))) $status = array_merge($status, $decoded);
+$portfolioNameById = [];
+foreach (($status['portfolio_strategies'] ?? []) as $portfolioStrategy) $portfolioNameById[(string) ($portfolioStrategy['strategy_id'] ?? '')] = (string) ($portfolioStrategy['name'] ?? '');
 $published = is_file($activeReleasePath) ? json_decode((string) file_get_contents($activeReleasePath), true) : null;
+$savedFavorites = is_file($favoritesPath) ? json_decode((string) file_get_contents($favoritesPath), true) : [];
+$selectedFavoriteId = trim((string) ($_GET['favorite_id'] ?? ''));
+$selectedFavorite = null;
+foreach (is_array($savedFavorites) ? $savedFavorites : [] as $candidate) if (is_array($candidate) && (string) ($candidate['id'] ?? '') === $selectedFavoriteId) { $selectedFavorite = $candidate; break; }
 $selectedStrategyPresent = isset($_GET['symbol']);
 $paperStrategySupported = $category === 'USDT-FUTURES' && !$includeFunding && $martingaleMode === 'none';
 $postHidden = [
@@ -255,18 +314,22 @@ $postHidden = [
 </style></head><body><main class="wrap">
 <div class="muted">Bitget · локальный исполнитель</div><h1>Автоторговля</h1>
 <nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="autotrading.php" aria-current="page">Автоторговля</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
-<section class="panel how-to"><h2>Как попробовать выбранную стратегию</h2><ol><li>В «Базовых проверках» выберите тикер, порог входа и выход. Затем нажмите «Автоторговля».</li><li>Ниже сверьте выбранные параметры и нажмите «Опубликовать эту выбранную стратегию».</li><li>В верхнем блоке «Состояние исполнителя» нажмите «Запустить опубликованную стратегию».</li></ol><p class="note">Это paper-режим: исполнитель читает публичные котировки и создаёт только виртуальные сделки, ордера на Bitget не отправляются. После запуска он может ждать сигнала; статус «Работает» при нуле открытых позиций означает, что условие входа ещё не сработало.</p></section>
+<section class="panel how-to"><h2>Общий paper портфель</h2><ol><li>Добавьте выбранную конфигурацию из «Базовых проверок» или нажмите «Добавить в автоторговлю» у записи в «Избранном».</li><li>Добавляйте несколько стратегий и хедж-пар. Их позиции и результат учитываются в одном виртуальном балансе; лимит на вход каждой стратегии автоматически ограничен её долей портфеля.</li><li>Нажмите «Запустить общий портфель». Сервис будет обрабатывать их вместе на одном потоке публичных котировок.</li></ol><p class="note">Это paper-режим: ордера на Bitget не отправляются. Избранный хедж открывает long и short одновременно и закрывает обе ноги вместе при команде «Закрыть paper позиции».</p></section>
 <?php if ($message !== ''): ?><p class="status <?= h($messageType) ?>" role="status"><?= h($message) ?></p><?php endif; ?>
 <?php if (!$isLocal): ?><p class="status warning">Просмотр доступен, но управление работает только при открытии страницы с этого компьютера.</p><?php endif; ?>
+<?php if (is_array($selectedFavorite)): $favoriteParams = is_array($selectedFavorite['params'] ?? null) ? $selectedFavorite['params'] : []; $favoriteName = (string) ($selectedFavorite['name'] ?? 'Избранное'); $favoriteKind = (string) ($selectedFavorite['type'] ?? '') === 'hedge' ? 'Хедж-пара' : 'Стратегия'; $favoriteTicker = $favoriteKind === 'Хедж-пара' ? 'Лонг ' . (string) ($favoriteParams['long_symbol'] ?? '—') . ' / шорт ' . (string) ($favoriteParams['short_symbol'] ?? '—') : (string) ($favoriteParams['symbol'] ?? '—'); ?>
+<section class="panel"><h2>Добавить запись из избранного</h2><p><strong><?= h($favoriteName) ?></strong> · <?= h($favoriteKind) ?> · <?= h($favoriteTicker) ?></p><p class="note">В общий портфель попадёт эта конфигурация; для хедж-пары обе ноги используют равные части её доли капитала.</p><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_favorite"><input type="hidden" name="favorite_id" value="<?= h($selectedFavoriteId) ?>"><button <?= !$isLocal ? 'disabled' : '' ?>>Добавить в общий портфель</button></form></section>
+<?php endif; ?>
 <section class="panel"><h2>Состояние исполнителя</h2><div class="grid">
-<div class="stat"><span>Процесс</span><strong><?= ($status['service']['running'] ?? false) ? 'Работает' : 'Остановлен' ?></strong></div>
-<div class="stat"><span>Режим</span><strong>Paper</strong></div><div class="stat"><span>Баланс</span><strong><?= h((string) ($status['balance_usdt'] ?? ($published['execution']['starting_balance_usdt'] ?? '—'))) ?> USDT</strong></div>
+<div class="stat"><span>Процесс</span><strong><?= ($status['service']['running'] ?? false) ? (($status['service']['mode'] ?? '') === 'portfolio' ? 'Портфель работает' : 'Старая одиночная служба') : 'Остановлен' ?></strong></div>
+<div class="stat"><span>Режим</span><strong>Paper</strong></div><div class="stat"><span>Общий баланс</span><strong><?= h((string) ($status['balance_usdt'] ?? ($published['execution']['starting_balance_usdt'] ?? '—'))) ?> USDT</strong></div>
 <div class="stat"><span>Реализованный результат</span><strong><?= h((string) ($status['realized_pnl_usdt'] ?? '0')) ?> USDT</strong></div>
 <div class="stat"><span>Плавающий результат</span><strong><?= h((string) ($status['unrealized_pnl_usdt'] ?? '0')) ?> USDT</strong></div>
 <div class="stat"><span>Paper сделки</span><strong><?= h((string) ($status['trades'] ?? 0)) ?></strong></div>
 </div><p class="note">Стратегия: <?= h((string) ($published['release_id'] ?? 'не опубликована')) ?> · PID <?= h((string) ($status['service']['pid'] ?? '—')) ?> · открытых позиций: <?= h((string) ($status['open_positions'] ?? 0)) ?></p>
+<?php if (($status['portfolio_strategies'] ?? []) !== []): ?><div class="table-wrap"><table><thead><tr><th>Стратегия портфеля</th><th>Тип</th><th>Состояние</th><th>Тикеры</th></tr></thead><tbody><?php foreach ($status['portfolio_strategies'] as $portfolioStrategy): ?><tr><td><?= h((string) ($portfolioStrategy['name'] ?? $portfolioStrategy['strategy_id'])) ?></td><td><?= ($portfolioStrategy['kind'] ?? '') === 'hedge' ? 'Хедж' : 'Стратегия' ?></td><td><?= !empty($portfolioStrategy['enabled']) ? 'В работе' : 'Выключена' ?></td><td><?= h(implode(', ', array_map('strval', $portfolioStrategy['symbols'] ?? []))) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
 <?php if (is_array($published)): ?>
-<section class="published-summary" aria-label="Параметры опубликованной стратегии"><h3>Именно эту стратегию запустит кнопка ниже</h3>
+<section class="published-summary" aria-label="Последняя добавленная стратегия"><h3>Последняя добавленная конфигурация</h3>
 <div class="grid">
 <div class="stat"><span>Тикер</span><strong><?= h(implode(', ', array_map('strval', $published['market']['symbols'] ?? [])) ?: '—') ?></strong></div>
 <div class="stat"><span>Условие входа</span><strong><?= h(entryDescription($published['strategy'] ?? [])) ?></strong></div>
@@ -280,7 +343,7 @@ $postHidden = [
 </section>
 <?php else: ?><p class="status warning">Стратегия ещё не опубликована. Сначала выберите и опубликуйте её в блоке ниже.</p><?php endif; ?>
 <div class="actions">
-<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><button <?= !$isLocal || !is_array($published) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? 'Paper уже запущен' : 'Запустить опубликованную стратегию' ?></button></form>
+<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><button <?= !$isLocal || (empty($status['portfolio_strategies']) && !is_array($published)) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? ((($status['service']['mode'] ?? '') === 'portfolio') ? 'Общий портфель уже запущен' : 'Остановите старую одиночную службу') : 'Запустить общий портфель' ?></button></form>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="stop"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Остановить процесс</button></form>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="<?= ($status['controls']['entries_paused'] ?? false) ? 'resume' : 'pause' ?>"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['controls']['entries_paused'] ?? false) ? 'Возобновить новые входы' : 'Приостановить новые входы' ?></button></form>
 <form method="post" onsubmit="return confirm('Закрыть все открытые paper позиции по ближайшим свежим котировкам?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="close"><button class="danger" <?= !$isLocal || !($status['service']['running'] ?? false) || ($status['open_positions'] ?? 0) < 1 ? 'disabled' : '' ?>>Закрыть paper позиции</button></form>
@@ -319,9 +382,9 @@ $postHidden = [
 </div><div class="actions"><button <?= !$isLocal || !$paperStrategySupported || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Опубликовать эту выбранную стратегию</button></div>
 </form><?php endif; ?></section>
 
-<section class="panel"><h2>Открытые позиции</h2><?php if (($status['positions'] ?? []) === []): ?><p class="empty">Открытых виртуальных позиций нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Вход</th><th>Плавающий PnL · USDT</th><th>Последняя котировка · Киев</th></tr></thead><tbody><?php foreach ($status['positions'] as $position): ?><tr><td><?= h((string) $position['symbol']) ?></td><td><?= h((string) $position['side']) ?></td><td><?= h((string) $position['quantity']) ?></td><td><?= h((string) $position['entry_price']) ?></td><td><?= h((string) ($position['unrealized_pnl_usdt'] ?? '—')) ?></td><td><?= h(timeMsLabel($position['quote_timestamp_ms'] ?? null)) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section>
+<section class="panel"><h2>Открытые позиции</h2><?php if (($status['positions'] ?? []) === []): ?><p class="empty">Открытых виртуальных позиций нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Стратегия</th><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Вход</th><th>Плавающий PnL · USDT</th><th>Последняя котировка · Киев</th></tr></thead><tbody><?php foreach ($status['positions'] as $position): ?><tr><td><?= h($portfolioNameById[(string) ($position['strategy_id'] ?? '')] ?? 'Старая стратегия') ?><?= ($position['leg'] ?? 'single') !== 'single' ? ' · ' . h((string) $position['leg']) : '' ?></td><td><?= h((string) $position['symbol']) ?></td><td><?= h((string) $position['side']) ?></td><td><?= h((string) $position['quantity']) ?></td><td><?= h((string) $position['entry_price']) ?></td><td><?= h((string) ($position['unrealized_pnl_usdt'] ?? '—')) ?></td><td><?= h(timeMsLabel($position['quote_timestamp_ms'] ?? null)) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section>
 
-<section class="panel"><h2>Последние paper сделки</h2><?php if (($status['recent_trades'] ?? []) === []): ?><p class="empty">Сделок пока нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Вход · Киев</th><th>Выход · Киев</th><th>Результат · USDT</th></tr></thead><tbody><?php foreach ($status['recent_trades'] as $trade): ?><tr><td><?= h((string) $trade['symbol']) ?></td><td><?= h((string) $trade['side']) ?></td><td><?= h((string) $trade['quantity']) ?></td><td><?= h(timeMsLabel($trade['entry_ts'] ?? null)) ?></td><td><?= h(timeMsLabel($trade['exit_ts'] ?? null)) ?></td><td><?= h((string) $trade['pnl']) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section>
+<section class="panel"><h2>Последние paper сделки</h2><?php if (($status['recent_trades'] ?? []) === []): ?><p class="empty">Сделок пока нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Стратегия</th><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Вход · Киев</th><th>Выход · Киев</th><th>Результат · USDT</th></tr></thead><tbody><?php foreach ($status['recent_trades'] as $trade): ?><tr><td><?= h($portfolioNameById[(string) ($trade['strategy_id'] ?? '')] ?? 'Старая стратегия') ?><?= ($trade['leg'] ?? 'single') !== 'single' ? ' · ' . h((string) $trade['leg']) : '' ?></td><td><?= h((string) $trade['symbol']) ?></td><td><?= h((string) $trade['side']) ?></td><td><?= h((string) $trade['quantity']) ?></td><td><?= h(timeMsLabel($trade['entry_ts'] ?? null)) ?></td><td><?= h(timeMsLabel($trade['exit_ts'] ?? null)) ?></td><td><?= h((string) $trade['pnl']) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section>
 
 <section class="panel"><h2>События и ошибки</h2><?php if (($status['recent_events'] ?? []) === []): ?><p class="empty">Событий пока нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Время · Киев</th><th>Тип</th><th>Тикер</th><th>Данные</th></tr></thead><tbody><?php foreach ($status['recent_events'] as $event): ?><tr><td><?= h(timeMsLabel($event['timestamp_ms'] ?? null)) ?></td><td><?= h((string) $event['type']) ?></td><td><?= h((string) ($event['symbol'] ?? '—')) ?></td><td><?= h(json_encode($event['payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '') ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section>
 <p class="note">Автообновления нет: перезагрузите страницу после команды или дождитесь следующей задачи интерфейса, если понадобится live обновление.</p>

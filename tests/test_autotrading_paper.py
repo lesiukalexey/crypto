@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
 
 from autotrading.contracts import Quote, release_digest
-from autotrading.paper import PaperExecutor, SQLiteStateStore
+from autotrading.paper import PaperExecutor, PortfolioExecutor, SQLiteStateStore
 
 
 def release() -> dict:
@@ -132,6 +133,77 @@ class PaperExecutorTests(unittest.TestCase):
         self.assertEqual(account["balance"], "50")
         self.assertEqual(account["realized_pnl"], "0")
         self.assertEqual(store.db.execute("SELECT release_digest FROM trades").fetchone()[0], old_digest)
+        store.close()
+
+    def test_two_portfolio_strategies_share_balance_and_keep_separate_positions(self) -> None:
+        store = SQLiteStateStore(self.path)
+        first = json.loads(json.dumps(self.payload))
+        second = json.loads(json.dumps(self.payload))
+        second["release_id"] = "second-strategy"
+        second["market"]["symbols"] = ["BTCUSDT"]
+        store.add_portfolio_strategy(first, name="Первая")
+        store.add_portfolio_strategy(second, name="Вторая")
+        executor = PortfolioExecutor(store)
+        executor.on_quotes([self.quote("99.9", "100", 1_000_000)], now_ms=1_000_000)
+        health = store.health()
+        self.assertEqual(health["initial_balance_usdt"], "100")
+        self.assertEqual(health["open_positions"], 2)
+        self.assertEqual(len({position["strategy_id"] for position in health["positions"]}), 2)
+        exposure = sum(Decimal(row["quantity"]) * Decimal(row["entry_price"]) for row in store.db.execute("SELECT quantity,entry_price FROM positions"))
+        self.assertLessEqual(exposure, Decimal("100"))
+        store.close()
+
+    def test_favorite_hedge_opens_and_closes_both_legs_together(self) -> None:
+        store = SQLiteStateStore(self.path)
+        hedge = json.loads(json.dumps(self.payload))
+        hedge["release_id"] = "favorite-hedge"
+        hedge["market"]["symbols"] = ["BTCUSDT", "ETHUSDT"]
+        hedge["execution"]["starting_balance_usdt"] = "100"
+        store.add_portfolio_strategy(hedge, kind="hedge", name="BTC / ETH")
+        executor = PortfolioExecutor(store)
+        btc = self.quote("99.9", "100", 1_000_000)
+        eth = Quote("ETHUSDT", Decimal("49.9"), Decimal("50"), Decimal("49.95"), 1_000_000)
+        executor.on_quotes([btc, eth], now_ms=1_000_000)
+        legs = store.db.execute("SELECT leg,side FROM positions ORDER BY leg").fetchall()
+        self.assertEqual([(row["leg"], row["side"]) for row in legs], [("long", "long"), ("short", "short")])
+        executor.set_controls(entries_paused=True, close_positions=True)
+        btc2 = self.quote("99.8", "99.9", 1_005_000)
+        eth2 = Quote("ETHUSDT", Decimal("50.1"), Decimal("50.2"), Decimal("50.15"), 1_005_000)
+        executor.on_quotes([btc2, eth2], now_ms=1_005_000)
+        self.assertEqual(store.health()["open_positions"], 0)
+        self.assertEqual(store.health()["trades"], 2)
+        store.close()
+
+    def test_legacy_single_strategy_positions_migrate_without_being_lost(self) -> None:
+        connection = sqlite3.connect(self.path)
+        connection.executescript("""
+          CREATE TABLE releases(digest TEXT PRIMARY KEY,payload TEXT NOT NULL,activated_at_ms INTEGER NOT NULL);
+          CREATE TABLE runtime_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          CREATE TABLE quotes(symbol TEXT NOT NULL,ts INTEGER NOT NULL,bid TEXT NOT NULL,ask TEXT NOT NULL,last TEXT NOT NULL,PRIMARY KEY(symbol,ts));
+          CREATE TABLE events(id INTEGER PRIMARY KEY,ts INTEGER NOT NULL,type TEXT NOT NULL,symbol TEXT,payload TEXT NOT NULL);
+          CREATE TABLE positions(symbol TEXT PRIMARY KEY,side TEXT NOT NULL,quantity TEXT NOT NULL,entry_price TEXT NOT NULL,entry_fee TEXT NOT NULL,entry_ts INTEGER NOT NULL,pending_exit TEXT,pending_count INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE trades(id INTEGER PRIMARY KEY,symbol TEXT NOT NULL,side TEXT NOT NULL,quantity TEXT NOT NULL,entry_price TEXT NOT NULL,exit_price TEXT NOT NULL,entry_ts INTEGER NOT NULL,exit_ts INTEGER NOT NULL,pnl TEXT NOT NULL,release_digest TEXT NOT NULL DEFAULT '');
+          CREATE TABLE account(id INTEGER PRIMARY KEY CHECK(id=1),balance TEXT NOT NULL,realized_pnl TEXT NOT NULL,day TEXT NOT NULL,daily_pnl TEXT NOT NULL);
+          INSERT INTO runtime_meta VALUES('active_release_digest','old-release');
+          INSERT INTO positions VALUES('BTCUSDT','long','1','100','0','1000000',NULL,0);
+          INSERT INTO account VALUES(1,'100','0','2026-10-11','0');
+        """)
+        connection.commit()
+        connection.close()
+        legacy_connection = sqlite3.connect(self.path)
+        legacy_payload = json.dumps(self.payload)
+        legacy_connection.execute("INSERT INTO releases VALUES('old-release',?,1)", (legacy_payload,))
+        legacy_connection.commit()
+        legacy_connection.close()
+        read_only_store = SQLiteStateStore.read_only(self.path)
+        try:
+            self.assertEqual(read_only_store.health()["open_positions"], 1)
+        finally:
+            read_only_store.close()
+        store = SQLiteStateStore(self.path)
+        position = store.db.execute("SELECT strategy_id,symbol,leg FROM positions").fetchone()
+        self.assertEqual((position["strategy_id"], position["symbol"], position["leg"]), ("old-release", "BTCUSDT", "single"))
+        self.assertEqual(store.account()["initial_balance"], "100")
         store.close()
 
 

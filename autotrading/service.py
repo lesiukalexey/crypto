@@ -35,7 +35,7 @@ def _process_matches(pid: int, state: Path) -> bool:
         if pid <= 1:
             return False
         command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-        return "-m autotrading paper-run" in command and str(state.resolve()) in command
+        return any(marker in command for marker in ("-m autotrading paper-run", "-m autotrading portfolio-run")) and str(state.resolve()) in command
     except OSError:
         return False
 
@@ -50,7 +50,14 @@ def service_status(pid_file: str | Path, state: str | Path) -> dict[str, Any]:
             pid_path.unlink()
         except OSError:
             pass
-    return {"running": running, "pid": pid if running else None}
+    mode = None
+    if running and isinstance(pid, int):
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            mode = "portfolio" if "-m autotrading portfolio-run" in command else "single"
+        except OSError:
+            mode = None
+    return {"running": running, "pid": pid if running else None, "mode": mode}
 
 
 def start_service(release: str | Path, state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float) -> dict[str, Any]:
@@ -61,13 +68,21 @@ def start_service(release: str | Path, state: str | Path, control: str | Path, p
         return _start_service(release, state, control, pid_file, log, interval)
 
 
-def _start_service(release: str | Path, state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float) -> dict[str, Any]:
-    release_path, state_path = Path(release).resolve(), Path(state).resolve()
+def start_portfolio_service(state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float) -> dict[str, Any]:
+    pid_path = Path(pid_file)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    with pid_path.with_suffix(pid_path.suffix + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _start_service(None, state, control, pid_file, log, interval)
+
+
+def _start_service(release: str | Path | None, state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float) -> dict[str, Any]:
+    release_path, state_path = Path(release).resolve() if release is not None else None, Path(state).resolve()
     control_path, pid_path, log_path = Path(control).resolve(), Path(pid_file).resolve(), Path(log).resolve()
     status = service_status(pid_path, state_path)
     if status["running"]:
         return {"started": False, "already_running": True, "pid": status["pid"]}
-    for path in (release_path, state_path, state_path.parent, control_path, control_path.parent, pid_path, pid_path.parent, log_path, log_path.parent):
+    for path in tuple(p for p in (release_path, state_path, state_path.parent, control_path, control_path.parent, pid_path, pid_path.parent, log_path, log_path.parent) if p is not None):
         if path.exists() and path.is_symlink():
             raise ValueError(f"Runtime path cannot be a symlink: {path}")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,8 +90,12 @@ def _start_service(release: str | Path, state: str | Path, control: str | Path, 
     package_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(package_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    command = [sys.executable, "-m", "autotrading", "portfolio-run" if release_path is None else "paper-run"]
+    if release_path is not None:
+        command.append(str(release_path))
+    command.extend(["--state", str(state_path), "--control", str(control_path), "--interval", str(interval)])
     process = subprocess.Popen(
-        [sys.executable, "-m", "autotrading", "paper-run", str(release_path), "--state", str(state_path), "--control", str(control_path), "--interval", str(interval)],
+        command,
         cwd=package_root, env=env, stdin=subprocess.DEVNULL, stdout=log_handle, stderr=subprocess.STDOUT,
         start_new_session=True, close_fds=True,
     )
