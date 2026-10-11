@@ -40,6 +40,16 @@ class SQLiteStateStore:
             self.db.execute("ALTER TABLE trades ADD COLUMN release_digest TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
+    @classmethod
+    def read_only(cls, path: str | Path) -> "SQLiteStateStore":
+        """Open an existing executor database without schema or journal writes."""
+        instance = cls.__new__(cls)
+        instance.path = Path(path)
+        instance.db = sqlite3.connect(f"{instance.path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        instance.db.row_factory = sqlite3.Row
+        instance.db.execute("PRAGMA query_only=ON")
+        return instance
+
     def activate(self, release: dict[str, Any]) -> str:
         payload = validate_strategy_release(release)
         digest = release_digest(payload)

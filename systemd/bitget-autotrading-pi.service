@@ -1,0 +1,36 @@
+[Unit]
+Description=Bitget portable paper executor (Raspberry Pi)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin/.local/lib/bitget-autotrading
+Environment=PYTHONPATH=/home/admin/.local/lib/bitget-autotrading
+Environment=BITGET_LIVE_TRADING_ENABLED=0
+EnvironmentFile=-/home/admin/.config/bitget-autotrading/executor.env
+ExecStartPre=/usr/bin/test -r /home/admin/.config/bitget-autotrading/active-release.json
+ExecStart=/usr/bin/python3 -m autotrading paper-run /home/admin/.config/bitget-autotrading/active-release.json --state /home/admin/.local/state/bitget-autotrading/state.sqlite --control /home/admin/.local/state/bitget-autotrading/control.json --interval 5 --stale-seconds 30
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+ReadWritePaths=/home/admin/.local/state/bitget-autotrading
+
+[Install]
+WantedBy=default.target

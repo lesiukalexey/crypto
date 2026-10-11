@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import stat
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from .contracts import load_strategy_release, release_digest
 from .bitget_demo import BitgetDemoAdapter, BitgetAPIError
 from .market import BitgetPublicTickerPoller
 from .paper import PaperExecutor, SQLiteStateStore
+from .pi_sync import pull_status as pi_pull_status, remote_stage_release, remote_status, stage_release as pi_stage_release
 from .service import read_json, service_status, set_controls, start_service, stop_service
 
 
@@ -49,6 +51,17 @@ def main() -> int:
     control.add_argument("action", choices=("pause_entries", "resume_entries", "close_positions"))
     demo_reconcile = commands.add_parser("demo-reconcile", help="read-only reconciliation of a Bitget Demo account")
     demo_reconcile.add_argument("--symbols", required=True, help="comma-separated uppercase USDT-futures symbols")
+    pi_status = commands.add_parser("pi-status", help="pull paper executor status over verified SSH")
+    pi_status.add_argument("--target", required=True, help="SSH host alias from the local SSH config")
+    pi_publish = commands.add_parser("pi-stage-release", help="send a validated paper strategy to Raspberry Pi over SSH")
+    pi_publish.add_argument("--target", required=True, help="SSH host alias from the local SSH config")
+    pi_publish.add_argument("--release", required=True, help="validated local strategy release JSON")
+    remote_status_parser = commands.add_parser("pi-remote-status", help="internal command used by the Pi SSH transport")
+    remote_status_parser.add_argument("--state", required=True)
+    remote_status_parser.add_argument("--release", required=True)
+    remote_stage_parser = commands.add_parser("pi-remote-stage-release", help="internal command used by the Pi SSH transport")
+    remote_stage_parser.add_argument("--state", required=True)
+    remote_stage_parser.add_argument("--release", required=True)
     args = parser.parse_args()
     if args.command == "demo-reconcile":
         try:
@@ -101,6 +114,34 @@ def main() -> int:
                 "error": str(exc)[:500],
             }, ensure_ascii=False))
             return 1
+    if args.command == "pi-status":
+        try:
+            print(json.dumps(pi_pull_status(args.target), ensure_ascii=False))
+            return 0
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Raspberry Pi status unavailable: {exc}", file=sys.stderr)
+            return 2
+    if args.command == "pi-stage-release":
+        try:
+            print(json.dumps(pi_stage_release(args.target, args.release), ensure_ascii=False))
+            return 0
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Could not stage Raspberry Pi strategy: {exc}", file=sys.stderr)
+            return 2
+    if args.command == "pi-remote-status":
+        try:
+            print(json.dumps(remote_status(args.state, args.release), ensure_ascii=False))
+            return 0
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(f"Could not read Pi executor status: {type(exc).__name__}", file=sys.stderr)
+            return 2
+    if args.command == "pi-remote-stage-release":
+        try:
+            print(json.dumps(remote_stage_release(args.state, args.release), ensure_ascii=False))
+            return 0
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Could not stage Pi strategy: {exc}", file=sys.stderr)
+            return 2
     if args.command in {"validate", "paper-check"}:
         try:
             release = load_strategy_release(args.release) if args.command == "validate" else PaperExecutor.validate_release(load_strategy_release(args.release))

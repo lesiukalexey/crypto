@@ -39,6 +39,11 @@ python3 -m autotrading paper-run autotrading/example-release.json \
 python3 -m autotrading status --state /var/lib/bitget-autotrading/state.sqlite
 ```
 
+For the same paper executor on Raspberry Pi OS, see
+[`RASPBERRY_PI.md`](RASPBERRY_PI.md). The Pi service uses systemd and local
+SQLite state; the workstation sends a validated strategy and reads telemetry
+over SSH with strict host-key checking.
+
 Paper v1 implements standard entry rules (`immediate:*` and `entry:*`), fixed,
 profit and loss exits, bid/ask fills, fees, slippage, exit confirmations,
 exposure limits, stale quote checks and restart recovery. It fails closed for
