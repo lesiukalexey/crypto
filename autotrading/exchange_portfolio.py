@@ -20,21 +20,21 @@ from .paper import KYIV, PaperExecutor, SQLiteStateStore
 
 
 class ExchangePortfolioExecutor:
-    def __init__(self, store: SQLiteStateStore, adapter: ExecutionAdapter, *, mode: str, stale_after_seconds: int = 30) -> None:
+    def __init__(self, store: SQLiteStateStore, adapter: ExecutionAdapter, *, mode: str, stale_after_seconds: int = 30, minimum_equity_percent: Decimal = Decimal("75")) -> None:
         if mode not in {"demo", "live"} or adapter.mode != mode:
             raise ValueError("Exchange portfolio mode and adapter must match Demo or Real")
         self.store, self.adapter, self.mode = store, adapter, mode
         self.stale_after_ms = stale_after_seconds * 1000
         self.entries_paused = False
         self.close_requested = False
+        self.minimum_equity_percent = minimum_equity_percent
         self.strategies: dict[str, dict[str, Any]] = {}
         self.hedges: dict[str, dict[str, Any]] = {}
         self.refresh()
 
     def refresh(self) -> None:
-        rows = self.store.db.execute("SELECT strategy_id,kind,payload FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
-        if not rows:
-            raise ValueError("No enabled strategies exist in the shared portfolio")
+        self.store.begin_strategy_runs(self.minimum_equity_percent)
+        rows = self.store.db.execute("SELECT p.strategy_id,p.kind,p.payload FROM portfolio_strategies p WHERE p.enabled=1 OR EXISTS (SELECT 1 FROM strategy_runs r WHERE r.strategy_id=p.strategy_id AND r.status='stopping') ORDER BY p.added_at_ms").fetchall()
         strategies: dict[str, dict[str, Any]] = {}
         hedges: dict[str, dict[str, Any]] = {}
         symbol_owners: dict[str, str] = {}
@@ -248,13 +248,15 @@ class ExchangePortfolioExecutor:
 
     def _notional(self, strategy_id: str, payload: dict[str, Any]) -> Decimal:
         account = self.store.account()
-        total = Decimal(account["initial_balance"] if account else "0")
-        count = max(1, len(self.strategies) + len(self.hedges))
-        allocation = total / count
+        run = self.store.active_strategy_run(strategy_id)
+        allocation = Decimal(run["allocation_usdt"]) if run else Decimal(0)
         execution, risk = payload["execution"], payload["risk"]
         return min(allocation * Decimal(execution["leverage"]), Decimal(risk["max_order_notional_usdt"]), allocation)
 
     def _entry_allowed(self, strategy_id: str, payload: dict[str, Any], symbol: str, side: str, price: Decimal, notional: Decimal, ts: int) -> bool:
+        run = self.store.active_strategy_run(strategy_id)
+        if run is None or run["status"] != "running":
+            return False
         account = self.store.account()
         if account is None:
             return False
@@ -320,6 +322,14 @@ class ExchangePortfolioExecutor:
             return
         if self._pending_orders():
             return
+        strategy_payloads = {**self.strategies, **self.hedges}
+        for strategy_id, payload in strategy_payloads.items():
+            equity = self.store.strategy_equity(strategy_id, payload, now_ms=now_ms, max_quote_age_ms=self.stale_after_ms)
+            if equity is not None:
+                self.store.update_strategy_equity(strategy_id, equity, self.minimum_equity_percent, now_ms)
+            run = self.store.active_strategy_run(strategy_id)
+            if run is not None and run["status"] == "stopping" and not self.store.db.execute("SELECT 1 FROM positions WHERE strategy_id=? LIMIT 1", (strategy_id,)).fetchone():
+                self.store.finish_strategy_run(strategy_id, equity=equity, now_ms=now_ms)
         rows = self.store.db.execute("SELECT * FROM positions ORDER BY strategy_id,symbol,leg").fetchall()
         for pos in rows:
             quote = fresh.get(pos["symbol"])
@@ -328,7 +338,8 @@ class ExchangePortfolioExecutor:
             payload = self.strategies.get(pos["strategy_id"]) or self.hedges.get(pos["strategy_id"])
             if payload is None:
                 continue
-            reason = "manual_close" if self.close_requested else self._exit_reason(pos, payload, quote)
+            run = self.store.active_strategy_run(pos["strategy_id"])
+            reason = ("loss_threshold" if run["stop_reason"] == "loss_threshold" else "manual_strategy_stop") if run is not None and run["status"] == "stopping" else "manual_close" if self.close_requested else self._exit_reason(pos, payload, quote)
             if reason:
                 side = "sell" if pos["side"] == "long" else "buy"
                 self._new_order(pos["strategy_id"], payload, pos["symbol"], pos["leg"], "close", side, Decimal(pos["quantity"]), reason, quote)
@@ -336,6 +347,9 @@ class ExchangePortfolioExecutor:
         if self.entries_paused or self.close_requested:
             return
         for strategy_id, payload in self.hedges.items():
+            run = self.store.active_strategy_run(strategy_id)
+            if run is None or run["status"] != "running":
+                continue
             long_symbol, short_symbol = payload["market"]["symbols"]
             have_long = self.store.position(long_symbol, strategy_id, "long") is not None
             have_short = self.store.position(short_symbol, strategy_id, "short") is not None
@@ -365,6 +379,9 @@ class ExchangePortfolioExecutor:
                     self._new_order(strategy_id, payload, long_symbol, "long", "open", "buy", notional / quote.ask, "hedge_entry", quote)
                     return
         for strategy_id, payload in self.strategies.items():
+            run = self.store.active_strategy_run(strategy_id)
+            if run is None or run["status"] != "running":
+                continue
             symbol = payload["market"]["symbols"][0]
             quote = fresh.get(symbol)
             if quote is None or self.store.position(symbol, strategy_id):

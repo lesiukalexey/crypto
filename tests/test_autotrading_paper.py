@@ -174,6 +174,66 @@ class PaperExecutorTests(unittest.TestCase):
         self.assertEqual(store.health()["trades"], 2)
         store.close()
 
+    def test_shared_drawdown_floor_tracks_peak_equity_and_stops_paper_strategy(self) -> None:
+        store = SQLiteStateStore(self.path)
+        payload = json.loads(json.dumps(self.payload))
+        payload["execution"].update(starting_balance_usdt="10", taker_fee_rate="0")
+        payload["risk"].update(max_order_notional_usdt="10", max_total_exposure_usdt="10")
+        store.add_portfolio_strategy(payload, name="Ten dollars")
+        executor = PortfolioExecutor(store, minimum_equity_percent=Decimal("75"))
+        strategy_id = store.db.execute("SELECT strategy_id FROM portfolio_strategies").fetchone()[0]
+        executor.on_quotes([self.quote("99.9", "100", 1_000_000)], now_ms=1_000_000)
+        self.assertFalse(store.update_strategy_equity(strategy_id, Decimal("100"), Decimal("75"), 1_001_000))
+        self.assertTrue(store.update_strategy_equity(strategy_id, Decimal("75"), Decimal("75"), 1_002_000))
+        executor.on_quotes([self.quote("75", "75.1", 1_005_000)], now_ms=1_005_000)
+        run = store.strategy_runs()[0]
+        self.assertEqual(run["status"], "stopped")
+        self.assertEqual(run["stop_reason"], "loss_threshold")
+        self.assertEqual(run["peak_equity_usdt"], "100")
+        self.assertEqual(run["ending_equity_usdt"], "7.5")
+        self.assertEqual(store.health()["open_positions"], 0)
+        self.assertEqual(store.db.execute("SELECT enabled FROM portfolio_strategies").fetchone()[0], 0)
+        store.close()
+
+    def test_seventy_five_percent_floor_stops_ten_dollar_allocation_at_seven_fifty(self) -> None:
+        store = SQLiteStateStore(self.path)
+        payload = json.loads(json.dumps(self.payload))
+        payload["execution"]["starting_balance_usdt"] = "10"
+        store.add_portfolio_strategy(payload, name="Ten dollars")
+        executor = PortfolioExecutor(store, minimum_equity_percent=Decimal("75"))
+        strategy_id = store.db.execute("SELECT strategy_id FROM portfolio_strategies").fetchone()[0]
+        run = store.active_strategy_run(strategy_id)
+        self.assertEqual(run["allocation_usdt"], "10")
+        self.assertFalse(store.update_strategy_equity(strategy_id, Decimal("10"), Decimal("75"), 1_001_000))
+        self.assertTrue(store.update_strategy_equity(strategy_id, Decimal("7.5"), Decimal("75"), 1_002_000))
+        store.close()
+
+    def test_manual_stop_ends_only_selected_strategy_and_can_be_resumed(self) -> None:
+        store = SQLiteStateStore(self.path)
+        first = json.loads(json.dumps(self.payload))
+        second = json.loads(json.dumps(self.payload))
+        second["release_id"] = "manual-stop-second"
+        second["market"]["symbols"] = ["ETHUSDT"]
+        store.add_portfolio_strategy(first, name="First")
+        second_id = store.add_portfolio_strategy(second, name="Second")
+        executor = PortfolioExecutor(store)
+        executor.on_quotes([
+            self.quote("99.9", "100", 1_000_000),
+            Quote("ETHUSDT", Decimal("49.9"), Decimal("50"), Decimal("49.95"), 1_000_000),
+        ], now_ms=1_000_000)
+        self.assertEqual(store.health()["open_positions"], 2)
+        store.request_strategy_stop(second_id, now_ms=1_001_000)
+        executor.on_quotes([Quote("ETHUSDT", Decimal("49.9"), Decimal("50"), Decimal("49.95"), 1_005_000)], now_ms=1_005_000)
+        runs = {run["strategy_name"]: run for run in store.strategy_runs()}
+        self.assertEqual(runs["Second"]["stop_reason"], "manual")
+        self.assertEqual(runs["Second"]["status"], "stopped")
+        self.assertEqual(runs["First"]["status"], "running")
+        self.assertEqual(store.health()["open_positions"], 1)
+        store.resume_strategy(second_id)
+        executor.refresh()
+        self.assertEqual(store.active_strategy_run(second_id)["status"], "running")
+        store.close()
+
     def test_legacy_single_strategy_positions_migrate_without_being_lost(self) -> None:
         connection = sqlite3.connect(self.path)
         connection.executescript("""

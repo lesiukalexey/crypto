@@ -71,7 +71,7 @@ def start_service(release: str | Path, state: str | Path, control: str | Path, p
         return _start_service(release, state, control, pid_file, log, interval)
 
 
-def start_portfolio_service(state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float, *, mode: str = "paper", enable_live: bool = False) -> dict[str, Any]:
+def start_portfolio_service(state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float, *, mode: str = "paper", enable_live: bool = False, risk_settings: str | Path | None = None) -> dict[str, Any]:
     if mode not in {"paper", "demo", "live"}:
         raise ValueError("Portfolio mode must be paper, demo, or live")
     if mode == "live" and not enable_live:
@@ -82,10 +82,10 @@ def start_portfolio_service(state: str | Path, control: str | Path, pid_file: st
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     with pid_path.with_suffix(pid_path.suffix + ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return _start_service(None, state, control, pid_file, log, interval, mode=mode, enable_live=enable_live)
+        return _start_service(None, state, control, pid_file, log, interval, mode=mode, enable_live=enable_live, risk_settings=risk_settings)
 
 
-def _start_service(release: str | Path | None, state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float, *, mode: str = "paper", enable_live: bool = False) -> dict[str, Any]:
+def _start_service(release: str | Path | None, state: str | Path, control: str | Path, pid_file: str | Path, log: str | Path, interval: float, *, mode: str = "paper", enable_live: bool = False, risk_settings: str | Path | None = None) -> dict[str, Any]:
     release_path, state_path = Path(release).resolve() if release is not None else None, Path(state).resolve()
     control_path, pid_path, log_path = Path(control).resolve(), Path(pid_file).resolve(), Path(log).resolve()
     status = service_status(pid_path, state_path)
@@ -105,6 +105,8 @@ def _start_service(release: str | Path | None, state: str | Path, control: str |
     command.extend(["--state", str(state_path), "--control", str(control_path), "--interval", str(interval)])
     if release_path is None:
         command.extend(["--mode", mode])
+        if risk_settings is not None:
+            command.extend(["--risk-settings", str(Path(risk_settings).resolve())])
         if enable_live:
             command.append("--enable-live")
     process = subprocess.Popen(

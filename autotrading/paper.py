@@ -35,6 +35,8 @@ class SQLiteStateStore:
           CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, exit_price TEXT NOT NULL, entry_ts INTEGER NOT NULL, exit_ts INTEGER NOT NULL, pnl TEXT NOT NULL, release_digest TEXT NOT NULL DEFAULT '', strategy_id TEXT NOT NULL DEFAULT 'legacy', leg TEXT NOT NULL DEFAULT 'single');
           CREATE TABLE IF NOT EXISTS account(id INTEGER PRIMARY KEY CHECK(id=1), balance TEXT NOT NULL, realized_pnl TEXT NOT NULL, day TEXT NOT NULL, daily_pnl TEXT NOT NULL, initial_balance TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS portfolio_strategies(strategy_id TEXT PRIMARY KEY, kind TEXT NOT NULL, digest TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, added_at_ms INTEGER NOT NULL, name TEXT NOT NULL DEFAULT '');
+          CREATE TABLE IF NOT EXISTS strategy_runs(id INTEGER PRIMARY KEY, strategy_id TEXT NOT NULL, strategy_name TEXT NOT NULL, kind TEXT NOT NULL, started_at_ms INTEGER NOT NULL, ended_at_ms INTEGER, status TEXT NOT NULL, stop_reason TEXT, allocation_usdt TEXT NOT NULL, peak_equity_usdt TEXT NOT NULL, last_equity_usdt TEXT NOT NULL, ending_equity_usdt TEXT, minimum_equity_percent TEXT NOT NULL, starting_trade_id INTEGER NOT NULL DEFAULT 0);
+          CREATE INDEX IF NOT EXISTS idx_strategy_runs_active ON strategy_runs(strategy_id,status,started_at_ms);
           CREATE TABLE IF NOT EXISTS exchange_orders(client_order_id TEXT PRIMARY KEY, mode TEXT NOT NULL, strategy_id TEXT NOT NULL, symbol TEXT NOT NULL, leg TEXT NOT NULL, intent TEXT NOT NULL, side TEXT NOT NULL, requested_qty TEXT NOT NULL, status TEXT NOT NULL, order_id TEXT, reason TEXT NOT NULL, digest TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS exchange_fills(trade_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT NOT NULL, fee TEXT NOT NULL, timestamp_ms INTEGER NOT NULL);
         """)
@@ -123,6 +125,112 @@ class SQLiteStateStore:
         self.db.commit()
         return digest
 
+    def active_strategy_run(self, strategy_id: str) -> sqlite3.Row | None:
+        return self.db.execute(
+            "SELECT * FROM strategy_runs WHERE strategy_id=? AND status IN ('running','stopping') ORDER BY id DESC LIMIT 1",
+            (strategy_id,),
+        ).fetchone()
+
+    def begin_strategy_runs(self, minimum_equity_percent: Decimal, now_ms: int | None = None) -> None:
+        now_ms = now_ms or int(time.time() * 1000)
+        rows = self.db.execute("SELECT * FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
+        pending = [row for row in rows if self.active_strategy_run(row["strategy_id"]) is None]
+        if not pending:
+            return
+        account = self.account()
+        if account is None:
+            return
+        active = self.db.execute("SELECT allocation_usdt FROM strategy_runs WHERE status IN ('running','stopping')").fetchall()
+        available = max(Decimal(0), Decimal(account["initial_balance"]) - sum((Decimal(row[0]) for row in active), Decimal(0)))
+        allocation = available / len(pending)
+        if allocation <= 0:
+            return
+        last_trade_id = int(self.db.execute("SELECT COALESCE(MAX(id),0) FROM trades").fetchone()[0])
+        with self.db:
+            for row in pending:
+                payload = json.loads(row["payload"])
+                name = row["name"] or payload.get("release_id", row["strategy_id"])
+                self.db.execute(
+                    "INSERT INTO strategy_runs(strategy_id,strategy_name,kind,started_at_ms,status,allocation_usdt,peak_equity_usdt,last_equity_usdt,minimum_equity_percent,starting_trade_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (row["strategy_id"], name, row["kind"], now_ms, "running", str(allocation), str(allocation), str(allocation), str(minimum_equity_percent), last_trade_id),
+                )
+                self.db.execute("INSERT INTO events(ts,type,payload) VALUES(?,?,?)", (now_ms, "strategy_run_started", json.dumps({"strategy_id": row["strategy_id"], "name": name, "allocation_usdt": str(allocation), "minimum_equity_percent": str(minimum_equity_percent)}, sort_keys=True)))
+
+    def strategy_equity(self, strategy_id: str, payload: dict[str, Any], *, now_ms: int, max_quote_age_ms: int) -> Decimal | None:
+        run = self.active_strategy_run(strategy_id)
+        if run is None:
+            return None
+        realized = Decimal(0)
+        for row in self.db.execute("SELECT pnl FROM trades WHERE strategy_id=? AND id>?", (strategy_id, run["starting_trade_id"])):
+            realized += Decimal(row[0])
+        equity = Decimal(run["allocation_usdt"]) + realized
+        execution = payload["execution"]
+        fee_rate = Decimal(execution["taker_fee_rate"])
+        slip = Decimal(execution["slippage_bps"]) / 10000
+        positions = self.db.execute("SELECT * FROM positions WHERE strategy_id=?", (strategy_id,)).fetchall()
+        for pos in positions:
+            quote = self.db.execute("SELECT * FROM quotes WHERE symbol=? ORDER BY ts DESC LIMIT 1", (pos["symbol"],)).fetchone()
+            if quote is None or now_ms - int(quote["ts"]) > max_quote_age_ms:
+                return None
+            qty, entry = Decimal(pos["quantity"]), Decimal(pos["entry_price"])
+            market = Decimal(quote["ask"] if pos["side"] == "short" else quote["bid"])
+            exit_price = market * (1 + slip) if pos["side"] == "short" else market * (1 - slip)
+            equity += qty * (entry - exit_price if pos["side"] == "short" else exit_price - entry)
+            equity -= Decimal(pos["entry_fee"]) + qty * exit_price * fee_rate
+        return equity
+
+    def update_strategy_equity(self, strategy_id: str, equity: Decimal, minimum_equity_percent: Decimal, now_ms: int) -> bool:
+        run = self.active_strategy_run(strategy_id)
+        if run is None or run["status"] != "running":
+            return False
+        peak = max(Decimal(run["peak_equity_usdt"]), equity)
+        triggered = equity < peak and equity <= peak * minimum_equity_percent / Decimal(100)
+        with self.db:
+            self.db.execute("UPDATE strategy_runs SET peak_equity_usdt=?,last_equity_usdt=?,minimum_equity_percent=? WHERE id=?", (str(peak), str(equity), str(minimum_equity_percent), run["id"]))
+            if triggered:
+                self.db.execute("UPDATE strategy_runs SET status='stopping',stop_reason='loss_threshold' WHERE id=? AND status='running'", (run["id"],))
+                self.db.execute("INSERT INTO events(ts,type,payload) VALUES(?,?,?)", (now_ms, "strategy_loss_stop_requested", json.dumps({"strategy_id": strategy_id, "equity_usdt": str(equity), "peak_equity_usdt": str(peak), "minimum_equity_percent": str(minimum_equity_percent)}, sort_keys=True)))
+        return triggered
+
+    def request_strategy_stop(self, strategy_id: str, *, now_ms: int | None = None) -> None:
+        now_ms = now_ms or int(time.time() * 1000)
+        run = self.active_strategy_run(strategy_id)
+        if run is None:
+            raise ValueError("Стратегия сейчас не запущена")
+        if run["status"] == "running":
+            with self.db:
+                self.db.execute("UPDATE strategy_runs SET status='stopping',stop_reason='manual' WHERE id=?", (run["id"],))
+                self.db.execute("INSERT INTO events(ts,type,payload) VALUES(?,?,?)", (now_ms, "strategy_manual_stop_requested", json.dumps({"strategy_id": strategy_id}, sort_keys=True)))
+
+    def resume_strategy(self, strategy_id: str) -> None:
+        row = self.db.execute("SELECT enabled FROM portfolio_strategies WHERE strategy_id=?", (strategy_id,)).fetchone()
+        if row is None:
+            raise ValueError("Стратегия не найдена")
+        if self.db.execute("SELECT 1 FROM positions WHERE strategy_id=? LIMIT 1", (strategy_id,)).fetchone():
+            raise ValueError("Сначала дождитесь закрытия позиций стратегии")
+        with self.db:
+            self.db.execute("UPDATE portfolio_strategies SET enabled=1 WHERE strategy_id=?", (strategy_id,))
+
+    def finish_strategy_run(self, strategy_id: str, *, equity: Decimal | None = None, now_ms: int | None = None) -> bool:
+        run = self.active_strategy_run(strategy_id)
+        if run is None or run["status"] != "stopping":
+            return False
+        if self.db.execute("SELECT 1 FROM positions WHERE strategy_id=? LIMIT 1", (strategy_id,)).fetchone():
+            return False
+        ending = equity if equity is not None else Decimal(run["last_equity_usdt"])
+        now_ms = now_ms or int(time.time() * 1000)
+        with self.db:
+            self.db.execute("UPDATE strategy_runs SET status='stopped',ended_at_ms=?,ending_equity_usdt=?,last_equity_usdt=? WHERE id=?", (now_ms, str(ending), str(ending), run["id"]))
+            self.db.execute("UPDATE portfolio_strategies SET enabled=0 WHERE strategy_id=?", (strategy_id,))
+            self.db.execute("INSERT INTO events(ts,type,payload) VALUES(?,?,?)", (now_ms, "strategy_run_ended", json.dumps({"strategy_id": strategy_id, "reason": run["stop_reason"], "ending_equity_usdt": str(ending)}, sort_keys=True)))
+        return True
+
+    def strategy_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='strategy_runs'").fetchone():
+            return []
+        rows = self.db.execute("SELECT * FROM strategy_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
     def open_position(self, symbol: str, side: str, quantity: Decimal, price: Decimal, fee: Decimal, ts: int, strategy_id: str = "legacy", leg: str = "single", digest: str = "") -> None:
         self.db.execute("INSERT INTO positions(strategy_id,symbol,leg,side,quantity,entry_price,entry_fee,entry_ts,release_digest) VALUES(?,?,?,?,?,?,?,?,?)", (strategy_id, symbol, leg, side, str(quantity), str(price), str(fee), ts, digest))
         self.db.commit()
@@ -169,7 +277,7 @@ class SQLiteStateStore:
         if active is None:
             active = self.db.execute("SELECT payload,digest FROM releases ORDER BY activated_at_ms DESC LIMIT 1").fetchone()
         if account is None:
-            return {"mode": execution_mode, "initialized": False, "active_release_digest": active["digest"] if active else None, "open_positions": 0, "positions": [], "unrealized_pnl_usdt": "0", "trades": 0, "recent_trades": [], "recent_events": [], "latest_event": None}
+            return {"mode": execution_mode, "initialized": False, "active_release_digest": active["digest"] if active else None, "open_positions": 0, "positions": [], "unrealized_pnl_usdt": "0", "trades": 0, "recent_trades": [], "recent_events": [], "latest_event": None, "strategy_runs": []}
         positions: list[dict[str, Any]] = []
         unrealized = Decimal(0)
         tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -211,7 +319,7 @@ class SQLiteStateStore:
         portfolio = [{"strategy_id": row["strategy_id"], "kind": row["kind"], "digest": row["digest"], "enabled": bool(row["enabled"]), "name": row["name"] or row["strategy_id"], "symbols": json.loads(row["payload"])["market"]["symbols"]} for row in self.db.execute("SELECT * FROM portfolio_strategies ORDER BY added_at_ms")] if "portfolio_strategies" in tables else []
         account_columns = {row[1] for row in self.db.execute("PRAGMA table_info(account)")}
         initial_balance = account["initial_balance"] if "initial_balance" in account_columns else account["balance"]
-        return {"mode": execution_mode, "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "initial_balance_usdt": initial_balance, "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "recent_trades": recent_trades, "recent_events": recent_events, "latest_event": None if latest is None else dict(latest), "portfolio_strategies": portfolio}
+        return {"mode": execution_mode, "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "initial_balance_usdt": initial_balance, "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "recent_trades": recent_trades, "recent_events": recent_events, "latest_event": None if latest is None else dict(latest), "portfolio_strategies": portfolio, "strategy_runs": self.strategy_runs()}
 
     def close(self) -> None:
         self.db.close()
@@ -283,13 +391,17 @@ class PaperExecutor:
             self.store.event("duplicate_quote", {"quote_ts": quote.timestamp_ms}, quote.symbol, quote.timestamp_ms)
             return
         pos = self.store.position(quote.symbol, self.strategy_id)
+        run = self.store.active_strategy_run(self.strategy_id)
         if pos:
-            if self.close_requested:
+            if run is not None and run["status"] == "stopping":
+                self._close_position(pos, quote, "loss_threshold" if run["stop_reason"] == "loss_threshold" else "manual_strategy_stop")
+            elif self.close_requested:
                 self._close_position(pos, quote, "manual_close")
             else:
                 self._manage_position(pos, quote)
         else:
-            self._consider_entry(quote)
+            if run is None or run["status"] == "running":
+                self._consider_entry(quote)
 
     def set_controls(self, *, entries_paused: bool, close_positions: bool) -> None:
         was_paused = self.entries_paused
@@ -394,20 +506,24 @@ class PaperExecutor:
 class PortfolioExecutor:
     """Runs multiple strategies against one virtual account and quote stream."""
 
-    def __init__(self, store: SQLiteStateStore, *, stale_after_seconds: int = 30) -> None:
+    def __init__(self, store: SQLiteStateStore, *, stale_after_seconds: int = 30, minimum_equity_percent: Decimal = Decimal("75")) -> None:
         self.store, self.stale_after_seconds = store, stale_after_seconds
         self.executors: dict[str, PaperExecutor] = {}
         self.hedges: dict[str, dict[str, Any]] = {}
         self.entries_paused = False
         self.close_requested = False
+        self.minimum_equity_percent = minimum_equity_percent
         self.refresh()
 
     def refresh(self) -> None:
-        rows = self.store.db.execute("SELECT strategy_id,kind,payload FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
-        allocation = Decimal((self.store.account() or {"initial_balance": "0"})["initial_balance"]) / max(1, len(rows))
+        self.store.begin_strategy_runs(self.minimum_equity_percent)
+        rows = self.store.db.execute("SELECT p.strategy_id,p.kind,p.payload FROM portfolio_strategies p WHERE p.enabled=1 OR EXISTS (SELECT 1 FROM strategy_runs r WHERE r.strategy_id=p.strategy_id AND r.status='stopping') ORDER BY p.added_at_ms").fetchall()
         active_ids: set[str] = set()
         for row in rows:
             strategy_id, payload = row["strategy_id"], json.loads(row["payload"])
+            run = self.store.active_strategy_run(strategy_id)
+            if run is None:
+                continue
             active_ids.add(strategy_id)
             if row["kind"] == "hedge":
                 self.hedges[strategy_id] = payload
@@ -415,6 +531,7 @@ class PortfolioExecutor:
                 continue
             self.hedges.pop(strategy_id, None)
             scaled = json.loads(json.dumps(payload))
+            allocation = Decimal(run["allocation_usdt"])
             scaled["execution"]["starting_balance_usdt"] = str(allocation)
             scaled["risk"]["max_order_notional_usdt"] = str(min(Decimal(scaled["risk"]["max_order_notional_usdt"]), allocation))
             total_balance = Decimal((self.store.account() or {"initial_balance": "0"})["initial_balance"])
@@ -434,7 +551,12 @@ class PortfolioExecutor:
         self.entries_paused, self.close_requested = entries_paused, close_positions
 
     def on_quotes(self, quotes: list[Quote], *, now_ms: int | None = None) -> None:
+        now_ms = now_ms or int(time.time() * 1000)
         fresh = {quote.symbol: quote for quote in quotes if self.store.quote(quote)}
+        for strategy_id, payload in {**self.executors_payloads(), **self.hedges}.items():
+            equity = self.store.strategy_equity(strategy_id, payload, now_ms=now_ms, max_quote_age_ms=self.stale_after_seconds * 1000)
+            if equity is not None:
+                self.store.update_strategy_equity(strategy_id, equity, self.minimum_equity_percent, now_ms)
         for executor in self.executors.values():
             for quote in fresh.values():
                 if quote.symbol in executor.release["market"]["symbols"]:
@@ -443,18 +565,32 @@ class PortfolioExecutor:
             long_symbol, short_symbol = payload["market"]["symbols"]
             long_quote, short_quote = fresh.get(long_symbol), fresh.get(short_symbol)
             positions = self.store.db.execute("SELECT * FROM positions WHERE strategy_id=? ORDER BY leg", (strategy_id,)).fetchall()
+            run = self.store.active_strategy_run(strategy_id)
             if positions:
-                if self.close_requested and long_quote and short_quote:
+                if run is not None and run["status"] == "stopping" and long_quote and short_quote:
                     self._close_hedge(strategy_id, positions, {long_symbol: long_quote, short_symbol: short_quote}, payload)
+                elif self.close_requested and long_quote and short_quote:
+                    self._close_hedge(strategy_id, positions, {long_symbol: long_quote, short_symbol: short_quote}, payload)
+                continue
+            if run is not None and run["status"] == "stopping":
                 continue
             if self.entries_paused or not long_quote or not short_quote or abs(long_quote.timestamp_ms - short_quote.timestamp_ms) > 120_000:
                 continue
             self._open_hedge(strategy_id, long_quote, short_quote, payload)
+        for strategy_id in list(self.executors) + list(self.hedges):
+            run = self.store.active_strategy_run(strategy_id)
+            if run is not None and run["status"] == "stopping":
+                payload = self.executors[strategy_id].release if strategy_id in self.executors else self.hedges[strategy_id]
+                equity = self.store.strategy_equity(strategy_id, payload, now_ms=now_ms, max_quote_age_ms=self.stale_after_seconds * 1000)
+                self.store.finish_strategy_run(strategy_id, equity=equity, now_ms=now_ms)
+
+    def executors_payloads(self) -> dict[str, dict[str, Any]]:
+        return {strategy_id: executor.release for strategy_id, executor in self.executors.items()}
 
     def _open_hedge(self, strategy_id: str, long_quote: Quote, short_quote: Quote, payload: dict[str, Any]) -> None:
         account = self.store.account()
-        count = max(1, int(self.store.db.execute("SELECT COUNT(*) FROM portfolio_strategies WHERE enabled=1").fetchone()[0]))
-        allocation = Decimal(account["initial_balance"] if account else "0") / count
+        run = self.store.active_strategy_run(strategy_id)
+        allocation = Decimal(run["allocation_usdt"]) if run else Decimal(0)
         day = datetime.fromtimestamp(long_quote.timestamp_ms / 1000, KYIV).date().isoformat()
         daily = Decimal(account["daily_pnl"]) if account and account["day"] == day else Decimal(0)
         if daily <= -Decimal(payload["risk"]["max_daily_loss_usdt"]):

@@ -27,7 +27,19 @@ risk limits there, publish the immutable release, then start the service. The
 workstation page shows process status, current position/PnL, recent paper
 trades and runtime events. It supports pausing new entries, resuming them,
 requesting position closes at the next fresh quote, and stopping the process.
-Stopping preserves virtual positions for the next start.
+Stopping the process preserves open positions and the active strategy run for the
+next start. Each strategy can also be stopped separately; that blocks new
+entries, closes only its own positions, and writes a completed session record.
+
+Set the shared stop floor under **Настройки → Автоторговля**. The default is
+75% of each strategy run's own peak equity. Equity includes the run's allocated
+starting balance, its realized PnL since the run began, and its fresh unrealized
+PnL. A strategy that starts with 10 USDT stops at 7.50 USDT; if its equity later
+reaches 100 USDT, it stops at 75 USDT. Paper, Demo, and Real read the same
+setting but keep separate balances and run histories. The **История запусков
+стратегий** table in Autotrading shows start/end, allocated balance, peak,
+ending balance, and whether the user stopped the run or the shared loss floor
+triggered it. A stopped strategy can be resumed as a new run.
 
 The page stores runtime files outside Git under `/var/tmp/bitget-autotrading-<uid>`
 with private permissions; this path survives ordinary reboots. It can be changed

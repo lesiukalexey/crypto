@@ -121,6 +121,22 @@ class ExchangePortfolioExecutorTests(unittest.TestCase):
         self.assertEqual(self.store.health()["trades"], 1)
         self.assertGreater(Decimal(self.store.account()["realized_pnl"]), 0)
 
+    def test_loss_threshold_closes_demo_position_and_records_automatic_stop(self) -> None:
+        self.executor.minimum_equity_percent = Decimal("75")
+        self.executor.on_quotes([self.quote("99.9", "100", 1_000_000)], now_ms=1_000_000)
+        self.executor.on_quotes([self.quote("99.9", "100", 1_005_000)], now_ms=1_005_000)
+        run = self.store.active_strategy_run(self.store.db.execute("SELECT strategy_id FROM portfolio_strategies").fetchone()[0])
+        self.assertEqual(run["status"], "running")
+        self.executor.on_quotes([self.quote("75", "75.1", 1_010_000)], now_ms=1_010_000)
+        run = self.store.strategy_runs()[0]
+        self.assertEqual(run["status"], "stopping")
+        self.assertEqual(run["stop_reason"], "loss_threshold")
+        self.assertEqual(self.store.db.execute("SELECT reason FROM exchange_orders ORDER BY created_at_ms DESC LIMIT 1").fetchone()[0], "loss_threshold")
+        self.executor.on_quotes([self.quote("75", "75.1", 1_015_000)], now_ms=1_015_000)
+        run = self.store.strategy_runs()[0]
+        self.assertEqual(run["status"], "stopped")
+        self.assertEqual(self.store.health()["open_positions"], 0)
+
     def test_hedge_pair_is_sent_sequentially_and_both_legs_are_fill_backed(self) -> None:
         self.store.close()
         hedge_temp = tempfile.TemporaryDirectory()

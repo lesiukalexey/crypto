@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .contracts import Position, load_strategy_release, release_digest
@@ -111,6 +111,19 @@ def _make_exchange_adapter(mode: str, store: SQLiteStateStore, enable_live: bool
     )
 
 
+def _minimum_equity_percent(path: str | None) -> Decimal:
+    if not path:
+        return Decimal("75")
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        value = Decimal(str(payload.get("minimum_equity_percent", "75")))
+        if not value.is_finite() or value < 1 or value > 100:
+            raise ValueError
+        return value
+    except (OSError, json.JSONDecodeError, AttributeError, InvalidOperation, ValueError):
+        return Decimal("75")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m autotrading")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -129,6 +142,7 @@ def main() -> int:
     portfolio_run.add_argument("--interval", type=float, default=5)
     portfolio_run.add_argument("--stale-seconds", type=int, default=30)
     portfolio_run.add_argument("--control")
+    portfolio_run.add_argument("--risk-settings")
     portfolio_run.add_argument("--mode", choices=("paper", "demo", "live"), default="paper")
     portfolio_run.add_argument("--enable-live", action="store_true", help="explicitly arm live mode; process switch is also required")
     status = commands.add_parser("status", help="show local paper executor state")
@@ -153,11 +167,18 @@ def main() -> int:
     portfolio_copy = commands.add_parser("portfolio-copy", help="copy missing strategy releases from another mode's portfolio")
     portfolio_copy.add_argument("--state", required=True, help="target mode SQLite state")
     portfolio_copy.add_argument("--source-state", required=True, help="source portfolio SQLite state")
+    strategy_stop = commands.add_parser("strategy-stop", help="stop one strategy and close its positions")
+    strategy_stop.add_argument("--state", required=True)
+    strategy_stop.add_argument("--strategy-id", required=True)
+    strategy_resume = commands.add_parser("strategy-resume", help="resume a stopped strategy with a new risk session")
+    strategy_resume.add_argument("--state", required=True)
+    strategy_resume.add_argument("--strategy-id", required=True)
     portfolio_start = commands.add_parser("portfolio-start", help="start the shared portfolio service in Paper, Demo, or Real mode")
     for option in ("state", "control", "pid-file", "log"):
         portfolio_start.add_argument("--" + option, required=True)
     portfolio_start.add_argument("--interval", type=float, default=5)
     portfolio_start.add_argument("--mode", choices=("paper", "demo", "live"), default="paper")
+    portfolio_start.add_argument("--risk-settings")
     portfolio_start.add_argument("--enable-live", action="store_true", help="explicitly arm live mode")
     demo_reconcile = commands.add_parser("demo-reconcile", help="read-only reconciliation of a Bitget Demo account")
     demo_reconcile.add_argument("--symbols", required=True, help="comma-separated uppercase USDT-futures symbols")
@@ -299,11 +320,25 @@ def main() -> int:
             if target is not None: target.close()
     if args.command == "portfolio-start":
         try:
-            print(json.dumps(start_portfolio_service(args.state, args.control, args.pid_file, args.log, args.interval, mode=args.mode, enable_live=args.enable_live)))
+            print(json.dumps(start_portfolio_service(args.state, args.control, args.pid_file, args.log, args.interval, mode=args.mode, enable_live=args.enable_live, risk_settings=args.risk_settings)))
             return 0
         except (ValueError, OSError, RuntimeError) as exc:
             print(f"Could not start portfolio: {exc}", file=sys.stderr)
             return 2
+    if args.command in {"strategy-stop", "strategy-resume"}:
+        store = SQLiteStateStore(args.state)
+        try:
+            if args.command == "strategy-stop":
+                store.request_strategy_stop(args.strategy_id)
+            else:
+                store.resume_strategy(args.strategy_id)
+            print(json.dumps({"ok": True, "strategy_id": args.strategy_id}))
+            return 0
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        finally:
+            store.close()
     if args.command == "service-start":
         try:
             print(json.dumps(start_service(args.release, args.state, args.control, args.pid_file, args.log, args.interval)))
@@ -334,10 +369,12 @@ def main() -> int:
         is_portfolio = args.command == "portfolio-run"
         release = None if is_portfolio else load_strategy_release(args.release)
         mode = args.mode if is_portfolio else "paper"
+        risk_settings_path = args.risk_settings if is_portfolio else None
+        minimum_equity_percent = _minimum_equity_percent(risk_settings_path)
         if is_portfolio and mode == "paper":
-            executor = PortfolioExecutor(store, stale_after_seconds=args.stale_seconds)
+            executor = PortfolioExecutor(store, stale_after_seconds=args.stale_seconds, minimum_equity_percent=minimum_equity_percent)
         elif is_portfolio:
-            executor = ExchangePortfolioExecutor(store, _make_exchange_adapter(mode, store, args.enable_live), mode=mode, stale_after_seconds=args.stale_seconds)
+            executor = ExchangePortfolioExecutor(store, _make_exchange_adapter(mode, store, args.enable_live), mode=mode, stale_after_seconds=args.stale_seconds, minimum_equity_percent=minimum_equity_percent)
         else:
             executor = PaperExecutor(release, store, stale_after_seconds=args.stale_seconds)
         store.db.execute("INSERT INTO runtime_meta(key,value) VALUES('execution_mode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (mode,)); store.db.commit()
@@ -361,9 +398,13 @@ def main() -> int:
                 controls = read_json(control_path, {"entries_paused": False, "close_positions": False})
                 close_requested = bool(controls.get("close_positions"))
                 if is_portfolio:
+                    executor.minimum_equity_percent = _minimum_equity_percent(risk_settings_path)
                     executor.refresh()
                 executor.set_controls(entries_paused=bool(controls.get("entries_paused")), close_positions=close_requested)
                 symbols = executor.symbols() if is_portfolio else release["market"]["symbols"]
+                if not symbols:
+                    time.sleep(max(0, args.interval - (time.monotonic() - began)))
+                    continue
                 quotes = poller.fetch(symbols)
                 received = {quote.symbol for quote in quotes}
                 for missing in set(symbols) - received:
