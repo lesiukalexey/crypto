@@ -14,6 +14,19 @@ function candleImportRespond(array $payload, int $status = 200): never
 
 function writeCandleImportJson(string $path, array $payload): void
 {
+    if (isset($payload['status'])) {
+        $previous = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
+        if (!isset($payload['started_at_ms'])) {
+            $payload['started_at_ms'] = is_array($previous) && isset($previous['started_at_ms'])
+                ? (int) $previous['started_at_ms']
+                : (int) floor(microtime(true) * 1000);
+        }
+        if ($payload['status'] !== 'running' && !isset($payload['finished_at_ms'])) {
+            $payload['finished_at_ms'] = is_array($previous) && isset($previous['finished_at_ms'])
+                ? (int) $previous['finished_at_ms']
+                : (int) floor(microtime(true) * 1000);
+        }
+    }
     $temporary = $path . '.tmp';
     if (file_put_contents($temporary, json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX) === false
         || !rename($temporary, $path)) {
@@ -212,6 +225,7 @@ try {
     $statusPath = $localRoot . '/job-' . $jobId . '.json';
     $status = [
         'job_id' => $jobId, 'status' => 'running', 'progress' => 0,
+        'started_at_ms' => (int) floor(microtime(true) * 1000),
         'start_day' => $startValue, 'end_day' => $endValue,
         'symbol_count' => count($symbols), 'completed_symbols' => 0,
         'current_symbol' => $symbols[0], 'candles_received' => 0,

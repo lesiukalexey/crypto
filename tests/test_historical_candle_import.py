@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from import_historical_candles import (
     INTERVAL_MS,
     PAGE_CANDLES,
     chunk_candle_ranges,
     missing_candle_ranges,
+    write_status,
 )
 
 
@@ -44,6 +48,20 @@ class HistoricalCandleCoverageTests(unittest.TestCase):
     def test_empty_or_reversed_range_has_no_gaps(self) -> None:
         self.assertEqual(missing_candle_ranges(100, 100, [], []), [])
         self.assertEqual(missing_candle_ranges(200, 100, [], []), [])
+
+    def test_status_preserves_start_time_and_records_finish_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "job.json"
+            write_status(path, {"status": "running", "progress": 0, "started_at_ms": 1234})
+            write_status(path, {"status": "running", "progress": 50})
+            running = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(running["started_at_ms"], 1234)
+            self.assertNotIn("finished_at_ms", running)
+
+            write_status(path, {"status": "ready", "progress": 100})
+            finished = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(finished["started_at_ms"], 1234)
+            self.assertGreaterEqual(finished["finished_at_ms"], finished["started_at_ms"])
 
 
 if __name__ == "__main__":

@@ -149,6 +149,17 @@ def write_status(path: Path | None, payload: dict[str, Any]) -> None:
     if path is None:
         return
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    previous: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                previous = saved
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+    payload.setdefault("started_at_ms", previous.get("started_at_ms", int(time.time() * 1000)))
+    if payload.get("status") != "running":
+        payload.setdefault("finished_at_ms", previous.get("finished_at_ms", int(time.time() * 1000)))
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     os.chmod(temporary, 0o600)
@@ -227,7 +238,7 @@ def main() -> int:
         latest_completed_ms = int(datetime.now(timezone.utc).timestamp() * 1000) // INTERVAL_MS * INTERVAL_MS
         end_exclusive_ms = min(requested_end_exclusive_ms, latest_completed_ms)
         write_status(args.status_file, {
-            "status": "running", "progress": 0,
+            "status": "running", "progress": 0, "started_at_ms": int(time.time() * 1000),
             "start_day": "per-symbol latest" if args.from_latest else args.start_date,
             "end_day": end_date_value, "symbol_count": len(symbols), "completed_symbols": 0,
             "current_symbol": symbols[0], "candles_received": 0, "candles_inserted": 0,
