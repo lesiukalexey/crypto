@@ -51,6 +51,16 @@ python3 -m autotrading paper-run autotrading/example-release.json \
 python3 -m autotrading status --state /var/lib/bitget-autotrading/state.sqlite
 ```
 
+The Bitget Demo and Real pages include a local date-filtered quote chart and a
+table of completed trades for the selected strategy and symbol. The executor
+persists Bitget fills and derives each closed trade from its actual average
+entry/exit prices and fees in the mode-specific SQLite state. Demo also compares
+that trade sequence with the same release digest in local Paper, showing side,
+net-result agreement, and PnL difference. Real shows its actual trade history
+without the Paper comparison. These views read the local executor ledger; they
+do not import older account fills from Bitget. The performance endpoint is
+loopback-only because the ledger contains private account activity.
+
 For the same paper executor on Raspberry Pi OS, see
 [`RASPBERRY_PI.md`](RASPBERRY_PI.md). The Pi service uses systemd and local
 SQLite state; the workstation sends a validated strategy and reads telemetry
