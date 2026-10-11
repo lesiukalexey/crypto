@@ -73,15 +73,15 @@ def _default_transport(method: str, url: str, headers: Mapping[str, str], body: 
         try:
             payload = json.loads(exc.read().decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            raise BitgetAPIError(f"Bitget demo API returned HTTP {exc.code}") from exc
+            raise BitgetAPIError(f"Bitget API returned HTTP {exc.code}") from exc
         # Bitget sends structured API errors with HTTP 4xx statuses. Preserve
         # only the parsed response so _request can allow narrowly-defined
         # cases such as a missing client order ID without exposing the body.
         if isinstance(payload, dict) and isinstance(payload.get("code"), str):
             return payload
-        raise BitgetAPIError(f"Bitget demo API returned HTTP {exc.code}") from exc
+        raise BitgetAPIError(f"Bitget API returned HTTP {exc.code}") from exc
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise BitgetAPIError(f"Bitget demo API request failed: {type(exc).__name__}") from exc
+        raise BitgetAPIError(f"Bitget API request failed: {type(exc).__name__}") from exc
 
 
 class BitgetDemoAdapter:
@@ -220,7 +220,7 @@ class BitgetDemoAdapter:
             raise BitgetAPIError("Bitget returned malformed demo contract metadata")
         contract = next((row for row in rows if isinstance(row, dict) and row.get("symbol") == symbol), None)
         if contract is None or contract.get("symbolStatus") != "normal" or contract.get("symbolType") != "perpetual":
-            raise ExchangeStateMismatch(f"Contract {symbol} is unavailable for demo trading")
+            raise ExchangeStateMismatch(f"Contract {symbol} is unavailable for futures trading")
         margin_coins = contract.get("supportMarginCoins")
         if not isinstance(margin_coins, list) or MARGIN_COIN not in margin_coins:
             raise ExchangeStateMismatch(f"Contract {symbol} does not support USDT margin")
@@ -248,20 +248,20 @@ class BitgetDemoAdapter:
         data = self._request("GET", "/api/v2/mix/order/fills", params={"orderId": order_id, "productType": PRODUCT_TYPE, "symbol": symbol}).get("data")
         rows = data.get("fillList") if isinstance(data, dict) else None
         if not isinstance(rows, list):
-            raise BitgetAPIError("Bitget returned malformed demo fill history")
+            raise BitgetAPIError("Bitget returned malformed fill history")
         if any(not isinstance(row, dict) for row in rows):
-            raise BitgetAPIError("Bitget returned a malformed demo fill")
+            raise BitgetAPIError("Bitget returned a malformed fill")
         return tuple(rows)
 
     def positions(self) -> tuple[Position, ...]:
         response = self._request("GET", "/api/v2/mix/position/all-position", params={"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
         data = response.get("data")
         if not isinstance(data, list):
-            raise BitgetAPIError("Bitget returned malformed demo positions")
+            raise BitgetAPIError("Bitget returned malformed positions")
         result: list[Position] = []
         for row in data:
             if not isinstance(row, dict):
-                raise BitgetAPIError("Bitget returned a malformed demo position")
+                raise BitgetAPIError("Bitget returned a malformed position")
             symbol = row.get("symbol")
             side = row.get("holdSide")
             quantity = _decimal(row.get("total", "0"), "position quantity", allow_zero=True)
@@ -270,7 +270,7 @@ class BitgetDemoAdapter:
             if symbol not in self.symbols or side not in {"long", "short"}:
                 # Preserve visibility of unexpected positions so reconcile()
                 # can block new orders instead of silently filtering them.
-                raise ExchangeStateMismatch(f"Exchange contains an unmanaged demo position: {symbol}/{side}")
+                raise ExchangeStateMismatch(f"Exchange contains an unmanaged position: {symbol}/{side}")
             result.append(Position(symbol, side, quantity, _decimal(row.get("openPriceAvg"), "average entry price")))
         return tuple(sorted(result, key=lambda p: (p.symbol, p.side)))
 
@@ -294,7 +294,7 @@ class BitgetDemoAdapter:
                     "symbol": symbol,
                 }).get("data")
                 if not isinstance(account, dict) or account.get("posMode") != "one_way_mode" or account.get("marginMode") != "crossed":
-                    raise ExchangeStateMismatch(f"Demo account configuration for {symbol} must be one-way and crossed margin")
+                    raise ExchangeStateMismatch(f"Account configuration for {symbol} must be one-way and crossed margin")
             remote = self.positions()
             exchange_pending: dict[str, dict[str, Any]] = {}
             for status in ("live", "partially_filled"):
@@ -309,7 +309,7 @@ class BitgetDemoAdapter:
                 if pending_rows is None:
                     pending_rows = []
                 if not isinstance(pending_rows, list):
-                    raise BitgetAPIError("Bitget returned malformed pending demo orders")
+                    raise BitgetAPIError("Bitget returned malformed pending orders")
                 for row in pending_rows:
                     if not isinstance(row, dict) or not row.get("clientOid") or not row.get("orderId") or row.get("symbol") not in self.symbols:
                         raise ExchangeStateMismatch("Bitget returned an unmanaged or malformed pending demo order")

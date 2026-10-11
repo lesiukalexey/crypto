@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from urllib.parse import urlsplit
 
@@ -14,6 +16,13 @@ from autotrading.bitget_demo import (
     ExchangeStateMismatch,
 )
 from autotrading.contracts import OrderRequest, Position
+from autotrading.bitget_production import (
+    LIVE_ORDER_ACKNOWLEDGEMENT,
+    BitgetProductionAdapter,
+    LiveRiskLimitExceeded,
+    LiveRiskSnapshot,
+    LiveTradingDisabled,
+)
 
 
 class FakeBitget:
@@ -38,10 +47,19 @@ class FakeBitget:
                 raise BitgetAPIError("network failure")
             return {"code": "00000", "data": self.positions}
         if path.endswith("/market/contracts"):
+            from urllib.parse import parse_qs
+            symbol = parse_qs(urlsplit(url).query).get("symbol", ["BTCUSDT"])[0]
             return {"code": "00000", "data": [{
-                "symbol": "BTCUSDT", "symbolStatus": "normal", "symbolType": "perpetual",
+                "symbol": symbol, "symbolStatus": "normal", "symbolType": "perpetual",
                 "supportMarginCoins": ["USDT"], "sizeMultiplier": "0.001",
                 "minTradeNum": "0.001", "maxMarketOrderQty": "" if self.demo_max_missing and headers.get("paptrading") == "1" else "100",
+                "pricePlace": "1", "priceEndStep": "1",
+            }]}
+        if path.endswith("/market/symbol-price"):
+            from urllib.parse import parse_qs
+            symbol = parse_qs(urlsplit(url).query).get("symbol", ["BTCUSDT"])[0]
+            return {"code": "00000", "data": [{
+                "symbol": symbol, "price": "100", "markPrice": "101", "ts": "1700000000000",
             }]}
         if path.endswith("/order/orders-pending"):
             from urllib.parse import parse_qs
@@ -67,6 +85,23 @@ def make_adapter(fake: FakeBitget) -> BitgetDemoAdapter:
     return BitgetDemoAdapter(
         ["BTCUSDT"], api_key="demo-key", secret="demo-secret", passphrase="demo-pass",
         transport=fake, clock_ms=lambda: 1_700_000_000_000,
+    )
+
+
+def make_production_adapter(fake: FakeBitget, **kwargs) -> BitgetProductionAdapter:
+    symbols = kwargs.pop("symbols", ["BTCUSDT"])
+    limits = kwargs.pop("risk_limits", {
+        "max_order_notional_usdt": "10",
+        "max_total_exposure_usdt": "20",
+        "max_daily_loss_usdt": "5",
+        "max_open_positions": 1,
+    })
+    return BitgetProductionAdapter(
+        symbols,
+        limits,
+        daily_risk_snapshot=kwargs.pop("daily_risk_snapshot", lambda: LiveRiskSnapshot(Decimal("0"), 1_700_000_000_000)),
+        api_key="live-key", secret="live-secret", passphrase="live-pass",
+        max_slippage_bps=10, transport=fake, clock_ms=lambda: 1_700_000_000_000, **kwargs,
     )
 
 
@@ -135,6 +170,126 @@ class BitgetDemoAdapterTests(unittest.TestCase):
         public_lookup = next(call for call in fake.calls if call[1].endswith("/market/contracts?productType=USDT-FUTURES&symbol=BTCUSDT") and "paptrading" not in call[2])
         self.assertEqual(public_lookup[2], {"Accept": "application/json"})
 
+
+class BitgetProductionAdapterTests(unittest.TestCase):
+    def test_demo_credentials_are_not_used_as_production_credentials(self) -> None:
+        fake = FakeBitget()
+        with patch.dict(os.environ, {
+            "BITGET_DEMO_API_KEY": "demo-key",
+            "BITGET_DEMO_API_SECRET": "demo-secret",
+            "BITGET_DEMO_API_PASSPHRASE": "demo-pass",
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, r"separate BITGET_LIVE_API_\*"):
+                BitgetProductionAdapter(
+                    ["BTCUSDT"],
+                    {"max_order_notional_usdt": "10", "max_total_exposure_usdt": "20", "max_daily_loss_usdt": "5", "max_open_positions": 1},
+                    max_slippage_bps=10, transport=fake,
+                )
+
+    def test_live_orders_are_disabled_by_default_and_never_add_demo_header(self) -> None:
+        fake = FakeBitget()
+        adapter = make_production_adapter(fake)
+        self.assertEqual(adapter.mode, "live")
+        self.assertTrue(adapter.reconcile([]).matched)
+        with self.assertRaises(LiveTradingDisabled):
+            adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("0.01"), "live-off"))
+        self.assertFalse(any(urlsplit(call[1]).path.endswith("/order/place-order") for call in fake.calls))
+        self.assertTrue(all("paptrading" not in headers for _, _, headers, _, _ in fake.calls))
+        request_path = urlsplit(fake.calls[0][1]).path + "?" + urlsplit(fake.calls[0][1]).query
+        expected = base64.b64encode(hmac.new(b"live-secret", ("1700000000000GET" + request_path).encode(), hashlib.sha256).digest()).decode()
+        self.assertEqual(fake.calls[0][2]["ACCESS-SIGN"], expected)
+
+    def test_enabled_order_requires_two_switches_and_obeys_order_notional_limit(self) -> None:
+        fake = FakeBitget()
+        with patch.dict(os.environ, {"BITGET_LIVE_TRADING_ENABLED": "1"}):
+            adapter = make_production_adapter(fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT)
+            self.assertTrue(adapter.reconcile([]).matched)
+            result = adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("0.01"), "live-ok"))
+            self.assertTrue(result.accepted)
+            self.assertTrue(urlsplit(fake.calls[-1][1]).path.endswith("/order/place-order"))
+            self.assertNotIn("paptrading", fake.calls[-1][2])
+            self.assertIn('"orderType":"limit"', fake.calls[-1][3] or "")
+            self.assertIn('"force":"ioc"', fake.calls[-1][3] or "")
+            self.assertIn('"price":"101.1"', fake.calls[-1][3] or "")
+
+            fake = FakeBitget()
+            adapter = make_production_adapter(fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT)
+            adapter.reconcile([])
+            adapter.submit(OrderRequest("BTCUSDT", "sell", Decimal("0.01"), "live-sell"))
+            self.assertIn('"price":"100.9"', fake.calls[-1][3] or "")
+
+        fake = FakeBitget()
+        with patch.dict(os.environ, {"BITGET_LIVE_TRADING_ENABLED": "1"}):
+            adapter = make_production_adapter(fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT, risk_limits={
+                "max_order_notional_usdt": "1", "max_total_exposure_usdt": "20",
+                "max_daily_loss_usdt": "5", "max_open_positions": 1,
+            })
+            adapter.reconcile([])
+            with self.assertRaisesRegex(LiveRiskLimitExceeded, "max_order_notional"):
+                adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("0.02"), "live-big"))
+        self.assertFalse(any(urlsplit(call[1]).path.endswith("/order/place-order") for call in fake.calls))
+
+    def test_daily_loss_stale_snapshot_and_exposure_fail_closed(self) -> None:
+        with patch.dict(os.environ, {"BITGET_LIVE_TRADING_ENABLED": "1"}):
+            fake = FakeBitget()
+            adapter = make_production_adapter(
+                fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT,
+                daily_risk_snapshot=lambda: LiveRiskSnapshot(Decimal("-5"), 1_700_000_000_000),
+            )
+            adapter.reconcile([])
+            with self.assertRaisesRegex(LiveRiskLimitExceeded, "Daily loss"):
+                adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("0.01"), "live-loss"))
+
+            fake = FakeBitget()
+            adapter = make_production_adapter(
+                fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT,
+                daily_risk_snapshot=lambda: LiveRiskSnapshot(Decimal("0"), 1_699_000_000_000),
+            )
+            adapter.reconcile([])
+            with self.assertRaisesRegex(ExchangeStateMismatch, "stale"):
+                adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("0.01"), "live-stale"))
+
+            fake = FakeBitget()
+            adapter = make_production_adapter(fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT)
+            fake.positions = [{"symbol": "BTCUSDT", "holdSide": "long", "total": "0.19", "openPriceAvg": "100"}]
+            position = Position("BTCUSDT", "long", Decimal("0.19"), Decimal("100"))
+            self.assertTrue(adapter.reconcile([position]).matched)
+            with self.assertRaisesRegex(LiveRiskLimitExceeded, "max_total_exposure"):
+                adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("0.01"), "live-exposure"))
+
+    def test_max_open_position_limit_blocks_an_additional_symbol(self) -> None:
+        fake = FakeBitget()
+        fake.positions = [{"symbol": "BTCUSDT", "holdSide": "long", "total": "0.01", "openPriceAvg": "100"}]
+        with patch.dict(os.environ, {"BITGET_LIVE_TRADING_ENABLED": "1"}):
+            adapter = make_production_adapter(fake, symbols=["BTCUSDT", "ETHUSDT"], allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT)
+            self.assertTrue(adapter.reconcile([Position("BTCUSDT", "long", Decimal("0.01"), Decimal("100"))]).matched)
+            with self.assertRaisesRegex(LiveRiskLimitExceeded, "Maximum number"):
+                adapter.submit(OrderRequest("ETHUSDT", "buy", Decimal("0.001"), "live-position-cap"))
+        self.assertFalse(any(urlsplit(call[1]).path.endswith("/order/place-order") for call in fake.calls))
+
+    def test_live_enablement_requires_env_switch_ack_and_risk_provider(self) -> None:
+        fake = FakeBitget()
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(LiveTradingDisabled):
+                make_production_adapter(fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT)
+            with patch.dict(os.environ, {"BITGET_LIVE_TRADING_ENABLED": "1"}):
+                with self.assertRaises(LiveTradingDisabled):
+                    make_production_adapter(fake, allow_live_orders=True, live_acknowledgement=None, daily_risk_snapshot=None)
+                with self.assertRaises(ValueError):
+                    make_production_adapter(fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT, daily_risk_snapshot=None)
+
+    def test_live_switch_must_remain_enabled_at_order_time(self) -> None:
+        fake = FakeBitget()
+        with patch.dict(os.environ, {"BITGET_LIVE_TRADING_ENABLED": "1"}):
+            adapter = make_production_adapter(fake, allow_live_orders=True, live_acknowledgement=LIVE_ORDER_ACKNOWLEDGEMENT)
+            adapter.reconcile([])
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(LiveTradingDisabled):
+                adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("0.01"), "live-switch-off"))
+        self.assertFalse(any(urlsplit(call[1]).path.endswith("/order/place-order") for call in fake.calls))
+
+
+class BitgetDemoRecoveryTests(unittest.TestCase):
     def test_partial_fills_and_reduce_only_close_are_supported(self) -> None:
         fake = FakeBitget()
         adapter = make_adapter(fake)

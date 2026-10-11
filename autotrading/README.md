@@ -106,3 +106,32 @@ workstation, the page also checks for the protected file under
 `$HOME/.ai/home/.local/bitget-autotrading-demo.env`; on another machine, set the
 environment variable to that machine's protected path. The CLI check is
 `python3 -m autotrading demo-reconcile --symbols BTCUSDT`.
+
+## Bitget production adapter (disabled)
+
+`BitgetProductionAdapter` is separate from the Demo adapter and reads only
+`BITGET_LIVE_API_KEY`, `BITGET_LIVE_API_SECRET`, and
+`BITGET_LIVE_API_PASSPHRASE`. It never adds `paptrading: 1`. Order submission
+is off by default and requires all three explicit gates: a caller-provided
+`allow_live_orders=True`, `BITGET_LIVE_TRADING_ENABLED=1`, and the exact
+`I_ACKNOWLEDGE_LIVE_ORDERS` acknowledgement. The environment switch is checked
+again at each submission. No production credentials are configured, and the
+dashboard and paper service do not construct this adapter.
+
+The adapter requires a successful one-way/crossed reconciliation, validates
+the symbol/quantity and release risk limits, checks a fresh daily-loss snapshot
+from a trusted durable-ledger provider, and estimates order/current exposure
+from fresh mark/last prices. It submits price-bounded IOC limit orders using
+the configured `max_slippage_bps`; movement beyond that cap leaves the order
+unfilled or partially filled for reconciliation. Reduce-only orders must
+match an existing reconciled position and cannot exceed its size. The client
+order ID lookup prevents duplicate submissions after a retry.
+
+Bitget does not expose a check here that proves an API key lacks transfer or
+withdrawal scopes. Before any future production switch, use a dedicated
+sub-account and a key with only read/trade permissions, no transfer or
+withdrawal permission, and an IP allowlist where available. This task does not
+create such a key or activate live trading. See Bitget's
+[API key and security guidance](https://www.bitget.com/docs/classic/rest-api),
+[USDT futures order endpoint](https://www.bitget.com/api-doc/classic/contract/trade/Place-Order),
+and [futures market price endpoint](https://www.bitget.com/docs/catalog/classic-contract-market/classic-contract-market).
