@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "release_id": "btc-paper-example-001",
+  "created_at_utc": "2026-10-11T09:00:00Z",
+  "market": {
+    "category": "USDT-FUTURES",
+    "symbols": ["BTCUSDT"],
+    "margin_coin": "USDT"
+  },
+  "strategy": {
+    "entry_config": "entry:10:20:follow",
+    "entry_signal_mode": "exact",
+    "entry_direction_mode": "follow",
+    "exit_config": "exit:fixed:100:50",
+    "martingale_mode": "none",
+    "martingale_timing": "immediate",
+    "martingale_attempts": 3,
+    "max_chain_loss_usdt": "0",
+    "max_day_loss_usdt": "0"
+  },
+  "execution": {
+    "starting_balance_usdt": "10",
+    "leverage": "1",
+    "taker_fee_rate": "0.0006",
+    "slippage_bps": "0"
+  },
+  "risk": {
+    "max_order_notional_usdt": "10",
+    "max_total_exposure_usdt": "10",
+    "max_daily_loss_usdt": "1",
+    "max_open_positions": 1
+  },
+  "backtest": {
+    "start_date": "2026-10-01",
+    "end_date": "2026-10-10",
+    "result_key": "example-backtest-key",
+    "net_result_usdt": "1.25",
+    "trade_count": 4
+  }
+}
