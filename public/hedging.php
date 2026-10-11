@@ -105,6 +105,7 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 :root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149;--green:#42d6a4;--red:#ff7188;--blue:#86a8ff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:none;margin:0 auto;padding:30px 20px}.page-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:14px}.eyebrow{color:#8ea5ff;text-transform:uppercase;letter-spacing:.13em;font-size:12px;font-weight:700}.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.panel{background:color-mix(in srgb,var(--panel) 95%,transparent);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px;box-shadow:0 18px 50px #0003}.filters{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.field{display:grid;gap:7px;color:var(--muted);font-size:13px;font-weight:600}.field select,.field input{font:inherit;color:var(--text);background:#0c1222;border:1px solid #34415e;border-radius:10px;padding:11px 13px;min-width:160px}.field.pair-field select{min-width:360px}.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:0 0 18px}.stat{background:#0c1222;border:1px solid var(--line);border-radius:12px;padding:13px 15px;min-width:0}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.gain{color:var(--green)}.loss{color:var(--red)}.chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}.chart-head h2{font-size:17px;margin:0}.count,.small-note,.status{color:var(--muted);font-size:13px}.legend{display:flex;gap:18px;flex-wrap:wrap;color:#b7c1d5;font-size:13px;margin:14px 0}.legend span{display:inline-flex;gap:7px;align-items:center}.dot{width:9px;height:9px;border-radius:50%}.chart-wrap{position:relative}#hedge-chart{width:100%;height:clamp(260px,38vw,520px);display:block;overflow:visible}#tooltip{position:absolute;display:none;z-index:2;pointer-events:none;min-width:190px;padding:10px 12px;border:1px solid #394765;border-radius:10px;background:#0b1020f2;font-size:12px;white-space:nowrap}.status.error{color:#ffb3bf}.empty{display:grid;place-items:center;min-height:230px;color:var(--muted);text-align:center;padding:20px}.small-note{margin:12px 0 0}@media(max-width:650px){.wrap{padding:22px 14px}.panel{padding:16px}.page-heading{align-items:flex-start}.field,.field select,.field input,.field.pair-field select{width:100%;min-width:0}.filters{align-items:stretch}.view-nav{width:100%}.view-nav a{flex:1;text-align:center}#hedge-chart{height:70vw}}
 .chart-mode{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.chart-mode button{border:1px solid #34415e;border-radius:9px;padding:9px 13px;background:#0c1222;color:#b7c1d5;font:inherit;cursor:pointer}.chart-mode button[aria-pressed="true"]{background:#263968;border-color:#5974bd;color:#fff}.chart-mode button:focus-visible{outline:2px solid #86a8ff;outline-offset:2px}
 .ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}.stat small{display:block;color:var(--muted);font-size:12px;font-weight:400;margin-top:3px}
+.table-wrap{overflow:auto}.local-moves-table{width:100%;border-collapse:collapse;min-width:760px;font-size:13px}.local-moves-table th,.local-moves-table td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}.local-moves-table th{color:var(--muted);font-weight:600}.local-moves-table th:first-child,.local-moves-table td:first-child{text-align:left}
 </style>
 </head>
 <body><main class="wrap">
@@ -127,6 +128,7 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <p class="status" id="hedge-status" role="status" aria-live="polite">Загружаю котировки выбранной пары…</p>
 <section class="summary" id="hedge-summary" hidden></section>
 <section class="panel"><div class="chart-mode" role="group" aria-label="Вид графика хеджирования"><button type="button" data-chart-view="net" aria-pressed="true">Чистая доходность по хеджированию</button><button type="button" data-chart-view="ticker" aria-pressed="false">Хеджирование между тикерами</button></div><div class="chart-head"><h2 id="hedge-chart-title">Чистая доходность по хеджированию</h2><span class="count" id="hedge-point-count"></span></div><div class="legend" id="hedge-legend"></div><div class="chart-wrap"><svg id="hedge-chart" role="img" aria-label="Чистая доходность по хеджированию во времени"></svg><div id="tooltip"></div></div><p class="small-note" id="hedge-chart-note">По вертикали — чистый результат в USDT с учётом комиссий открытия и расчётного закрытия. Позиции открываются на первом синхронизированном снимке выбранного периода.</p></section>
+<section class="panel" id="local-moves-panel" hidden><div class="chart-head"><h2>Крупнейшие локальные падения</h2><span class="count" id="local-moves-summary"></span></div><div class="table-wrap"><table class="local-moves-table"><thead><tr><th>№</th><th>Максимум · время</th><th>Максимум · USDT</th><th>Минимум · время</th><th>Минимум · USDT</th><th>Падение</th><th>Длительность</th></tr></thead><tbody id="local-moves-rows"></tbody></table></div></section>
 </main>
 <script>
 const form=document.querySelector('#hedge-filters'),pairSelect=document.querySelector('#hedge-pair'),statusNode=document.querySelector('#hedge-status'),summaryNode=document.querySelector('#hedge-summary'),chart=document.querySelector('#hedge-chart'),pointCount=document.querySelector('#hedge-point-count'),tooltip=document.querySelector('#tooltip'),ns='http://www.w3.org/2000/svg';
@@ -142,6 +144,26 @@ const fmt=(n,d=4)=>Number(n).toLocaleString('ru-RU',{minimumFractionDigits:d,max
 const money=n=>(Number(n)>0?'+':'')+fmt(n)+' USDT';
 const signed=(n,d=2)=>(Number(n)>0?'+':Number(n)<0?'−':'')+fmt(Math.abs(Number(n)),d);
 const durationLabel=milliseconds=>{let minutes=Math.floor(Math.max(0,Number(milliseconds))/60000);const days=Math.floor(minutes/1440);minutes%=1440;const hours=Math.floor(minutes/60);minutes%=60;const parts=[];if(days)parts.push(`${days} д`);if(hours)parts.push(`${hours} ч`);if(minutes)parts.push(`${minutes} мин`);return parts.join(' ')||'меньше минуты'};
+function findLocalDeclines(points){
+  const peaks=[],troughs=[];let direction=0;
+  for(let i=1;i<points.length;i++){
+    const difference=Number(points[i].net_pnl)-Number(points[i-1].net_pnl);
+    if(difference===0)continue;
+    const nextDirection=difference>0?1:-1;
+    if(direction===1&&nextDirection===-1)peaks.push(i-1);
+    if(direction===-1&&nextDirection===1)troughs.push(i-1);
+    direction=nextDirection;
+  }
+  const declines=[];let troughCursor=0;
+  for(const peakIndex of peaks){
+    while(troughCursor<troughs.length&&troughs[troughCursor]<=peakIndex)troughCursor++;
+    if(troughCursor>=troughs.length)continue;
+    const minimumIndex=troughs[troughCursor++],peak=points[peakIndex],minimum=points[minimumIndex];
+    declines.push({peakIndex,minimumIndex,peakValue:Number(peak.net_pnl),minimumValue:Number(minimum.net_pnl),peakTime:Number(peak.t),minimumTime:Number(minimum.t),decline:Number(peak.net_pnl)-Number(minimum.net_pnl)});
+  }
+  return declines;
+}
+const localMovesPanel=document.querySelector('#local-moves-panel'),localMovesSummary=document.querySelector('#local-moves-summary'),localMovesRows=document.querySelector('#local-moves-rows');
 const pairRankingStatus=document.querySelector('#pair-ranking-status');
 let pairRankingRequest=0;
 const pairWasRequestedOnPageLoad=<?= $pairWasRequested ? 'true' : 'false' ?>;
@@ -161,13 +183,20 @@ function render(data){
   chartTitle.textContent=netView?'Чистая доходность по хеджированию':'Хеджирование между тикерами';
   chart.setAttribute('aria-label',netView?'График чистой доходности в USDT во времени':'График доходности лонга, шорта и общего баланса');
   chartModeButtons.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartView===(netView?'net':'ticker'))));
-  chartLegend.innerHTML=series.map(item=>`<span><i class="dot" style="background:${item.color}"></i>${item.label}</span>`).join('')+(netView?'<span><i class="dot" style="background:#86a8ff"></i>Максимум за период</span><span><i class="dot" style="background:#ff7188"></i>Снижение после максимума</span>':'');
+  chartLegend.innerHTML=series.map(item=>`<span><i class="dot" style="background:${item.color}"></i>${item.label}</span>`).join('')+(netView?'<span><i class="dot" style="background:#86a8ff"></i>Максимум за период</span><span><i class="dot" style="background:#ff7188"></i>Снижение после максимума</span><span><i class="dot" style="background:#7bdff2"></i>Локальные максимумы</span><span><i class="dot" style="background:#f3a6b3"></i>Следующие локальные минимумы</span>':'');
   chartNote.textContent=netView
-    ? 'По вертикали — чистый результат в USDT с учётом комиссий открытия и расчётного закрытия. Синяя точка — максимум периода, красная линия — снижение до минимума после него. Позиции открываются на первом синхронизированном снимке.'
+    ? 'По вертикали — чистый результат в USDT с учётом комиссий открытия и расчётного закрытия. Синяя точка — максимум периода; цветные точки отмечают до 10 пар с крупнейшим локальным падением. Позиции открываются на первом синхронизированном снимке.'
     : 'Индексы начинаются около 100. Общий баланс включает комиссии открытия и предполагаемого закрытия на последнем синхронизированном снимке.';
   const points=data.points||[];
   const summary=data.summary;
-  if(points.length<2){summaryNode.hidden=true;statusNode.textContent=data.message||'Недостаточно синхронизированных снимков для графика.';pointCount.textContent='';return}
+  if(points.length<2){summaryNode.hidden=true;localMovesPanel.hidden=true;statusNode.textContent=data.message||'Недостаточно синхронизированных снимков для графика.';pointCount.textContent='';return}
+  const localMoves=netView?findLocalDeclines(points).sort((a,b)=>b.decline-a.decline||a.peakTime-b.peakTime).slice(0,10).sort((a,b)=>a.peakTime-b.peakTime):[];
+  const localMoveByPeak=new Map(localMoves.map(move=>[move.peakIndex,move]));
+  const localMoveByMinimum=new Map(localMoves.map(move=>[move.minimumIndex,move]));
+  const averageDecline=localMoves.length?localMoves.reduce((total,move)=>total+move.decline,0)/localMoves.length:null;
+  localMovesPanel.hidden=!netView;
+  localMovesSummary.textContent=netView?`${localMoves.length} крупнейших падений · среднее ${averageDecline===null?'—':money(averageDecline)+' ('+fmt(averageDecline/Number(data.starting_balance)*100,2)+'%)'}`:'';
+  localMovesRows.innerHTML=localMoves.length?localMoves.map((move,index)=>`<tr><td>${index+1}</td><td>${new Date(move.peakTime).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})}</td><td>${money(move.peakValue)}</td><td>${new Date(move.minimumTime).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})}</td><td>${money(move.minimumValue)}</td><td>${fmt(move.decline,4)} USDT · ${fmt(move.decline/Number(data.starting_balance)*100,2)}%</td><td>${durationLabel(move.minimumTime-move.peakTime)}</td></tr>`).join(''):'<tr><td colspan="7">Для этого интервала локальных падений не найдено.</td></tr>';
   const width=Math.max(700,chart.clientWidth||1000),height=Math.max(260,chart.clientHeight||420),pad={l:96,r:28,t:24,b:44};
   chart.setAttribute('viewBox',`0 0 ${width} ${height}`);
   chart.setAttribute('preserveAspectRatio','none');
@@ -196,6 +225,18 @@ function render(data){
     const path=points.map((point,index)=>`${index?'L':'M'}${X(Number(point.t)).toFixed(2)},${Y(Number(point[item.key])).toFixed(2)}`).join(' ');
     add('path',{d:path,fill:'none',stroke:item.color,'stroke-width':item.key==='equity_index'||netView?3:2,'stroke-linejoin':'round','stroke-linecap':'round'});
   }
+  if(netView&&localMoves.length){
+    const peakPath=[],minimumPath=[],declinePath=[];
+    for(const move of localMoves){
+      const peakX=X(move.peakTime),peakY=Y(move.peakValue),minimumX=X(move.minimumTime),minimumY=Y(move.minimumValue);
+      peakPath.push(`M${(peakX-2.5).toFixed(1)},${peakY.toFixed(1)}a2.5,2.5 0 1,0 5,0a2.5,2.5 0 1,0 -5,0`);
+      minimumPath.push(`M${(minimumX-2.5).toFixed(1)},${minimumY.toFixed(1)}a2.5,2.5 0 1,0 5,0a2.5,2.5 0 1,0 -5,0`);
+      declinePath.push(`M${peakX.toFixed(1)},${peakY.toFixed(1)}L${minimumX.toFixed(1)},${minimumY.toFixed(1)}`);
+    }
+    add('path',{d:declinePath.join(' '),fill:'none',stroke:'#f3a6b3','stroke-width':1,'stroke-dasharray':'2 4',opacity:.45});
+    add('path',{d:peakPath.join(' '),fill:'#7bdff2',stroke:'#0b1020','stroke-width':.7,opacity:.9});
+    add('path',{d:minimumPath.join(' '),fill:'#f3a6b3',stroke:'#0b1020','stroke-width':.7,opacity:.9});
+  }
   if(netView){
     const peakX=X(Number(summary.maximum_time_ms)),peakY=Y(Number(summary.maximum_net_pnl));
     const lowX=X(Number(summary.minimum_after_maximum_time_ms)),lowY=Y(Number(summary.minimum_after_maximum_net_pnl));
@@ -219,8 +260,10 @@ function render(data){
     if(lowIndex>0&&Math.abs(Number(points[lowIndex-1].t)-targetTime)<Math.abs(Number(points[lowIndex].t)-targetTime))lowIndex--;
     const point=points[lowIndex],x=X(Number(point.t));
     cursor.setAttribute('x1',x);cursor.setAttribute('x2',x);cursor.setAttribute('visibility','visible');
+    const localPeak=localMoveByPeak.get(lowIndex),localMinimum=localMoveByMinimum.get(lowIndex);
+    const localDetails=localPeak?`<br>Локальный максимум → следующий минимум: ${money(localPeak.peakValue)} → ${money(localPeak.minimumValue)}<br>Падение: ${money(localPeak.decline)} · ${durationLabel(localPeak.minimumTime-localPeak.peakTime)}`:localMinimum?`<br>Локальный минимум после ${money(localMinimum.peakValue)}<br>Падение от максимума: ${money(localMinimum.decline)} · ${durationLabel(localMinimum.minimumTime-localMinimum.peakTime)}`:'';
     tooltip.innerHTML=netView
-      ? `<strong>${new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев</strong><br>Чистый итог: ${money(point.net_pnl)}`
+      ? `<strong>${new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев</strong><br>Чистый итог: ${money(point.net_pnl)}${localDetails}`
       : `<strong>${new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев</strong><br>Лонг: ${fmt(point.long_index,3)}<br>Шорт: ${fmt(point.short_index,3)}<br>Баланс: ${fmt(point.equity_index,3)}<br>Итог: ${money(point.net_pnl)}`;
     tooltip.style.display='block';
     tooltip.style.left=`${Math.min(event.clientX-rect.left+12,rect.width-tooltip.offsetWidth-4)}px`;
