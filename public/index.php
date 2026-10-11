@@ -1084,7 +1084,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}
 </style>
 </head><body><main class="wrap">
-<header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><button class="collector-status" id="collector-status" type="button" data-status="unknown" aria-label="Загрузить данные для всех активных пар от последней сохранённой минуты" title="Нажмите, чтобы загрузить минутные данные всех активных пар от их последней сохранённой котировки до последней доступной минуты">Загружаю последнюю котировку…</button></div></header>
+<header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><button class="collector-status" id="collector-status" type="button" data-status="unknown" aria-label="Загрузить последние данные для активных тикеров выбранного списка" title="Нажмите, чтобы загрузить минутные данные активных тикеров выбранного списка от последних сохранённых котировок до последней доступной минуты">Загружаю последнюю котировку…</button></div></header>
 <nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a></nav>
 <section class="panel ticker-set-panel" aria-label="Выбранный список тикеров"><label for="ticker-set-select">Выбранный список тикеров</label><select id="ticker-set-select" <?= $favoriteView ? 'disabled' : '' ?>><?php foreach ($tickerSetOptions as $tickerSet): ?><option value="<?= h((string) ($tickerSet['id'] ?? '')) ?>" <?= ($tickerSet['id'] ?? '') === $tickerSetId ? 'selected' : '' ?>><?= h((string) ($tickerSet['name'] ?? '')) ?></option><?php endforeach; ?></select><span class="small-note"><?= count($enabledSymbols) ?> активных тикеров в списке</span></section>
 <?php if ($favoriteView): ?><p class="favorite-readonly-note">Просмотр сохранённой стратегии «<?= h((string) ($favorite['name'] ?? $favoriteId)) ?>». Параметры доступны только для чтения. <a class="strategy-link" href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
@@ -1597,7 +1597,7 @@ async function startHistoryImport(scope) {
     historyImportButtons.forEach(button => { button.disabled = true; });
     historyImportStatus.dataset.status = 'running';
     historyImportStatus.textContent = latestMode
-        ? 'Загружаю минутные данные всех активных пар от последних сохранённых котировок…'
+        ? `Загружаю минутные данные активных пар списка «${tickerSetSelect?.selectedOptions[0]?.textContent || 'выбранный список'}» от последних сохранённых котировок…`
         : scope === 'all'
             ? 'Отправляю запрос на загрузку всех активных пар…'
             : `Отправляю запрос на загрузку ${request.symbol}…`;
@@ -3006,11 +3006,12 @@ refreshSymbolsButton.addEventListener('click', () => {
 const collectorStatus = latestQuoteControl;
 async function refreshCollectorStatus() {
     try {
-        const response = await fetch('collector-status.php', {headers:{Accept:'application/json'}, cache:'no-store'});
+        const tickerSet = filtersForm.querySelector('[name="ticker_set"]')?.value || '';
+        const response = await fetch('collector-status.php?' + new URLSearchParams({ticker_set:tickerSet}), {headers:{Accept:'application/json'}, cache:'no-store'});
         const status = await response.json();
         collectorStatus.dataset.status = status.status || 'unknown';
         collectorStatus.textContent = status.label || 'Не удалось загрузить время котировки';
-        collectorStatus.title = (status.title || status.label || 'Статус сборщика недоступен') + ' Нажмите, чтобы загрузить минутные данные всех активных пар от их последних сохранённых котировок.';
+        collectorStatus.title = (status.title || status.label || 'Статус котировок недоступен') + ' Нажмите, чтобы загрузить минутные данные активных тикеров текущего списка от их последних сохранённых котировок.';
     } catch (_) {
         collectorStatus.dataset.status = 'unknown';
         collectorStatus.textContent = 'Не удалось загрузить время котировки';

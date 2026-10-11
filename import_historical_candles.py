@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     scope.add_argument("--all-enabled", action="store_true", help="Import every enabled symbol")
     parser.add_argument("--start-date", default="2026-10-01", help="Local calendar date in Europe/Kyiv")
     parser.add_argument("--end-date", help="Inclusive local calendar end date in Europe/Kyiv (default: today)")
-    parser.add_argument("--from-latest", action="store_true", help="Continue every enabled symbol after its newest saved quote")
+    parser.add_argument("--from-latest", action="store_true", help="Continue each selected symbol after its newest saved quote")
     parser.add_argument("--timeout", type=float, default=15.0, help="HTTP timeout in seconds")
     parser.add_argument("--status-file", type=Path, help="Write import progress to this JSON file")
     return parser.parse_args()
@@ -174,8 +174,8 @@ def main() -> int:
             raise ValueError(f"Symbols are not configured: {', '.join(unknown)}")
         if disabled:
             raise ValueError(f"Symbols are disabled in Settings: {', '.join(disabled)}")
-        if args.from_latest and not args.all_enabled:
-            raise ValueError("--from-latest requires --all-enabled")
+        if args.from_latest and not (args.all_enabled or args.symbols):
+            raise ValueError("--from-latest requires --symbols or --all-enabled")
         if not args.from_latest and not args.end_date:
             raise ValueError("--end-date is required unless --from-latest is used")
         end_date_value = args.end_date or datetime.now(LOCAL_ZONE).strftime("%Y-%m-%d")

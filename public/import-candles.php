@@ -177,14 +177,12 @@ try {
             candleImportRespond(['status' => 'error', 'message' => 'Проверьте выбранный диапазон дат.'], 400);
         }
     }
-    if ($scope === 'all') {
+    if ($scope === 'all' || $latestMode) {
         $tickerSetId = trim((string) ($_POST['ticker_set'] ?? ''));
         if ($tickerSetId === '') candleImportRespond(['status' => 'error', 'message' => 'Выбранный список тикеров не передан.'], 400);
         $tickerSet = selectedTickerSet($config, $tickerSetId);
         if ($tickerSet['id'] !== $tickerSetId) candleImportRespond(['status' => 'error', 'message' => 'Выбранный список тикеров не найден. Обновите страницу.'], 400);
         $symbols = $tickerSet['symbols'];
-    } elseif ($latestMode) {
-        $symbols = $enabled;
     } elseif ($scope === 'symbol') {
         $symbol = strtoupper(trim((string) ($_POST['symbol'] ?? '')));
         if (!in_array($symbol, $enabled, true)) candleImportRespond(['status' => 'error', 'message' => 'Выбранная пара выключена или не настроена.'], 400);
@@ -224,7 +222,7 @@ try {
     $activeRecord = [
         'job_id' => $jobId, 'status' => 'running', 'pid' => 0,
         'scope' => $scope, 'symbol' => $symbols[0],
-        'ticker_set' => $scope === 'all' ? $tickerSetId : '',
+        'ticker_set' => $scope === 'all' || $latestMode ? $tickerSetId : '',
         'request_start_day' => $requestStartValue, 'request_end_day' => $requestEndValue,
     ];
     writeCandleImportJson($activePath, $activeRecord);
@@ -235,9 +233,9 @@ try {
     $command = 'nohup ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/launch-ranking-worker.py')
         . ' ' . escapeshellarg($python) . ' ' . escapeshellarg($root . '/import_historical_candles.py')
         . ' --config ' . escapeshellarg($root . '/config.json')
-        . ($scope === 'all'
+        . ($scope === 'all' || $latestMode
             ? ' --symbols ' . implode(' ', array_map('escapeshellarg', $symbols))
-            : ($latestMode ? ' --all-enabled' : ' --symbol ' . escapeshellarg($symbols[0])))
+            : ' --symbol ' . escapeshellarg($symbols[0]))
         . ($latestMode ? ' --from-latest' : ' --start-date ' . escapeshellarg($startValue))
         . ' --end-date ' . escapeshellarg($endValue)
         . ' --status-file ' . escapeshellarg($statusPath)
