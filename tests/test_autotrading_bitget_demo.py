@@ -24,6 +24,9 @@ class FakeBitget:
         self.account_mode = "one_way_mode"
         self.margin_mode = "crossed"
         self.fail_positions = False
+        self.null_empty_pending = False
+        self.missing_order_code = "43001"
+        self.demo_max_missing = False
 
     def __call__(self, method, url, headers, body, timeout):
         self.calls.append((method, url, dict(headers), body, timeout))
@@ -38,17 +41,17 @@ class FakeBitget:
             return {"code": "00000", "data": [{
                 "symbol": "BTCUSDT", "symbolStatus": "normal", "symbolType": "perpetual",
                 "supportMarginCoins": ["USDT"], "sizeMultiplier": "0.001",
-                "minTradeNum": "0.001", "maxMarketOrderQty": "100",
+                "minTradeNum": "0.001", "maxMarketOrderQty": "" if self.demo_max_missing and headers.get("paptrading") == "1" else "100",
             }]}
         if path.endswith("/order/orders-pending"):
             from urllib.parse import parse_qs
             status = parse_qs(urlsplit(url).query).get("status", [""])[0]
             rows = [row for row in self.orders.values() if row.get("state") == status]
-            return {"code": "00000", "data": {"entrustedList": rows}}
+            return {"code": "00000", "data": {"entrustedList": None if self.null_empty_pending and not rows else rows}}
         if path.endswith("/order/detail"):
             client_oid = dict(kv.split("=", 1) for kv in urlsplit(url).query.split("&")).get("clientOid")
             existing = self.orders.get(client_oid)
-            return {"code": "00000", "data": existing} if existing else {"code": "43001", "data": None}
+            return {"code": "00000", "data": existing} if existing else {"code": self.missing_order_code, "data": None}
         if path.endswith("/order/place-order"):
             import json
             payload = json.loads(body or "{}")
@@ -107,6 +110,31 @@ class BitgetDemoAdapterTests(unittest.TestCase):
         self.assertEqual(len(fake.calls), calls_before + 1)
         self.assertTrue(fake.calls[-1][1].endswith("/order/detail?clientOid=entry-1&productType=USDT-FUTURES&symbol=BTCUSDT"))
 
+    def test_reconciles_when_bitget_returns_null_for_empty_pending_orders(self) -> None:
+        fake = FakeBitget()
+        fake.null_empty_pending = True
+        result = make_adapter(fake).reconcile([])
+        self.assertTrue(result.matched)
+        self.assertEqual(result.orders, ())
+        self.assertEqual(result.fills, ())
+
+    def test_missing_order_lookup_accepts_current_bitget_classic_error_code(self) -> None:
+        fake = FakeBitget()
+        fake.missing_order_code = "40109"
+        adapter = make_adapter(fake)
+        adapter.reconcile([])
+        self.assertIsNone(adapter.query_order("BTCUSDT", client_order_id="missing-1"))
+
+    def test_demo_contracts_missing_market_cap_uses_public_contract_limit(self) -> None:
+        fake = FakeBitget()
+        fake.demo_max_missing = True
+        adapter = make_adapter(fake)
+        adapter.reconcile([])
+        with self.assertRaisesRegex(ValueError, "size rules"):
+            adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("101"), "entry-cap"))
+        public_lookup = next(call for call in fake.calls if call[1].endswith("/market/contracts?productType=USDT-FUTURES&symbol=BTCUSDT") and "paptrading" not in call[2])
+        self.assertEqual(public_lookup[2], {"Accept": "application/json"})
+
     def test_partial_fills_and_reduce_only_close_are_supported(self) -> None:
         fake = FakeBitget()
         adapter = make_adapter(fake)
@@ -131,6 +159,8 @@ class BitgetDemoAdapterTests(unittest.TestCase):
         result = adapter.reconcile([])
         self.assertFalse(result.matched)
         self.assertTrue(any("untracked exchange pending order" in item for item in result.discrepancies))
+        self.assertEqual(len(result.orders), 1)
+        self.assertEqual(result.orders[0]["clientOid"], "manual-1")
         with self.assertRaises(ExchangeStateMismatch):
             adapter.submit(OrderRequest("BTCUSDT", "buy", Decimal("0.01"), "entry-8"))
 

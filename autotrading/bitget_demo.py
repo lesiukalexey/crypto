@@ -70,6 +70,15 @@ def _default_transport(method: str, url: str, headers: Mapping[str, str], body: 
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         # Avoid including response headers or request credentials in logs/errors.
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise BitgetAPIError(f"Bitget demo API returned HTTP {exc.code}") from exc
+        # Bitget sends structured API errors with HTTP 4xx statuses. Preserve
+        # only the parsed response so _request can allow narrowly-defined
+        # cases such as a missing client order ID without exposing the body.
+        if isinstance(payload, dict) and isinstance(payload.get("code"), str):
+            return payload
         raise BitgetAPIError(f"Bitget demo API returned HTTP {exc.code}") from exc
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise BitgetAPIError(f"Bitget demo API request failed: {type(exc).__name__}") from exc
@@ -157,7 +166,7 @@ class BitgetDemoAdapter:
         params = {"productType": PRODUCT_TYPE, "symbol": symbol}
         params["clientOid" if client_order_id else "orderId"] = client_order_id or order_id or ""
         try:
-            data = self._request("GET", "/api/v2/mix/order/detail", params=params, allow_error_codes=frozenset({"43001"})).get("data")
+            data = self._request("GET", "/api/v2/mix/order/detail", params=params, allow_error_codes=frozenset({"43001", "40109"})).get("data")
         except BitgetAPIError:
             # Lookup errors other than Bitget's explicit order-not-found code
             # are uncertainty, never permission to place a replacement.
@@ -217,7 +226,20 @@ class BitgetDemoAdapter:
             raise ExchangeStateMismatch(f"Contract {symbol} does not support USDT margin")
         step = _decimal(contract.get("sizeMultiplier"), "contract size multiplier")
         minimum = _decimal(contract.get("minTradeNum"), "minimum contract quantity")
-        maximum = _decimal(contract.get("maxMarketOrderQty"), "maximum market order quantity")
+        maximum_value = contract.get("maxMarketOrderQty")
+        if not maximum_value:
+            # The Demo contracts endpoint currently omits the market cap.
+            # Resolve that public, non-authenticated contract constraint
+            # without forwarding demo credentials or the paptrading header.
+            query = urlencode(sorted({"productType": PRODUCT_TYPE, "symbol": symbol}.items()))
+            public_response = self._transport(
+                "GET", f"{API_BASE}/api/v2/mix/market/contracts?{query}",
+                {"Accept": "application/json"}, None, self.timeout_seconds,
+            )
+            public_rows = public_response.get("data") if isinstance(public_response, dict) and public_response.get("code") == "00000" else None
+            public_contract = next((row for row in public_rows if isinstance(row, dict) and row.get("symbol") == symbol), None) if isinstance(public_rows, list) else None
+            maximum_value = public_contract.get("maxMarketOrderQty") if public_contract else None
+        maximum = _decimal(maximum_value, "maximum market order quantity")
         if quantity < minimum or quantity > maximum or quantity % step != 0:
             raise ValueError(f"Quantity for {symbol} violates Bitget contract size rules")
 
@@ -282,13 +304,19 @@ class BitgetDemoAdapter:
                     "limit": "100",
                 }).get("data")
                 pending_rows = pending_data.get("entrustedList") if isinstance(pending_data, dict) else None
+                # Bitget returns null for an empty order list on the demo API,
+                # although the documented response type is an array.
+                if pending_rows is None:
+                    pending_rows = []
                 if not isinstance(pending_rows, list):
                     raise BitgetAPIError("Bitget returned malformed pending demo orders")
                 for row in pending_rows:
                     if not isinstance(row, dict) or not row.get("clientOid") or not row.get("orderId") or row.get("symbol") not in self.symbols:
                         raise ExchangeStateMismatch("Bitget returned an unmanaged or malformed pending demo order")
                     exchange_pending[str(row["clientOid"])] = row
-            remote_orders: list[dict[str, Any]] = []
+            remote_orders_by_client_id: dict[str, dict[str, Any]] = {
+                client_id: row for client_id, row in exchange_pending.items()
+            }
             remote_fills: list[dict[str, Any]] = []
             order_discrepancies: list[str] = []
             for symbol, client_order_id in pending_orders:
@@ -296,7 +324,7 @@ class BitgetDemoAdapter:
                 if order is None:
                     order_discrepancies.append(f"local pending order missing on exchange {symbol}/{client_order_id}")
                     continue
-                remote_orders.append(order)
+                remote_orders_by_client_id[client_order_id] = order
                 order_id = order.get("orderId")
                 if order_id:
                     remote_fills.extend(self.fills(symbol, str(order_id)))
@@ -321,7 +349,7 @@ class BitgetDemoAdapter:
                 discrepancies.append(f"local position missing on exchange {key[0]}/{key[1]}")
             elif expected != actual:
                 discrepancies.append(f"position mismatch {key[0]}/{key[1]}: local={expected}, exchange={actual}")
-        result = Reconciliation(not discrepancies, tuple(discrepancies), remote, tuple(remote_orders), tuple(remote_fills))
+        result = Reconciliation(not discrepancies, tuple(discrepancies), remote, tuple(remote_orders_by_client_id.values()), tuple(remote_fills))
         self._last_reconciliation = result
         self._reconciled = result.matched
         self._open_order_ids = {str(row["orderId"]) for row in exchange_pending.values()}

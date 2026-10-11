@@ -23,7 +23,12 @@ function timeMsLabel(mixed $value): string {
     return (new DateTimeImmutable('@' . (int) floor((int) $value / 1000)))->setTimezone(new DateTimeZone('Europe/Kyiv'))->format('d.m.Y H:i:s');
 }
 function runPython(array $arguments, string $root, string $python): array {
-    $process = proc_open(array_merge([$python, '-m', 'autotrading'], $arguments), [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $root, ['PYTHONPATH' => $root]);
+    $environment = array_merge(['PYTHONPATH' => $root], $GLOBALS['autotrading_demo_env'] ?? []);
+    foreach (['BITGET_DEMO_ENV_FILE', 'BITGET_DEMO_API_KEY', 'BITGET_DEMO_API_SECRET', 'BITGET_DEMO_API_PASSPHRASE'] as $name) {
+        $value = getenv($name);
+        if ($value !== false && $value !== '') $environment[$name] = $value;
+    }
+    $process = proc_open(array_merge([$python, '-m', 'autotrading'], $arguments), [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $root, $environment);
     if (!is_resource($process)) throw new RuntimeException('Не удалось запустить локальный Python исполнитель.');
     fclose($pipes[0]);
     $stdout = stream_get_contents($pipes[1]); fclose($pipes[1]);
@@ -33,6 +38,14 @@ function runPython(array $arguments, string $root, string $python): array {
 
 $root = dirname(__DIR__);
 $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
+$demoEnvFile = getenv('BITGET_DEMO_ENV_FILE') ?: '';
+if ($demoEnvFile === '' && ($userHome = getenv('HOME')) !== false) {
+    $localDemoEnv = rtrim($userHome, '/') . '/.ai/home/.local/bitget-autotrading-demo.env';
+    if (is_file($localDemoEnv)) $demoEnvFile = $localDemoEnv;
+}
+$demoEnvironment = [];
+if ($demoEnvFile !== '') $demoEnvironment['BITGET_DEMO_ENV_FILE'] = $demoEnvFile;
+$GLOBALS['autotrading_demo_env'] = $demoEnvironment;
 $uid = function_exists('posix_geteuid') ? posix_geteuid() : getmyuid();
 $runtimeRoot = getenv('BITGET_AUTOTRADING_DIR') ?: '/var/tmp';
 $runtime = rtrim($runtimeRoot, '/') . '/bitget-autotrading-' . $uid;
@@ -52,6 +65,7 @@ if (!isset($_SESSION['autotrading_csrf'])) $_SESSION['autotrading_csrf'] = bin2h
 $csrf = (string) $_SESSION['autotrading_csrf'];
 $message = '';
 $messageType = 'info';
+$demoReconciliation = is_array($_SESSION['autotrading_demo_status'] ?? null) ? $_SESSION['autotrading_demo_status'] : null;
 $isLocal = in_array((string) ($_SERVER['REMOTE_ADDR'] ?? ''), ['127.0.0.1', '::1'], true);
 $params = static fn (string $name, string $default = ''): string => trim((string) ($_GET[$name] ?? $default));
 $symbol = strtoupper($params('symbol', (string) ($config['symbols'][0] ?? 'BTCUSDT')));
@@ -146,6 +160,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             chmod($activeReleasePath, 0600);
             $message = 'Стратегия опубликована: ' . $releaseId . '. Её можно запускать в paper режиме.';
             $messageType = 'success';
+        } elseif ($action === 'demo-reconcile') {
+            $demoSymbol = strtoupper((string) ($_POST['symbol'] ?? $symbol));
+            if (!preg_match('/^[A-Z0-9]{2,40}$/', $demoSymbol)) throw new RuntimeException('Выбран некорректный тикер для проверки Demo.');
+            unset($_SESSION['autotrading_demo_status']);
+            [$code, $out, $err] = runPython(['demo-reconcile', '--symbols', $demoSymbol], $root, $python);
+            $report = json_decode($out, true);
+            if (!is_array($report) || ($report['mode'] ?? null) !== 'demo') throw new RuntimeException('Не удалось получить результат проверки Demo API: ' . ($err ?: $out ?: 'пустой ответ исполнителя.'));
+            $_SESSION['autotrading_demo_status'] = $report;
+            $demoReconciliation = $report;
+            $message = ($report['matched'] ?? false) ? 'Demo сверка завершена: расхождений нет.' : 'Demo сверка завершена: обнаружено расхождение или ошибка подключения.';
+            $messageType = ($report['matched'] ?? false) ? 'success' : 'warning';
         } elseif ($action === 'start') {
             if (!is_file($activeReleasePath)) throw new RuntimeException('Сначала опубликуйте выбранную стратегию.');
             [$code, $out, $err] = runPython(['service-start', '--release', $activeReleasePath, '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--interval', '5'], $root, $python);
@@ -171,7 +196,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-if ($messageType === 'success') {
+if (in_array($messageType, ['success', 'warning'], true)) {
     $_SESSION['autotrading_flash'] = [$message, $messageType];
     $query = http_build_query($_GET);
     header('Location: autotrading.php' . ($query === '' ? '' : '?' . $query), true, 303);
@@ -222,6 +247,19 @@ $postHidden = [
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="<?= ($status['controls']['entries_paused'] ?? false) ? 'resume' : 'pause' ?>"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['controls']['entries_paused'] ?? false) ? 'Возобновить новые входы' : 'Приостановить новые входы' ?></button></form>
 <form method="post" onsubmit="return confirm('Закрыть все открытые paper позиции по ближайшим свежим котировкам?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="close"><button class="danger" <?= !$isLocal || !($status['service']['running'] ?? false) || ($status['open_positions'] ?? 0) < 1 ? 'disabled' : '' ?>>Закрыть paper позиции</button></form>
 </div><p class="note">«Остановить процесс» сохраняет состояние и оставляет виртуальные позиции открытыми. «Приостановить новые входы» оставляет работающий процесс и управление текущей позицией. Закрытие выполняется по следующей свежей котировке.</p></section>
+
+<section class="panel"><h2>Сверка Bitget Demo</h2>
+<p class="note">Запрос только читает Demo аккаунт и сравнивает его с пустым локальным журналом Demo. Paper позиции хранятся отдельно. Если на бирже есть открытая позиция или ордер, он будет показан как расхождение. Проверка не отправляет и не закрывает ордера.</p>
+<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="demo-reconcile"><input type="hidden" name="symbol" value="<?= h($symbol) ?>"><button class="secondary" <?= !$isLocal ? 'disabled' : '' ?>>Проверить Demo аккаунт · <?= h($symbol) ?></button></form>
+<?php if (is_array($demoReconciliation)): ?>
+<p class="status <?= !empty($demoReconciliation['matched']) ? 'success' : 'warning' ?>" role="status">
+<?= !empty($demoReconciliation['matched']) ? 'Совпадает' : 'Нужно проверить' ?> · проверено <?= h((string) ($demoReconciliation['checked_at_utc'] ?? '—')) ?> UTC
+<?php if (isset($demoReconciliation['pending_orders'])): ?> · позиций: <?= h((string) count($demoReconciliation['positions'] ?? [])) ?> · открытых ордеров: <?= h((string) $demoReconciliation['pending_orders']) ?> · fills: <?= h((string) ($demoReconciliation['fills'] ?? 0)) ?><?php endif; ?>
+</p>
+<?php if (!empty($demoReconciliation['error'])): ?><p class="status warning"><?= h((string) $demoReconciliation['error']) ?></p><?php endif; ?>
+<?php foreach (($demoReconciliation['discrepancies'] ?? []) as $discrepancy): ?><p class="status warning"><?= h((string) $discrepancy) ?></p><?php endforeach; ?>
+<?php if (($demoReconciliation['positions'] ?? []) !== []): ?><div class="table-wrap"><table><thead><tr><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Средняя цена</th></tr></thead><tbody><?php foreach ($demoReconciliation['positions'] as $position): ?><tr><td><?= h((string) ($position['symbol'] ?? '—')) ?></td><td><?= h((string) ($position['side'] ?? '—')) ?></td><td><?= h((string) ($position['quantity'] ?? '—')) ?></td><td><?= h((string) ($position['average_entry_price'] ?? '—')) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
+<?php endif; ?></section>
 
 <section class="panel"><h2>Публикация выбранной стратегии</h2>
 <?php if (!$selectedStrategyPresent): ?><p class="empty">Сначала выберите тикер и стратегию в разделе «Базовые проверки», затем откройте «Автоторговля».</p><a href="./">Открыть базовые проверки</a>

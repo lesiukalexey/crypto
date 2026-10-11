@@ -95,3 +95,14 @@ as the same local web-server user; the PID file is checked against the actual
 `/proc` command before a stop signal is sent. Releases, SQLite, control files,
 and logs are stored in the per-user runtime directory with restrictive file
 permissions.
+
+The dashboard's **Сверка Bitget Demo** panel runs a read-only check against
+the selected symbol and compares the exchange with an empty local Demo ledger.
+It reports account mode issues, untracked positions and pending orders; it does
+not connect the paper executor to exchange execution. Configure
+`BITGET_DEMO_ENV_FILE` for the local web process to point at a regular,
+owner-only environment file with the three `BITGET_DEMO_API_*` variables. On a
+workstation, the page also checks for the protected file under
+`$HOME/.ai/home/.local/bitget-autotrading-demo.env`; on another machine, set the
+environment variable to that machine's protected path. The CLI check is
+`python3 -m autotrading demo-reconcile --symbols BTCUSDT`.

@@ -5,12 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import signal
+import stat
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .contracts import load_strategy_release, release_digest
+from .bitget_demo import BitgetDemoAdapter, BitgetAPIError
 from .market import BitgetPublicTickerPoller
 from .paper import PaperExecutor, SQLiteStateStore
 from .service import read_json, service_status, set_controls, start_service, stop_service
@@ -43,7 +47,60 @@ def main() -> int:
     control = commands.add_parser("control", help="pause entries or close paper positions")
     control.add_argument("--control", required=True)
     control.add_argument("action", choices=("pause_entries", "resume_entries", "close_positions"))
+    demo_reconcile = commands.add_parser("demo-reconcile", help="read-only reconciliation of a Bitget Demo account")
+    demo_reconcile.add_argument("--symbols", required=True, help="comma-separated uppercase USDT-futures symbols")
     args = parser.parse_args()
+    if args.command == "demo-reconcile":
+        try:
+            symbols = [symbol.strip() for symbol in args.symbols.split(",") if symbol.strip()]
+            api_key = os.getenv("BITGET_DEMO_API_KEY", "")
+            secret = os.getenv("BITGET_DEMO_API_SECRET", "")
+            passphrase = os.getenv("BITGET_DEMO_API_PASSPHRASE", "")
+            env_file = os.getenv("BITGET_DEMO_ENV_FILE", "")
+            if not all((api_key, secret, passphrase)) and env_file:
+                path = Path(env_file)
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+                    raise ValueError("Demo credentials file must be a regular file with owner-only permissions")
+                values: dict[str, str] = {}
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line or line.startswith("#"):
+                        continue
+                    name, separator, value = line.partition("=")
+                    if not separator or name in values:
+                        raise ValueError("Demo credentials file has an invalid format")
+                    values[name] = value
+                api_key = api_key or values.get("BITGET_DEMO_API_KEY", "")
+                secret = secret or values.get("BITGET_DEMO_API_SECRET", "")
+                passphrase = passphrase or values.get("BITGET_DEMO_API_PASSPHRASE", "")
+            if not all((api_key, secret, passphrase)):
+                raise ValueError("Demo API credentials are not configured for this local process")
+            adapter = BitgetDemoAdapter(symbols, api_key=api_key, secret=secret, passphrase=passphrase)
+            result = adapter.reconcile(expected_positions=[], pending_orders=[])
+            report = {
+                "mode": "demo",
+                "checked_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "symbols": symbols,
+                "matched": result.matched,
+                "discrepancies": list(result.discrepancies),
+                "positions": [
+                    {"symbol": item.symbol, "side": item.side, "quantity": str(item.quantity), "average_entry_price": str(item.average_entry_price)}
+                    for item in result.positions
+                ],
+                "pending_orders": len(result.orders),
+                "fills": len(result.fills),
+                "basis": "empty_local_demo_ledger",
+            }
+            print(json.dumps(report, ensure_ascii=False))
+            return 0 if result.matched else 1
+        except (BitgetAPIError, OSError, ValueError, RuntimeError) as exc:
+            print(json.dumps({
+                "mode": "demo",
+                "checked_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "matched": False,
+                "error": str(exc)[:500],
+            }, ensure_ascii=False))
+            return 1
     if args.command in {"validate", "paper-check"}:
         try:
             release = load_strategy_release(args.release) if args.command == "validate" else PaperExecutor.validate_release(load_strategy_release(args.release))
