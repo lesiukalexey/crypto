@@ -68,12 +68,13 @@ $rows = [];
 $error = $rankingError;
 $timezone = new DateTimeZone('Europe/Kyiv');
 $today = new DateTimeImmutable('today', $timezone);
+$defaultEndDay = $today->modify('-1 day')->format('Y-m-d');
 $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
 $startDayAuto = array_key_exists('start_day_auto', $_GET)
     ? (string) $_GET['start_day_auto'] === '1'
     : !array_key_exists('start_day', $_GET) && !array_key_exists('day', $_GET);
 $startDayInput = (string) ($_GET['start_day'] ?? $_GET['day'] ?? '2026-10-06');
-$endDayInput = (string) ($_GET['end_day'] ?? $_GET['day'] ?? $today->format('Y-m-d'));
+$endDayInput = (string) ($_GET['end_day'] ?? $_GET['day'] ?? $defaultEndDay);
 $pdo = null;
 if ($startDayAuto && $enabledSymbols !== []) {
     try {
