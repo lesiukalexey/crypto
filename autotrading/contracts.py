@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, AsyncIterator, Protocol, Sequence
+from typing import Any, Iterator, Protocol, Sequence
 
 
 SUPPORTED_SCHEMA_VERSION = 1
@@ -26,6 +26,8 @@ _SIGNAL_MODES = {"exact", "within"}
 _DIRECTION_MODES = {"follow", "reverse"}
 _MARTINGALE_MODES = {"none", "simple", "reverse", "simple_profit", "reverse_profit"}
 _MARTINGALE_TIMINGS = {"immediate", "rules"}
+_MARTINGALE_TARGET_POLICIES = {"scaled", "fixed"}
+_EXIT_CONFIRMATION_MODES = {"immediate", "both_delayed", "tp_delayed", "sl_delayed"}
 
 _ROOT_FIELDS = {
     "schema_version", "release_id", "created_at_utc", "market", "strategy",
@@ -35,10 +37,11 @@ _MARKET_FIELDS = {"category", "symbols", "margin_coin"}
 _STRATEGY_FIELDS = {
     "entry_config", "entry_signal_mode", "entry_direction_mode", "exit_config",
     "martingale_mode", "martingale_timing", "martingale_attempts",
-    "max_chain_loss_usdt", "max_day_loss_usdt",
+    "martingale_target_policy", "max_chain_loss_usdt", "max_day_loss_usdt",
+    "exit_confirmation_mode", "exit_confirmation_snapshots",
 }
 _EXECUTION_FIELDS = {
-    "starting_balance_usdt", "leverage", "taker_fee_rate", "slippage_bps",
+    "starting_balance_usdt", "leverage", "taker_fee_rate", "slippage_bps", "include_funding",
 }
 _RISK_FIELDS = {
     "max_order_notional_usdt", "max_total_exposure_usdt", "max_daily_loss_usdt",
@@ -133,17 +136,24 @@ def validate_strategy_release(release: Any) -> dict[str, Any]:
     _choice(strategy["entry_direction_mode"], _DIRECTION_MODES, "strategy.entry_direction_mode")
     _choice(strategy["martingale_mode"], _MARTINGALE_MODES, "strategy.martingale_mode")
     _choice(strategy["martingale_timing"], _MARTINGALE_TIMINGS, "strategy.martingale_timing")
+    _choice(strategy["martingale_target_policy"], _MARTINGALE_TARGET_POLICIES, "strategy.martingale_target_policy")
+    _choice(strategy["exit_confirmation_mode"], _EXIT_CONFIRMATION_MODES, "strategy.exit_confirmation_mode")
     attempts = strategy["martingale_attempts"]
     if isinstance(attempts, bool) or not isinstance(attempts, int) or not 2 <= attempts <= 10:
         raise ValueError("strategy.martingale_attempts must be an integer from 2 to 10")
     _decimal(strategy["max_chain_loss_usdt"], "strategy.max_chain_loss_usdt", minimum=Decimal(0))
     _decimal(strategy["max_day_loss_usdt"], "strategy.max_day_loss_usdt", minimum=Decimal(0))
+    confirmations = strategy["exit_confirmation_snapshots"]
+    if isinstance(confirmations, bool) or not isinstance(confirmations, int) or not 0 <= confirmations <= 10000:
+        raise ValueError("strategy.exit_confirmation_snapshots must be an integer from 0 to 10000")
 
     execution = _object(root["execution"], _EXECUTION_FIELDS, "execution")
     _decimal(execution["starting_balance_usdt"], "execution.starting_balance_usdt", minimum=Decimal("0.01"))
     _decimal(execution["leverage"], "execution.leverage", minimum=Decimal("0.01"), maximum=Decimal("125"))
     _decimal(execution["taker_fee_rate"], "execution.taker_fee_rate", minimum=Decimal(0), maximum=Decimal(1))
     _decimal(execution["slippage_bps"], "execution.slippage_bps", minimum=Decimal(0), maximum=Decimal(9999))
+    if not isinstance(execution["include_funding"], bool):
+        raise ValueError("execution.include_funding must be a boolean")
 
     risk = _object(root["risk"], _RISK_FIELDS, "risk")
     for field in ("max_order_notional_usdt", "max_total_exposure_usdt", "max_daily_loss_usdt"):
@@ -241,21 +251,21 @@ class Position:
 
 
 class MarketDataProvider(Protocol):
-    def stream(self, symbols: Sequence[str]) -> AsyncIterator[Quote]: ...
+    def stream(self, symbols: Sequence[str]) -> Iterator[Quote]: ...
 
 
 class ExecutionAdapter(Protocol):
     @property
     def mode(self) -> str: ...
 
-    async def submit(self, order: OrderRequest) -> ExecutionResult: ...
+    def submit(self, order: OrderRequest) -> ExecutionResult: ...
 
-    async def positions(self) -> Sequence[Position]: ...
+    def positions(self) -> Sequence[Position]: ...
 
 
 class StateStore(Protocol):
-    async def save_release(self, release: dict[str, Any], digest: str) -> None: ...
+    def save_release(self, release: dict[str, Any], digest: str) -> None: ...
 
-    async def record_event(self, event: dict[str, Any]) -> None: ...
+    def record_event(self, event: dict[str, Any]) -> None: ...
 
-    async def load_state(self) -> dict[str, Any]: ...
+    def load_state(self) -> dict[str, Any]: ...
