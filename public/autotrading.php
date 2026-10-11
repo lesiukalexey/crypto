@@ -22,6 +22,29 @@ function timeMsLabel(mixed $value): string {
     if (!is_numeric($value) || (int) $value <= 0) return '—';
     return (new DateTimeImmutable('@' . (int) floor((int) $value / 1000)))->setTimezone(new DateTimeZone('Europe/Kyiv'))->format('d.m.Y H:i:s');
 }
+function percentageLabel(int $units, int $scale): string {
+    $value = number_format($units / $scale, 4, '.', '');
+    return rtrim(rtrim($value, '0'), '.') . '%';
+}
+function entryDescription(array $strategy): string {
+    $config = (string) ($strategy['entry_config'] ?? '');
+    if ($config === 'immediate:long') return 'сразу открыть лонг на первой котировке';
+    if ($config === 'immediate:short') return 'сразу открыть шорт на первой котировке';
+    if (!preg_match('/^entry(?::(long|short))?:(\d+):(\d+)(?::(within))?(?::(reverse))?$/', $config, $match)) return $config !== '' ? $config : 'не задано';
+    $window = (int) $match[2];
+    $threshold = percentageLabel((int) $match[3], 10);
+    $within = ($match[4] ?? '') === 'within' || (($match[4] ?? '') === '' && ($strategy['entry_signal_mode'] ?? '') === 'within');
+    $reverse = ($match[5] ?? '') === 'reverse' || (($match[5] ?? '') === '' && ($strategy['entry_direction_mode'] ?? '') === 'reverse');
+    $scope = ($match[1] ?? '') === 'long' ? 'только при росте' : ((($match[1] ?? '') === 'short') ? 'только при снижении' : 'при росте или снижении');
+    $trigger = $within ? 'достижение порога относительно любой из последних ' . $window . ' котировок' : 'пересечение порога относительно котировки ' . $window . ' снимков назад';
+    return $trigger . ' на ' . $threshold . '; сигнал ' . $scope . '; вход ' . ($reverse ? 'против' : 'по') . ' движению';
+}
+function exitDescription(string $config): string {
+    if (preg_match('/^fixed:(\d+):(\d+)$/', $config, $match)) return 'тейк-профит ' . percentageLabel((int) $match[1], 100) . ' / стоп-лосс ' . percentageLabel((int) $match[2], 100) . ' от стартового баланса';
+    if (preg_match('/^profit:(\d+)$/', $config, $match)) return 'закрыть при прибыли ' . percentageLabel((int) $match[1], 10) . ' от стартового баланса';
+    if (preg_match('/^loss:(\d+)$/', $config, $match)) return 'закрыть при убытке ' . percentageLabel((int) $match[1], 10) . ' от стартового баланса';
+    return $config !== '' ? $config : 'не задано';
+}
 function runPython(array $arguments, string $root, string $python): array {
     $environment = array_merge(['PYTHONPATH' => $root], $GLOBALS['autotrading_demo_env'] ?? []);
     foreach (['BITGET_DEMO_ENV_FILE', 'BITGET_DEMO_API_KEY', 'BITGET_DEMO_API_SECRET', 'BITGET_DEMO_API_PASSPHRASE'] as $name) {
@@ -228,10 +251,11 @@ $postHidden = [
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Автоторговля · Bitget</title>
 <style>
 :root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1300px;margin:auto;padding:30px 20px}h1{margin:12px 0;font-size:clamp(26px,4vw,38px)}h2{font-size:18px;margin:0 0 12px}.nav{display:flex;gap:6px;flex-wrap:wrap;margin:18px 0;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.nav a{color:#b7c1d5;text-decoration:none;padding:8px 12px;border-radius:8px}.nav a:hover,.nav a[aria-current=page]{background:#263968;color:#fff}.panel{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:18px;margin:14px 0}.status{padding:11px 14px;border:1px solid var(--line);border-radius:10px}.status.error{color:#ffb3bf;border-color:#733b49}.status.success{color:#a8f0cf;border-color:#28654f}.muted,.note{color:var(--muted);font-size:13px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px}.stat{padding:12px;border:1px solid var(--line);border-radius:10px;background:#0c1222}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.field{display:grid;gap:5px;color:var(--muted);font-size:13px}.field input{width:100%;padding:9px 10px;border:1px solid #34415e;border-radius:8px;color:var(--text);background:#0c1222;font:inherit}button{padding:10px 14px;border:0;border-radius:8px;background:#607df4;color:white;font:inherit;font-weight:700;cursor:pointer}button.secondary{background:#34415e}button.danger{background:#8f3949}button:disabled{opacity:.5;cursor:not-allowed}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:650px;font-size:13px}td,th{text-align:left;padding:8px 9px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted)}.inline{display:inline}.pill{display:inline-block;padding:3px 9px;border:1px solid #34415e;border-radius:99px;color:#b7c1d5}.pill.on{border-color:#28654f;color:#a8f0cf}.warning{color:#ffe0a1}.empty{color:var(--muted)}@media(max-width:600px){.wrap{padding:18px 12px}.panel{padding:14px}.nav{width:100%}.nav a{flex:1;text-align:center}.actions button{flex:1}}
+ .published-summary{margin:16px 0;padding:14px;border:1px solid #3c527e;border-radius:12px;background:#101a30}.published-summary .stat strong,.selected-summary .stat strong{display:block;font-size:14px;line-height:1.45;overflow-wrap:anywhere}.how-to ol{margin:8px 0 12px;padding-left:23px}.how-to li{margin:5px 0}
 </style></head><body><main class="wrap">
 <div class="muted">Bitget · локальный исполнитель</div><h1>Автоторговля</h1>
 <nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="autotrading.php" aria-current="page">Автоторговля</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
-<p class="note">Paper режим использует только публичные котировки и виртуальные сделки. Биржевые ордера не отправляются.</p>
+<section class="panel how-to"><h2>Как попробовать выбранную стратегию</h2><ol><li>В «Базовых проверках» выберите тикер, порог входа и выход. Затем нажмите «Автоторговля».</li><li>Ниже сверьте выбранные параметры и нажмите «Опубликовать эту выбранную стратегию».</li><li>В верхнем блоке «Состояние исполнителя» нажмите «Запустить опубликованную стратегию».</li></ol><p class="note">Это paper-режим: исполнитель читает публичные котировки и создаёт только виртуальные сделки, ордера на Bitget не отправляются. После запуска он может ждать сигнала; статус «Работает» при нуле открытых позиций означает, что условие входа ещё не сработало.</p></section>
 <?php if ($message !== ''): ?><p class="status <?= h($messageType) ?>" role="status"><?= h($message) ?></p><?php endif; ?>
 <?php if (!$isLocal): ?><p class="status warning">Просмотр доступен, но управление работает только при открытии страницы с этого компьютера.</p><?php endif; ?>
 <section class="panel"><h2>Состояние исполнителя</h2><div class="grid">
@@ -241,8 +265,22 @@ $postHidden = [
 <div class="stat"><span>Плавающий результат</span><strong><?= h((string) ($status['unrealized_pnl_usdt'] ?? '0')) ?> USDT</strong></div>
 <div class="stat"><span>Paper сделки</span><strong><?= h((string) ($status['trades'] ?? 0)) ?></strong></div>
 </div><p class="note">Стратегия: <?= h((string) ($published['release_id'] ?? 'не опубликована')) ?> · PID <?= h((string) ($status['service']['pid'] ?? '—')) ?> · открытых позиций: <?= h((string) ($status['open_positions'] ?? 0)) ?></p>
+<?php if (is_array($published)): ?>
+<section class="published-summary" aria-label="Параметры опубликованной стратегии"><h3>Именно эту стратегию запустит кнопка ниже</h3>
+<div class="grid">
+<div class="stat"><span>Тикер</span><strong><?= h(implode(', ', array_map('strval', $published['market']['symbols'] ?? [])) ?: '—') ?></strong></div>
+<div class="stat"><span>Условие входа</span><strong><?= h(entryDescription($published['strategy'] ?? [])) ?></strong></div>
+<div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription((string) ($published['strategy']['exit_config'] ?? ''))) ?></strong></div>
+<div class="stat"><span>Период проверки стратегии</span><strong><?= h((string) ($published['backtest']['start_date'] ?? '—')) ?> — <?= h((string) ($published['backtest']['end_date'] ?? '—')) ?></strong></div>
+<div class="stat"><span>Виртуальный стартовый баланс / лимит ордера</span><strong><?= h((string) ($published['execution']['starting_balance_usdt'] ?? '—')) ?> / <?= h((string) ($published['risk']['max_order_notional_usdt'] ?? '—')) ?> USDT</strong></div>
+<div class="stat"><span>Максимальная общая позиция</span><strong><?= h((string) ($published['risk']['max_total_exposure_usdt'] ?? '—')) ?> USDT</strong></div>
+<div class="stat"><span>Максимальный убыток за день</span><strong><?= h((string) ($published['risk']['max_daily_loss_usdt'] ?? '—')) ?> USDT</strong></div>
+</div>
+<?php if ($selectedStrategyPresent && (($published['market']['category'] ?? '') !== $category || ($published['market']['symbols'][0] ?? '') !== $symbol || ($published['strategy']['entry_config'] ?? '') !== $entryConfig || ($published['strategy']['entry_signal_mode'] ?? '') !== $entrySignalMode || ($published['strategy']['entry_direction_mode'] ?? '') !== $entryDirectionMode || ($published['strategy']['exit_config'] ?? '') !== $exitConfig || ($published['strategy']['martingale_mode'] ?? '') !== $martingaleMode || (bool) ($published['execution']['include_funding'] ?? false) !== $includeFunding || ($published['strategy']['exit_confirmation_mode'] ?? '') !== $exitConfirmationMode || (string) ($published['strategy']['exit_confirmation_snapshots'] ?? '') !== (string) $exitConfirmationSnapshots || ($published['backtest']['start_date'] ?? '') !== $startDate || ($published['backtest']['end_date'] ?? '') !== $endDate)): ?><p class="status warning">В «Базовых проверках» сейчас выбрана другая конфигурация. Кнопка запуска использует опубликованную выше; чтобы применить текущий выбор, сначала опубликуйте его ниже.</p><?php endif; ?>
+</section>
+<?php else: ?><p class="status warning">Стратегия ещё не опубликована. Сначала выберите и опубликуйте её в блоке ниже.</p><?php endif; ?>
 <div class="actions">
-<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><button <?= !$isLocal || !is_array($published) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Запустить paper</button></form>
+<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><button <?= !$isLocal || !is_array($published) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? 'Paper уже запущен' : 'Запустить опубликованную стратегию' ?></button></form>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="stop"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Остановить процесс</button></form>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="<?= ($status['controls']['entries_paused'] ?? false) ? 'resume' : 'pause' ?>"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['controls']['entries_paused'] ?? false) ? 'Возобновить новые входы' : 'Приостановить новые входы' ?></button></form>
 <form method="post" onsubmit="return confirm('Закрыть все открытые paper позиции по ближайшим свежим котировкам?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="close"><button class="danger" <?= !$isLocal || !($status['service']['running'] ?? false) || ($status['open_positions'] ?? 0) < 1 ? 'disabled' : '' ?>>Закрыть paper позиции</button></form>
@@ -263,7 +301,12 @@ $postHidden = [
 
 <section class="panel"><h2>Публикация выбранной стратегии</h2>
 <?php if (!$selectedStrategyPresent): ?><p class="empty">Сначала выберите тикер и стратегию в разделе «Базовые проверки», затем откройте «Автоторговля».</p><a href="./">Открыть базовые проверки</a>
-<?php else: ?><p>Выбрано: <strong><?= h($symbol) ?></strong> · <?= h($entryConfig) ?> · <?= h($exitConfig) ?> · <?= h($startDate) ?> — <?= h($endDate) ?></p>
+<?php else: ?><h3>Выбрано в «Базовых проверках»</h3><div class="grid selected-summary">
+<div class="stat"><span>Тикер</span><strong><?= h($symbol) ?></strong></div>
+<div class="stat"><span>Условие входа</span><strong><?= h(entryDescription(['entry_config' => $entryConfig, 'entry_signal_mode' => $entrySignalMode, 'entry_direction_mode' => $entryDirectionMode])) ?></strong></div>
+<div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription($exitConfig)) ?></strong></div>
+<div class="stat"><span>Период бэктеста</span><strong><?= h($startDate) ?> — <?= h($endDate) ?></strong></div>
+</div>
 <p class="note">Перед публикацией задайте ограничения. Для первой локальной paper версии нужны выключенный funding и режим без мартингейла. Выпущенный JSON хранится вне Git, рядом со SQLite состоянием.</p>
 <?php if (!$paperStrategySupported): ?><p class="status warning"><?= $includeFunding ? 'В выбранном расчёте включён funding. ' : '' ?><?= $martingaleMode !== 'none' ? 'Выбран режим мартингейла. ' : '' ?><?= $category !== 'USDT-FUTURES' ? 'Выбран неподдерживаемый рынок. ' : '' ?>Вернитесь в «Базовые проверки», отключите неподдерживаемые параметры и откройте эту страницу снова.</p><?php endif; ?>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="publish">
@@ -273,7 +316,7 @@ $postHidden = [
 <label class="field">Максимальная общая позиция (USDT)<input name="max_total_exposure_usdt" type="number" min="0.01" step="0.01" value="<?= h($balance) ?>" required></label>
 <label class="field">Максимальный убыток за день (USDT)<input name="max_daily_loss_usdt" type="number" min="0.01" step="0.01" value="<?= h((string) max(0.01, (float) $balance * 0.1)) ?>" required></label>
 <label class="field">Максимум открытых позиций<input name="max_open_positions" type="number" min="1" max="100" step="1" value="1" required></label>
-</div><div class="actions"><button <?= !$isLocal || !$paperStrategySupported || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Опубликовать эту стратегию</button></div>
+</div><div class="actions"><button <?= !$isLocal || !$paperStrategySupported || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Опубликовать эту выбранную стратегию</button></div>
 </form><?php endif; ?></section>
 
 <section class="panel"><h2>Открытые позиции</h2><?php if (($status['positions'] ?? []) === []): ?><p class="empty">Открытых виртуальных позиций нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Вход</th><th>Плавающий PnL · USDT</th><th>Последняя котировка · Киев</th></tr></thead><tbody><?php foreach ($status['positions'] as $position): ?><tr><td><?= h((string) $position['symbol']) ?></td><td><?= h((string) $position['side']) ?></td><td><?= h((string) $position['quantity']) ?></td><td><?= h((string) $position['entry_price']) ?></td><td><?= h((string) ($position['unrealized_pnl_usdt'] ?? '—')) ?></td><td><?= h(timeMsLabel($position['quote_timestamp_ms'] ?? null)) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section>
