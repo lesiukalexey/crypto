@@ -274,7 +274,7 @@ $ledgerLastQuotes = [];
 $ledgerSourceDay = null;
 if ($martingaleMode === 'none' && $rows !== [] && $error === null) {
     $closedTradeLedgerKey = hash('sha256', json_encode([
-        'closed-trade-ledger-v4-shared-cost-model', $config['category'], $symbol, $startingBalance,
+        'closed-trade-ledger-v5-market-order-sizing', $config['category'], $symbol, $startingBalance,
         $feePercent, $entryConfig, $selectedExitConfig, $exitConfirmationMode, $exitConfirmationSnapshots,
         ...rankingSimulationCostsIdentity($simulationCosts), $martingaleContractRules,
     ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
@@ -882,9 +882,9 @@ while (bccomp($balance, '0', 24) > 0) {
     $entryPrice = $tradeIsShort ? $entry['bid_price'] : $entry['ask_price'];
     $requestedNotional = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
     if (bccomp($requestedNotional, $startingBalance, 24) > 0) $requestedNotional = $startingBalance;
-    $order = rankingQuantizeBitgetMarketOrder($requestedNotional, $entryPrice, $martingaleContractRules ?? [], $feeRate, $balance);
-    if ($order === null) {
-        $ordinaryOrderConstraintError = 'Обычная заявка не проходит действующие правила Bitget или не помещается в доступный баланс (минимум, шаг/точность, максимум рыночного ордера). Вариант исключён.';
+    $order = rankingCheckBitgetMarketOrder($requestedNotional, $entryPrice, $martingaleContractRules ?? [], $feeRate, $balance);
+    if (isset($order['error'])) {
+        $ordinaryOrderConstraintError = 'В симуляции заявка ' . $symbol . ' на ' . $entry['received_at_utc'] . ' UTC не проходит проверку: ' . $order['error'] . '. Вариант исключён.';
         break;
     }
     $quantity = $order['quantity'];

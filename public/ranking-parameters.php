@@ -142,7 +142,7 @@ function rankingSimulationCosts(array $query): array
 
 function rankingSimulationCostsIdentity(array $costs): array
 {
-    return ['shared-futures-cost-model-v2-contract-quantity-v1', $costs['include_funding'], $costs['slippage_bps']];
+    return ['shared-futures-cost-model-v2-contract-quantity-v2', $costs['include_funding'], $costs['slippage_bps']];
 }
 
 function rankingMartingaleCacheIdentity(string $mode, array $riskLimits): array
@@ -314,23 +314,47 @@ function rankingHistoricalFundingRates(string $productType, string $symbol, int 
     }
 }
 
-function rankingQuantizeBitgetMarketOrder(string $notional, string $price, array $contract, string $feeRate, string $availableBalance): ?array
+function rankingCheckBitgetMarketOrder(string $notional, string $price, array $contract, string $feeRate, string $availableBalance): array
 {
-    if (($contract['symbolStatus'] ?? null) !== 'normal') return null;
-    if (bccomp((string) $contract['minLever'], '1', 12) > 0 || bccomp((string) $contract['maxLever'], '1', 12) < 0) return null;
+    $display = static function (string $value): string {
+        if (!str_contains($value, '.')) return $value;
+        $trimmed = rtrim(rtrim($value, '0'), '.');
+        return $trimmed === '' || $trimmed === '-0' ? '0' : $trimmed;
+    };
+    if (($contract['symbolStatus'] ?? null) !== 'normal') return ['error' => 'контракт сейчас не разрешает открывать новые позиции (статус: ' . (string) ($contract['symbolStatus'] ?? 'неизвестен') . ')'];
+    if (bccomp((string) $contract['minLever'], '1', 12) > 0 || bccomp((string) $contract['maxLever'], '1', 12) < 0) return ['error' => 'плечо 1× вне разрешённого диапазона ' . $contract['minLever'] . '–' . $contract['maxLever'] . '×'];
     $step = (string) $contract['sizeMultiplier'];
-    if (bccomp($step, '0', 24) <= 0 || bccomp($price, '0', 24) <= 0 || bccomp($notional, '0', 24) <= 0) return null;
+    if (bccomp($step, '0', 24) <= 0 || bccomp($price, '0', 24) <= 0 || bccomp($notional, '0', 24) <= 0) return ['error' => 'некорректная цена, сумма заявки или шаг объёма'];
     $rawQuantity = bcdiv($notional, $price, 24);
     $steps = bcdiv($rawQuantity, $step, 0);
+    $maximum = (string) $contract['maxMarketOrderQty'];
+    if (bccomp($maximum, '0', 24) > 0) {
+        $maximumSteps = bcdiv($maximum, $step, 0);
+        if (bccomp($steps, $maximumSteps, 0) > 0) $steps = $maximumSteps;
+    }
     $quantity = bcmul($steps, $step, (int) $contract['volumePlace']);
-    if (bccomp($quantity, (string) $contract['minTradeNum'], 24) < 0) return null;
-    if (bccomp((string) $contract['maxMarketOrderQty'], '0', 24) > 0
-        && bccomp($quantity, (string) $contract['maxMarketOrderQty'], 24) > 0) return null;
+    if (bccomp($quantity, (string) $contract['minTradeNum'], 24) < 0) {
+        $minimumSteps = bcdiv((string) $contract['minTradeNum'], $step, 0);
+        if (bccomp(bcmul($minimumSteps, $step, 24), (string) $contract['minTradeNum'], 24) < 0) $minimumSteps = bcadd($minimumSteps, '1', 0);
+        $minimumQuantity = bcmul($minimumSteps, $step, 24);
+        $minimumCost = bcmul(bcmul($minimumQuantity, $price, 24), bcadd('1', $feeRate, 24), 24);
+        return ['error' => 'после округления объём ' . $display($quantity) . ' меньше минимума ' . $contract['minTradeNum'] . ' (шаг ' . $step . ', цена ' . $display($price) . ' USDT; для минимального объёма нужно не меньше ' . $display($minimumCost) . ' USDT с комиссией, доступно ' . $display($availableBalance) . ' USDT)'];
+    }
     $actualNotional = bcmul($quantity, $price, 24);
-    if (bccomp($actualNotional, (string) $contract['minTradeUSDT'], 24) < 0) return null;
+    if (bccomp($actualNotional, (string) $contract['minTradeUSDT'], 24) < 0) {
+        return ['error' => 'после округления сумма ' . $display($actualNotional) . ' USDT меньше минимума ' . $contract['minTradeUSDT'] . ' USDT (объём ' . $display($quantity) . ', шаг ' . $step . ', цена ' . $display($price) . ' USDT)'];
+    }
     $marginAndFee = bcadd($actualNotional, bcmul($actualNotional, $feeRate, 24), 24);
-    if (bccomp($marginAndFee, $availableBalance, 24) > 0) return null;
+    if (bccomp($marginAndFee, $availableBalance, 24) > 0) {
+        return ['error' => 'для объёма ' . $display($quantity) . ' нужны ' . $display($marginAndFee) . ' USDT с комиссией, доступно ' . $display($availableBalance) . ' USDT'];
+    }
     return ['quantity' => $quantity, 'notional' => $actualNotional];
+}
+
+function rankingQuantizeBitgetMarketOrder(string $notional, string $price, array $contract, string $feeRate, string $availableBalance): ?array
+{
+    $result = rankingCheckBitgetMarketOrder($notional, $price, $contract, $feeRate, $availableBalance);
+    return isset($result['error']) ? null : $result;
 }
 
 function rankingValues(array $ranges): array

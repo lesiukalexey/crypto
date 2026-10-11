@@ -68,14 +68,14 @@ def _market_order_quantity(
     if quantity_step <= 0.0:
         return requested_notional / price, requested_notional, True
     quantity = math.floor(requested_notional / price / quantity_step + 1e-10) * quantity_step
+    if maximum_market_quantity > 0.0:
+        quantity = min(quantity, math.floor(maximum_market_quantity / quantity_step + 1e-10) * quantity_step)
     precision_scale = 10.0 ** quantity_places
     quantity = math.floor(quantity * precision_scale + 1e-8) / precision_scale
     actual_notional = quantity * price
     if quantity < minimum_quantity or actual_notional < minimum_usdt:
         return 0.0, 0.0, False
-    if maximum_market_quantity > 0.0 and quantity > maximum_market_quantity:
-        return 0.0, 0.0, False
-    if quantity <= 0.0 or math.floor(quantity / quantity_step + 1e-8) * quantity_step != quantity:
+    if quantity <= 0.0 or abs(math.floor(quantity / quantity_step + 1e-8) * quantity_step - quantity) > quantity_step * 1e-7:
         return 0.0, 0.0, False
     return quantity, actual_notional, True
 

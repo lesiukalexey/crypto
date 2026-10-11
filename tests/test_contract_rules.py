@@ -29,7 +29,7 @@ class ContractOrderRuleTests(unittest.TestCase):
         cases = (
             (5.0, 10.0, {"minTradeUSDT": "5.01"}, "notional", "minimum"),
             (5.0, 10.0, {"minTradeNum": "0.6"}, "quantity", "minimum"),
-            (10.0, 10.0, {"maxMarketOrderQty": "0.9"}, "maximum", "maximum"),
+            (10.0, 10.0, {"maxMarketOrderQty": "0.05"}, "maximum", "minimum"),
             (5.0, 10.0, {"symbolStatus": "maintain"}, "status", "tradable"),
             (5.0, 10.0, {}, "balance", "insufficient"),
         )

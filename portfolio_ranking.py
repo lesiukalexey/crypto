@@ -71,7 +71,7 @@ def durable_result_path(
         for symbol in sorted(max_ids)
     ]
     key = hashlib.sha256(json.dumps([
-        "portfolio-durable-result-v7-futures-costs-order-rules" if args.martingale_mode == "none" else "portfolio-durable-result-v12-futures-costs-order-rules", category, args.start_day, args.end_day,
+        "portfolio-durable-result-v8-market-order-sizing" if args.martingale_mode == "none" else "portfolio-durable-result-v13-market-order-sizing", category, args.start_day, args.end_day,
         args.balance, args.fee_percent, args.min_trades, args.entry_config,
         args.ranking_params, args.martingale_mode, args.martingale_timing,
         args.martingale_attempts, args.martingale_max_chain_loss,
@@ -131,7 +131,7 @@ def pair_result_cache_paths(
 
     scope_keys = {
         symbol: hashlib.sha256(json.dumps([
-            "portfolio-pair-simulation-v8-futures-costs-order-rules" if martingale_mode == "none" else "portfolio-pair-simulation-v13-futures-costs-order-rules",
+            "portfolio-pair-simulation-v9-market-order-sizing" if martingale_mode == "none" else "portfolio-pair-simulation-v14-market-order-sizing",
             category,
             symbol,
             max_ids[symbol],

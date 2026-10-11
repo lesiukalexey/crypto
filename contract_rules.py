@@ -125,6 +125,10 @@ def validate_market_order(
         return {"valid": False, "reason": "invalid quantity rules"}
     raw_quantity = requested / market_price
     quantity = (raw_quantity / quantity_step).to_integral_value(rounding=ROUND_DOWN) * quantity_step
+    max_market_quantity = _decimal(contract["maxMarketOrderQty"], "maxMarketOrderQty")
+    if max_market_quantity > 0:
+        maximum_steps = (max_market_quantity / quantity_step).to_integral_value(rounding=ROUND_DOWN)
+        quantity = min(quantity, maximum_steps * quantity_step)
     quantity_places = int(contract["volumePlace"])
     quantity_quantum = Decimal(1).scaleb(-quantity_places)
     quantity = quantity.quantize(quantity_quantum, rounding=ROUND_DOWN)
@@ -133,9 +137,6 @@ def validate_market_order(
     if quantity <= 0 or quantity % quantity_step != 0:
         return {"valid": False, "reason": "quantity does not match the contract step"}
 
-    max_market_quantity = _decimal(contract["maxMarketOrderQty"], "maxMarketOrderQty")
-    if max_market_quantity > 0 and quantity > max_market_quantity:
-        return {"valid": False, "reason": "quantity exceeds the market-order maximum"}
     actual_notional = quantity * market_price
     min_notional = _decimal(contract["minTradeUSDT"], "minTradeUSDT")
     if actual_notional < min_notional:
