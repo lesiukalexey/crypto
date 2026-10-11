@@ -1069,7 +1069,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .chart-display{display:flex;align-items:stretch;gap:12px}.chart-wrap{flex:1 1 auto;min-width:0}.chart-day-controls{display:flex;flex:0 0 104px;flex-direction:column;gap:7px;max-height:clamp(400px,27vw,440px);overflow-y:auto;padding:2px 3px 2px 0;scrollbar-width:thin}.chart-day-button{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;min-width:0;padding:8px 5px;border:1px solid #34415e;border-radius:8px;background:#0c1222;color:#b7c1d5;font-size:12px;line-height:1.25;font-variant-numeric:tabular-nums;white-space:nowrap}.chart-day-swatch{flex:0 0 7px;width:7px;height:7px;border:1px solid #ffffff55;border-radius:50%}.chart-day-button:hover{background:#202d4b;color:#fff}.chart-day-button[aria-pressed="true"]{background:#263b78;color:#fff;box-shadow:inset 0 0 0 1px #8ea5ff}.chart-day-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:2px}@media(max-width:600px){.chart-display{gap:7px}.chart-day-controls{flex-basis:68px;max-height:clamp(320px,58vw,360px);gap:5px}.chart-day-button{padding:7px 2px;font-size:10px}}
 .combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
-.calculation-queue-heading{display:flex;align-items:flex-start;gap:12px}.calculation-queue{flex:1;min-width:0}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}.reset-calculation-queue{flex:0 0 38px;width:38px;height:38px;min-width:38px;padding:0;background:transparent;color:var(--muted);font-size:20px;line-height:1}.reset-calculation-queue:hover{background:#273653;color:var(--text)}.reset-calculation-queue:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}}
+.calculation-queue-heading{display:flex;align-items:flex-start;gap:12px}.calculation-queue{flex:1;min-width:0}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}.reset-calculation-queue{flex:0 0 38px;width:38px;height:38px;min-width:38px;padding:0;background:transparent;color:var(--muted);font-size:20px;line-height:1}.reset-calculation-queue:hover{background:#273653;color:var(--text)}.reset-calculation-queue:disabled{cursor:progress;opacity:.65}.stop-history-import{flex:0 0 auto;width:auto;min-width:0;padding:8px 12px;background:#7c4149;color:#ffd0d0;font-size:13px}.stop-history-import:hover{background:#96535b}.stop-history-import[hidden]{display:none}.stop-history-import:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}.calculation-queue-heading>.stop-history-import{width:auto}}
 .ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}.ranking-favorite-button{width:34px;min-width:34px;padding:6px 4px;background:#263968;color:#fff}.ranking-favorite-button:hover{background:#405bad}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head .ranking-title-toggle{display:flex;align-items:center;gap:9px;flex:1;min-width:0;padding:0;border:0;border-radius:0;background:transparent;color:var(--text);font-size:17px;font-weight:700;text-align:left;cursor:pointer}.portfolio-ranking-head .ranking-title-toggle:hover{background:transparent;color:#b9c7ff}.ranking-disclosure-arrow{display:inline-block;flex:0 0 auto;font-size:13px;line-height:1;transform:rotate(90deg);transition:transform .16s ease}.ranking-title-toggle[aria-expanded="false"] .ranking-disclosure-arrow{transform:rotate(0deg)}.portfolio-ranking-head .refresh-symbols{margin-left:0}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
@@ -1175,7 +1175,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?= rankingSegmentEditor('Только Stop Loss (%)', 'loss', $rankingRanges['loss'], $defaultRankingRanges['loss'], true) ?>
 <p class="small-note">Для каждого параметра можно добавить несколько диапазонов. Внутри каждого задайте «от», «до» и шаг; граничные значения включаются.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 <p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Для исполнения используются действующие правила контракта Bitget (плечо 1×, шаг количества, минимумы и максимум рыночной заявки), комиссия за market/taker и указанное проскальзывание. К историческим сделкам применяются текущие правила контракта. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
-<section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты и очищает очередь. 🧹 делает то же самое и дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
+<section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты рейтинга и очищает очередь. «Остановить загрузку» прекращает загрузку исторических свечей. 🧹 дополнительно сбрасывает кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="stop-history-import" type="button" id="stop-history-import" hidden>■ Остановить загрузку</button><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
 <section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><section class="ranking-history" id="portfolio-ranking-history" aria-live="polite" hidden><div class="ranking-history-header"><h3 class="ranking-history-title">Сохранённые общие рейтинги</h3><button class="ranking-history-delete" type="button" id="delete-portfolio-ranking-history" hidden>Удалить все</button></div><p class="ranking-history-status">Откройте вкладку, чтобы загрузить список расчётов для выбранного списка тикеров.</p></section><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel"><div class="chart-head chart-info-line"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count" title="<?= $visibleQuoteCount ?> исходных снимков; <?= $chartPointCount ?> точек в графике"><?= $visibleQuoteCount ?> снимков<?php if ($chartPointCount < $visibleQuoteCount): ?> · график <?= $chartPointCount ?><?php endif; ?></span><span class="chart-info-item"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
 <?php if ($hasHistoricalCandles): ?><p class="hint">Исторические минутные свечи: Bid, Ask и Last восстановлены по цене Close; биржевой спред в этих данных отсутствует.</p><?php endif; ?>
@@ -1391,6 +1391,7 @@ const calculationQueueCount = document.querySelector('#calculation-queue-count')
 const calculationQueueActive = document.querySelector('#calculation-queue-active');
 const calculationQueueWaiting = document.querySelector('#calculation-queue-waiting');
 const calculationQueueUpdated = document.querySelector('#calculation-queue-updated');
+const stopHistoryImportButton = document.querySelector('#stop-history-import');
 const endDayInput = filtersForm.elements.namedItem('end_day');
 const historyImportStatus = document.querySelector('#history-import-status');
 const selectedSymbolImportButton = document.querySelector('#import-selected-symbol');
@@ -1399,6 +1400,7 @@ const allSymbolsImportButton = document.querySelector('#import-all-active-symbol
 const historyImportButtons = [selectedSymbolImportButton, allSymbolsImportButton, latestQuoteControl].filter(Boolean);
 const historyImportJobStorageKey = 'bitget-history-import-job-v1';
 const historyImportResultStorageKey = 'bitget-history-import-result-v1';
+let activeHistoryImportJobId = '';
 function updateHistoryImportLabels() {
     if (!selectedSymbolImportButton) return;
     selectedSymbolImportButton.textContent = '↻ ' + (symbolSelect.value || 'Выбранная пара');
@@ -1477,6 +1479,8 @@ function renderHistoryImportProgress(status) {
     historyImportStatus.textContent = message;
 }
 async function pollHistoryImport(jobId, importRequest) {
+    activeHistoryImportJobId = jobId;
+    if (stopHistoryImportButton) stopHistoryImportButton.hidden = false;
     historyImportButtons.forEach(button => { button.disabled = true; });
     try {
         while (true) {
@@ -1485,7 +1489,20 @@ async function pollHistoryImport(jobId, importRequest) {
             const status = await response.json();
             if (!response.ok || status.status === 'error') throw new Error(status.message || 'Не удалось загрузить историю.');
             renderHistoryImportProgress(status);
+            if (status.status === 'cancelled') {
+                sessionStorage.removeItem(historyImportJobStorageKey);
+                activeHistoryImportJobId = '';
+                historyImportButtons.forEach(button => { button.disabled = false; });
+                if (stopHistoryImportButton) {
+                    stopHistoryImportButton.hidden = true;
+                    stopHistoryImportButton.disabled = false;
+                    stopHistoryImportButton.textContent = '■ Остановить загрузку';
+                }
+                return;
+            }
             if (status.status !== 'ready' && status.status !== 'partial') continue;
+            activeHistoryImportJobId = '';
+            if (stopHistoryImportButton) stopHistoryImportButton.hidden = true;
 
             const refreshBody = new URLSearchParams({start_day: importRequest.start_day, end_day: importRequest.end_day});
             const refreshResponse = await fetch('refresh-current-day-snapshot.php', {method:'POST', body:refreshBody, headers:{Accept:'application/json'}, cache:'no-store'});
@@ -1508,8 +1525,57 @@ async function pollHistoryImport(jobId, importRequest) {
         historyImportStatus.dataset.status = 'error';
         historyImportStatus.textContent = error.message || 'Не удалось загрузить историю из Bitget.';
         historyImportButtons.forEach(button => { button.disabled = false; });
+        activeHistoryImportJobId = '';
+        if (stopHistoryImportButton) {
+            stopHistoryImportButton.hidden = true;
+            stopHistoryImportButton.disabled = false;
+            stopHistoryImportButton.textContent = '■ Остановить загрузку';
+        }
     }
 }
+stopHistoryImportButton?.addEventListener('click', async () => {
+    if (stopHistoryImportButton.disabled) return;
+    const jobId = activeHistoryImportJobId || (() => {
+        try { return JSON.parse(sessionStorage.getItem(historyImportJobStorageKey) || 'null')?.job_id || ''; }
+        catch (_) { return ''; }
+    })();
+    if (!jobId) return;
+    stopHistoryImportButton.disabled = true;
+    stopHistoryImportButton.textContent = 'Останавливаю…';
+    historyImportStatus.dataset.status = 'running';
+    historyImportStatus.textContent = 'Останавливаю загрузку исторических свечей…';
+    try {
+        const response = await fetch('import-candles.php', {
+            method: 'POST',
+            headers: {'Content-Type':'application/x-www-form-urlencoded', Accept:'application/json'},
+            body: new URLSearchParams({action:'cancel', job_id:jobId}),
+            cache: 'no-store',
+        });
+        const result = await response.json();
+        if (response.ok && (result.status === 'ready' || result.status === 'partial')) {
+            historyImportStatus.dataset.status = result.status;
+            historyImportStatus.textContent = 'Загрузка уже завершилась; обновляю данные…';
+            stopHistoryImportButton.hidden = true;
+            stopHistoryImportButton.disabled = false;
+            stopHistoryImportButton.textContent = '■ Остановить загрузку';
+            return;
+        }
+        if (!response.ok || result.status !== 'cancelled') throw new Error(result.message || 'Не удалось остановить загрузку.');
+        sessionStorage.removeItem(historyImportJobStorageKey);
+        activeHistoryImportJobId = '';
+        historyImportStatus.dataset.status = 'cancelled';
+        historyImportStatus.textContent = result.message || 'Загрузка остановлена.';
+        historyImportButtons.forEach(button => { button.disabled = false; });
+        stopHistoryImportButton.hidden = true;
+        stopHistoryImportButton.disabled = false;
+        stopHistoryImportButton.textContent = '■ Остановить загрузку';
+    } catch (error) {
+        historyImportStatus.dataset.status = 'error';
+        historyImportStatus.textContent = error.message || 'Не удалось остановить загрузку.';
+        stopHistoryImportButton.disabled = false;
+        stopHistoryImportButton.textContent = '■ Остановить загрузку';
+    }
+});
 async function startHistoryImport(scope) {
     const latestMode = scope === 'latest';
     if (!latestMode && !filtersForm.checkValidity()) {
@@ -1550,7 +1616,25 @@ allSymbolsImportButton?.addEventListener('click', () => startHistoryImport('all'
 latestQuoteControl?.addEventListener('click', () => startHistoryImport('latest'));
 try {
     const savedImportJob = JSON.parse(sessionStorage.getItem(historyImportJobStorageKey) || 'null');
-    if (savedImportJob?.job_id && savedImportJob?.request) pollHistoryImport(savedImportJob.job_id, savedImportJob.request);
+    if (savedImportJob?.job_id && savedImportJob?.request) {
+        pollHistoryImport(savedImportJob.job_id, savedImportJob.request);
+    } else {
+        fetch('import-candles.php?active=1', {headers:{Accept:'application/json'}, cache:'no-store'})
+            .then(response => response.json())
+            .then(status => {
+                if (status.status === 'running' && status.job_id) {
+                    const request = {
+                        scope:status.scope || 'all',
+                        symbol:status.symbol || symbolSelect.value,
+                        start_day:status.request_start_day || status.start_day,
+                        end_day:status.request_end_day || status.end_day,
+                    };
+                    sessionStorage.setItem(historyImportJobStorageKey, JSON.stringify({job_id:status.job_id, request}));
+                    pollHistoryImport(status.job_id, request);
+                }
+            })
+            .catch(() => {});
+    }
 } catch (_) { sessionStorage.removeItem(historyImportJobStorageKey); }
 function createElapsedTimer(element, label) {
     let currentLabel = label;

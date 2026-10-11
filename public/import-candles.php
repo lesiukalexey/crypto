@@ -23,11 +23,13 @@ function writeCandleImportJson(string $path, array $payload): void
     @chmod($path, 0600);
 }
 
-function isCandleImportProcess(int $pid): bool
+function isCandleImportProcess(int $pid, ?string $expectedStatusPath = null): bool
 {
     if ($pid < 2 || !is_dir('/proc/' . $pid)) return false;
     $command = @file_get_contents('/proc/' . $pid . '/cmdline');
-    return is_string($command) && str_contains($command, 'import_historical_candles.py');
+    if (!is_string($command) || !str_contains($command, 'import_historical_candles.py')) return false;
+    $command = str_replace("\0", ' ', $command);
+    return $expectedStatusPath === null || str_contains($command, '--status-file ' . $expectedStatusPath);
 }
 
 function parseCandleImportDate(string $value, DateTimeZone $timezone): ?DateTimeImmutable
@@ -49,6 +51,25 @@ try {
     @chmod($localRoot, 0700);
 
     if (($_SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
+        if (($_GET['active'] ?? '') === '1') {
+            $activePath = $localRoot . '/active-job.json';
+            $active = is_file($activePath) ? json_decode((string) file_get_contents($activePath), true) : null;
+            $jobId = (string) (is_array($active) ? ($active['job_id'] ?? '') : '');
+            if (!is_array($active) || ($active['status'] ?? '') !== 'running' || !preg_match('/^[a-f0-9]{32}$/', $jobId)) {
+                candleImportRespond(['status' => 'idle']);
+            }
+            $statusPath = $localRoot . '/job-' . $jobId . '.json';
+            $status = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
+            $pid = (int) ($active['pid'] ?? 0);
+            if (!is_array($status)) candleImportRespond(['status' => 'error', 'message' => 'Состояние активной загрузки не найдено.'], 404);
+            if (($status['status'] ?? '') === 'running' && $pid >= 2 && !isCandleImportProcess($pid, $statusPath)) {
+                $status = array_merge($status, ['status' => 'error', 'message' => 'Загрузка неожиданно завершилась. Проверьте журнал задания.']);
+                writeCandleImportJson($statusPath, $status);
+                writeCandleImportJson($activePath, ['job_id' => $jobId, 'status' => 'error', 'pid' => 0]);
+            }
+            $requestFields = array_intersect_key($active, array_flip(['scope', 'symbol', 'request_start_day', 'request_end_day']));
+            candleImportRespond(array_merge($status, $requestFields, ['job_id' => $jobId]));
+        }
         $jobId = (string) ($_GET['job_id'] ?? '');
         if (!preg_match('/^[a-f0-9]{32}$/', $jobId)) candleImportRespond(['status' => 'error', 'message' => 'Неизвестный запрос загрузки.'], 400);
         $statusPath = $localRoot . '/job-' . $jobId . '.json';
@@ -58,7 +79,7 @@ try {
             $activePath = $localRoot . '/active-job.json';
             $active = is_file($activePath) ? json_decode((string) file_get_contents($activePath), true) : null;
             $pid = (int) (is_array($active) && ($active['job_id'] ?? '') === $jobId ? ($active['pid'] ?? 0) : 0);
-            if (!isCandleImportProcess($pid)) {
+            if ($pid >= 2 && !isCandleImportProcess($pid, $statusPath)) {
                 $status = ['status' => 'error', 'progress' => (int) ($status['progress'] ?? 0), 'message' => 'Загрузка неожиданно завершилась. Проверьте журнал задания.'];
                 writeCandleImportJson($statusPath, $status);
             }
@@ -76,12 +97,76 @@ try {
         candleImportRespond(['status' => 'error', 'message' => 'Запрос загрузки отклонён.'], 403);
     }
 
+    if (($_POST['action'] ?? '') === 'cancel') {
+        $jobId = trim((string) ($_POST['job_id'] ?? ''));
+        if (!preg_match('/^[a-f0-9]{32}$/', $jobId)) candleImportRespond(['status' => 'error', 'message' => 'Неизвестное задание загрузки.'], 400);
+        $queueLock = fopen($localRoot . '/queue.lock', 'c');
+        if ($queueLock === false || !flock($queueLock, LOCK_EX)) {
+            if (is_resource($queueLock)) fclose($queueLock);
+            candleImportRespond(['status' => 'error', 'message' => 'Не удалось проверить активную загрузку.'], 503);
+        }
+        $statusPath = $localRoot . '/job-' . $jobId . '.json';
+        $status = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
+        if (!is_array($status)) {
+            flock($queueLock, LOCK_UN);
+            fclose($queueLock);
+            candleImportRespond(['status' => 'error', 'message' => 'Задание загрузки не найдено.'], 404);
+        }
+        if (($status['status'] ?? '') !== 'running') {
+            flock($queueLock, LOCK_UN);
+            fclose($queueLock);
+            candleImportRespond($status + ['job_id' => $jobId]);
+        }
+
+        $activePath = $localRoot . '/active-job.json';
+        $active = is_file($activePath) ? json_decode((string) file_get_contents($activePath), true) : null;
+        if (!is_array($active) || ($active['job_id'] ?? '') !== $jobId) {
+            flock($queueLock, LOCK_UN);
+            fclose($queueLock);
+            candleImportRespond(['status' => 'error', 'message' => 'Это задание больше не является активной загрузкой.'], 409);
+        }
+        $pid = (int) ($active['pid'] ?? 0);
+        if (isCandleImportProcess($pid, $statusPath)) {
+            if (!function_exists('posix_kill') || !@posix_kill($pid, SIGTERM)) {
+                flock($queueLock, LOCK_UN);
+                fclose($queueLock);
+                candleImportRespond(['status' => 'error', 'message' => 'Не удалось остановить процесс загрузки.'], 503);
+            }
+            for ($attempt = 0; $attempt < 50 && isCandleImportProcess($pid, $statusPath); $attempt++) usleep(100000);
+            if (isCandleImportProcess($pid, $statusPath)) {
+                flock($queueLock, LOCK_UN);
+                fclose($queueLock);
+                candleImportRespond(['status' => 'error', 'message' => 'Процесс загрузки не завершился после команды остановки.'], 503);
+            }
+            $latestStatus = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
+            if (is_array($latestStatus) && ($latestStatus['status'] ?? '') !== 'running') {
+                $terminal = (string) $latestStatus['status'];
+                writeCandleImportJson($activePath, ['job_id' => $jobId, 'status' => $terminal, 'pid' => 0]);
+                flock($queueLock, LOCK_UN);
+                fclose($queueLock);
+                candleImportRespond($latestStatus + ['job_id' => $jobId]);
+            }
+        }
+        $status = array_merge($status, [
+            'status' => 'cancelled',
+            'message' => 'Загрузка остановлена пользователем.',
+            'cancelled_at' => gmdate(DATE_ATOM),
+        ]);
+        writeCandleImportJson($statusPath, $status);
+        writeCandleImportJson($activePath, ['job_id' => $jobId, 'status' => 'cancelled', 'pid' => 0]);
+        flock($queueLock, LOCK_UN);
+        fclose($queueLock);
+        candleImportRespond($status + ['job_id' => $jobId]);
+    }
+
     $timezone = new DateTimeZone('Europe/Kyiv');
     $enabled = enabledTickerSymbols($config);
     $scope = (string) ($_POST['scope'] ?? 'symbol');
     $latestMode = $scope === 'latest';
-    $startValue = (string) ($_POST['start_day'] ?? '');
-    $endValue = (string) ($_POST['end_day'] ?? '');
+    $requestStartValue = (string) ($_POST['start_day'] ?? '');
+    $requestEndValue = (string) ($_POST['end_day'] ?? '');
+    $startValue = $requestStartValue;
+    $endValue = $requestEndValue;
     if ($latestMode) {
         $startValue = 'per-symbol latest';
         $endValue = (new DateTimeImmutable('now', $timezone))->format('Y-m-d');
@@ -130,7 +215,12 @@ try {
         'message' => 'Задание запускается…',
     ];
     writeCandleImportJson($statusPath, $status);
-    writeCandleImportJson($activePath, ['job_id' => $jobId, 'status' => 'running', 'pid' => 0]);
+    $activeRecord = [
+        'job_id' => $jobId, 'status' => 'running', 'pid' => 0,
+        'scope' => $scope, 'symbol' => $symbols[0],
+        'request_start_day' => $requestStartValue, 'request_end_day' => $requestEndValue,
+    ];
+    writeCandleImportJson($activePath, $activeRecord);
 
     $root = dirname(__DIR__);
     $python = $root . '/.venv/bin/python';
@@ -148,12 +238,12 @@ try {
     if ($exitCode !== 0 || $pid < 2) {
         $failed = ['job_id' => $jobId, 'status' => 'error', 'progress' => 100, 'message' => 'Не удалось запустить фоновую загрузку.'];
         writeCandleImportJson($statusPath, $failed);
-        writeCandleImportJson($activePath, ['job_id' => $jobId, 'status' => 'error', 'pid' => 0]);
+        writeCandleImportJson($activePath, array_merge($activeRecord, ['status' => 'error', 'pid' => 0]));
         flock($lock, LOCK_UN);
         fclose($lock);
         candleImportRespond($failed, 500);
     }
-    writeCandleImportJson($activePath, ['job_id' => $jobId, 'status' => 'running', 'pid' => $pid]);
+    writeCandleImportJson($activePath, array_merge($activeRecord, ['pid' => $pid]));
     flock($lock, LOCK_UN);
     fclose($lock);
     candleImportRespond($status + ['job_id' => $jobId]);
