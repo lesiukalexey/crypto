@@ -1063,7 +1063,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 .wrap{max-width:none;padding-left:20px;padding-right:20px;padding-bottom:12px}.chart-wrap{container-type:inline-size}#chart{height:clamp(400px,27vw,440px)}.chart-head.chart-info-line{justify-content:flex-start;align-items:center;gap:18px;min-width:0;overflow-x:auto;white-space:nowrap;scrollbar-width:thin}.chart-info-line h2,.chart-info-line .count,.chart-info-item{flex:0 0 auto;white-space:nowrap}.chart-info-line h2{font-size:16px}.chart-info-item{display:inline-flex;align-items:center;gap:7px;color:#b7c1d5;font-size:13px}.chart-info-item .dot{flex:0 0 9px}.chart-info-item .session-marker{width:9px;height:9px;border:1px solid #48536c;border-radius:2px;background:#080d19;flex:0 0 9px}@media(max-width:600px){#chart{height:clamp(320px,58vw,360px)}.wrap{padding-bottom:10px}.chart-head.chart-info-line{align-items:center;flex-direction:row;gap:14px}}
 .entry-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.entry-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.entry-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.entry-strategy-fields>.field{flex:1 1 190px;min-width:150px}.entry-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.entry-strategy-fields>.field{flex-basis:100%;width:100%}}
 .exit-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.exit-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.exit-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.exit-strategy-fields>.field:first-child{flex:1 1 260px}.exit-strategy-fields>.field:nth-child(2){flex:2 1 420px}.exit-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.exit-strategy-fields>.field{flex-basis:100%;width:100%}}
-.ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}.ranking-history{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:10px;background:#0c1222}.ranking-history-header{display:flex;align-items:center;justify-content:space-between;gap:10px}.ranking-history-title{margin:0 0 8px;font-size:14px}.ranking-history-delete{padding:6px 10px;color:#ffd0d0;border-color:#7c4149}.ranking-history-delete:disabled{cursor:progress;opacity:.65}.ranking-history-status{margin:0;color:var(--muted);font-size:13px}.ranking-history-list{display:grid;gap:8px;max-height:380px;overflow:auto;margin:8px 0 0;padding:0;list-style:none}.ranking-history-item{display:grid;grid-template-columns:minmax(180px,1fr) auto;align-items:start;gap:10px;padding:10px;border:1px solid #34415e;border-radius:9px;background:#10182a}.ranking-history-item strong{font-variant-numeric:tabular-nums}.ranking-history-item p{margin:4px 0;color:var(--muted);font-size:12px}.ranking-history-item details{grid-column:1/-1;color:var(--muted);font-size:12px}.ranking-history-item pre{max-height:220px;overflow:auto;margin:6px 0 0;padding:9px;border-radius:7px;background:#080d19;color:#d6def1;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.45 ui-monospace,monospace}.ranking-history-item button{grid-column:2;grid-row:1;min-width:100px;padding:7px 10px}.ranking-history-legacy{color:#e6c98b!important}@media(max-width:600px){.ranking-history-item{grid-template-columns:1fr}.ranking-history-item button{grid-column:1;grid-row:auto;justify-self:start}}
+.ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}.ranking-history{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:10px;background:#0c1222}.ranking-history-header{display:flex;align-items:center;justify-content:space-between;gap:10px}.ranking-history-title{margin:0 0 8px;font-size:14px}.ranking-history-delete{padding:6px 10px;color:#ffd0d0;border-color:#7c4149}.ranking-history-delete:disabled{cursor:progress;opacity:.65}.ranking-history-status{margin:0;color:var(--muted);font-size:13px}.ranking-history-list{display:grid;gap:8px;max-height:380px;overflow:auto;margin:8px 0 0;padding:0;list-style:none}.ranking-history-item{display:grid;grid-template-columns:minmax(180px,1fr) auto;align-items:start;gap:10px;padding:10px;border:1px solid #34415e;border-radius:9px;background:#10182a}.ranking-history-item strong{font-variant-numeric:tabular-nums}.ranking-history-item p{margin:4px 0;color:var(--muted);font-size:12px}.ranking-history-item details{grid-column:1/-1;color:var(--muted);font-size:12px}.ranking-history-item pre{max-height:220px;overflow:auto;margin:6px 0 0;padding:9px;border-radius:7px;background:#080d19;color:#d6def1;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.45 ui-monospace,monospace}.ranking-history-actions{display:flex;grid-column:2;grid-row:1;gap:8px}.ranking-history-item .ranking-history-actions button{min-width:100px;padding:7px 10px}.ranking-history-item .ranking-history-delete-one{color:#ffd0d0;border-color:#7c4149}.ranking-history-item button:disabled{cursor:progress;opacity:.65}.ranking-history-legacy{color:#e6c98b!important}@media(max-width:600px){.ranking-history-item{grid-template-columns:1fr}.ranking-history-actions{grid-column:1;grid-row:auto;justify-self:start;flex-wrap:wrap}}
 .chart-display{display:flex;align-items:stretch;gap:12px}.chart-wrap{flex:1 1 auto;min-width:0}.chart-day-controls{display:flex;flex:0 0 104px;flex-direction:column;gap:7px;max-height:clamp(400px,27vw,440px);overflow-y:auto;padding:2px 3px 2px 0;scrollbar-width:thin}.chart-day-button{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;min-width:0;padding:8px 5px;border:1px solid #34415e;border-radius:8px;background:#0c1222;color:#b7c1d5;font-size:12px;line-height:1.25;font-variant-numeric:tabular-nums;white-space:nowrap}.chart-day-swatch{flex:0 0 7px;width:7px;height:7px;border:1px solid #ffffff55;border-radius:50%}.chart-day-button:hover{background:#202d4b;color:#fff}.chart-day-button[aria-pressed="true"]{background:#263b78;color:#fff;box-shadow:inset 0 0 0 1px #8ea5ff}.chart-day-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:2px}@media(max-width:600px){.chart-display{gap:7px}.chart-day-controls{flex-basis:68px;max-height:clamp(320px,58vw,360px);gap:5px}.chart-day-button{padding:7px 2px;font-size:10px}}
 .combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
@@ -2622,11 +2622,20 @@ async function loadPortfolioRankingHistory(force = false) {
             const count = document.createElement('p');
             count.textContent = `${Number(item.universe_size || 0).toLocaleString('ru-RU')} тикеров · сохранён ${new Date(item.cached_at).toLocaleString('ru-RU')}`;
             info.append(range, count);
+            const actions = document.createElement('div');
+            actions.className = 'ranking-history-actions';
             const show = document.createElement('button');
             show.type = 'button';
             show.textContent = 'Показать';
             show.addEventListener('click', () => loadPortfolioRanking({savedCacheKey: item.cache_key}));
-            row.append(info, show);
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'ranking-history-delete-one';
+            remove.textContent = 'Удалить';
+            remove.setAttribute('aria-label', `Удалить сохранённый рейтинг за ${item.start_day || 'неизвестный период'} — ${item.end_day || 'неизвестный период'}`);
+            remove.addEventListener('click', () => deletePortfolioRankingHistoryItem(item));
+            actions.append(show, remove);
+            row.append(info, actions);
             const details = document.createElement('details');
             const summary = document.createElement('summary');
             summary.textContent = item.parameters ? 'Параметры и список тикеров' : 'Список тикеров и параметры';
@@ -2651,6 +2660,35 @@ async function loadPortfolioRankingHistory(force = false) {
     } catch (error) {
         if (requestId !== portfolioRankingHistoryRequest) return;
         status.textContent = error.message || 'Не удалось загрузить сохранённые общие рейтинги.';
+    }
+}
+async function deletePortfolioRankingHistoryItem(item) {
+    const period = item.start_day && item.end_day ? `${item.start_day} — ${item.end_day}` : 'этот период';
+    if (!window.confirm(`Удалить только сохранённый общий рейтинг за ${period}?`)) return;
+    const buttons = [...portfolioRankingHistory.querySelectorAll('.ranking-history-actions button')];
+    buttons.forEach((button) => { button.disabled = true; });
+    const remove = buttons.find((button) => button.classList.contains('ranking-history-delete-one'));
+    if (remove) remove.textContent = 'Удаляю…';
+    try {
+        const tickerSet = filtersForm.querySelector('[name="ticker_set"]')?.value || '';
+        const response = await fetch('portfolio-ranking-delete.php', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'},
+            body: new URLSearchParams({ticker_set: tickerSet, cache_key: item.cache_key}),
+            cache: 'no-store',
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.status !== 'ready') throw new Error(payload.message || 'Не удалось удалить сохранённый рейтинг.');
+        if (Number(payload.deleted) !== 1) throw new Error('Рейтинг уже удалён, выполняется или не относится к выбранному списку.');
+        portfolioRankingHistorySetId = '';
+        await loadPortfolioRankingHistory(true);
+        const status = portfolioRankingHistory.querySelector('.ranking-history-status');
+        if (status) status.textContent = `Сохранённый рейтинг за ${period} удалён.`;
+    } catch (error) {
+        const status = portfolioRankingHistory.querySelector('.ranking-history-status');
+        if (status) status.textContent = error.message || 'Не удалось удалить сохранённый рейтинг.';
+        buttons.forEach((button) => { button.disabled = false; });
+        if (remove) remove.textContent = 'Удалить';
     }
 }
 deletePortfolioRankingHistoryButton?.addEventListener('click', async () => {

@@ -28,6 +28,10 @@ try {
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $set = selectedTickerSet($config, trim((string) ($_POST['ticker_set'] ?? '')));
     if ($set['symbols'] === []) respond(['status' => 'error', 'message' => 'В выбранном списке нет тикеров.'], 400);
+    $cacheKey = trim((string) ($_POST['cache_key'] ?? ''));
+    if ($cacheKey !== '' && preg_match('/^[a-f0-9]{64}$/', $cacheKey) !== 1) {
+        respond(['status' => 'error', 'message' => 'Некорректный идентификатор сохранённого рейтинга.'], 400);
+    }
 
     $cacheDir = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-backtest-cache';
     if (!is_dir($cacheDir)) respond(['status' => 'ready', 'deleted' => 0]);
@@ -36,7 +40,10 @@ try {
     sort($expectedSymbols, SORT_STRING);
     $deleted = 0;
     $failed = false;
-    foreach (glob($cacheDir . '/portfolio-*.json') ?: [] as $resultPath) {
+    $resultPaths = $cacheKey === ''
+        ? (glob($cacheDir . '/portfolio-*.json') ?: [])
+        : [$cacheDir . '/portfolio-' . $cacheKey . '.json'];
+    foreach ($resultPaths as $resultPath) {
         if (preg_match('/^portfolio-([a-f0-9]{64})\.json$/', basename($resultPath), $matches) !== 1) continue;
         $key = $matches[1];
         $lock = @fopen($cacheDir . '/portfolio-' . $key . '.lock', 'c');
