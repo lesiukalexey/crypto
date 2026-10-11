@@ -210,7 +210,8 @@ function render(data){
   const localMoveByMinimum=new Map(localMoves.map(move=>[move.minimumIndex,move]));
   const averageDecline=localMoves.length?localMoves.reduce((total,move)=>total+move.decline,0)/localMoves.length:null;
   localMovesPanel.hidden=!netView;
-  localMovesSummary.textContent=netView?`${localMoves.length} падений · среднее ${averageDecline===null?'—':money(averageDecline)+' ('+fmt(averageDecline/Number(data.starting_balance)*100,2)+'%)'}`:'';
+  const averageChange=averageDecline===null?null:-averageDecline;
+  localMovesSummary.textContent=netView?`${localMoves.length} падений · среднее ${averageChange===null?'—':money(averageChange)+' ('+signed(averageChange/Number(data.starting_balance)*100,2)+'%)'}`:'';
   localMovesThreshold.textContent=netView?`Режим «${scaleLabel}»: шаг поиска крупных поворотов ${scaleThreshold?durationLabel(scaleThreshold):'без ограничения'}. Для поиска берётся точка графика примерно раз в заданный интервал; краткие колебания не попадают в топ‑10. Интервал зависит от длины диапазона.`:'';
   localMovesRows.innerHTML=localMoves.length?localMoves.map((move,index)=>`<tr><td>${index+1}</td><td>${new Date(move.peakTime).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})}</td><td>${money(move.peakValue)}</td><td>${new Date(move.minimumTime).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})}</td><td>${money(move.minimumValue)}</td><td>${fmt(move.decline,4)} USDT · ${fmt(move.decline/Number(data.starting_balance)*100,2)}%</td><td>${durationLabel(move.minimumTime-move.peakTime)}</td></tr>`).join(''):'<tr><td colspan="7">Для этого интервала локальных падений не найдено.</td></tr>';
   const width=Math.max(700,chart.clientWidth||1000),height=Math.max(260,chart.clientHeight||420),pad={l:96,r:28,t:24,b:44};
