@@ -1326,17 +1326,19 @@ const symbolSortMode = document.querySelector('#symbol-sort-mode');
 const symbolSelect = document.querySelector('#symbol-select');
 const knownTickerBestResults = new Map();
 function renderTickerBestResults(items) {
+    knownTickerBestResults.clear();
+    const currentSymbol = symbolSelect.value;
+    const options = new Map([...symbolSelect.options].map(option => [option.value, option]));
+    for (const [symbol, option] of options) {
+        option.textContent = symbol;
+        option.removeAttribute('title');
+    }
     for (const item of items) {
         if (item.pnl === null || item.pnl === undefined || item.pnl === '') continue;
         const pnl = Number(item.pnl);
         if (!item.symbol || !Number.isFinite(pnl)) continue;
-        const previous = knownTickerBestResults.get(item.symbol);
-        if (!previous || pnl > previous.pnl) {
-            knownTickerBestResults.set(item.symbol, {pnl, title: item.title || 'Лучший сохранённый результат тикера'});
-        }
+        knownTickerBestResults.set(item.symbol, {pnl, title: item.title || 'Лучший сохранённый результат тикера'});
     }
-    const currentSymbol = symbolSelect.value;
-    const options = new Map([...symbolSelect.options].map(option => [option.value, option]));
     const ranked = [...knownTickerBestResults.entries()]
         .filter(([symbol]) => options.has(symbol))
         .sort(([leftSymbol, left], [rightSymbol, right]) => (right.pnl - left.pnl) || leftSymbol.localeCompare(rightSymbol));
@@ -2931,7 +2933,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
                 ? 'Лучшая комбинация: ' + item.entry_label + ' · ' + (item.exit_label || 'TP/SL не указаны')
                 : (params.get('save_mode') === '0' ? 'Нет варианта выхода хотя бы с одной сделкой' : 'Нет варианта выхода минимум с двумя сделками'),
         }));
-        if (!showingSavedResult) renderTickerBestResults(tickerResults);
+        renderTickerBestResults(tickerResults);
         const rankedCount = tickerResults.filter(item => item.pnl !== null && item.pnl !== undefined).length;
         buttonTitle = 'Пары отсортированы по их лучшему результату: надежных рейтингов ' + rankedCount + ' из ' + symbolSelect.options.length + '.';
     } catch (error) {
