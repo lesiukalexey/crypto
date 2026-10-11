@@ -123,6 +123,14 @@ is off by default and requires all three explicit gates: a caller-provided
 again at each submission. No production credentials are configured, and the
 dashboard and paper service do not construct this adapter.
 
+The Autotrading page has a Paper / Bitget Demo / Bitget Real selector. It
+records the selected target in the browser session and clearly shows the
+executor's actual mode. Only Paper currently starts: Demo is limited to
+read-only reconciliation, and Demo/Real starts are rejected both in the UI and
+server action until the shared portfolio runner has exchange order lifecycle,
+account reconciliation, and restart recovery connected to those adapters.
+Selecting a mode does not enable or submit orders.
+
 The adapter requires a successful one-way/crossed reconciliation, validates
 the symbol/quantity and release risk limits, checks a fresh daily-loss snapshot
 from a trusted durable-ledger provider, and estimates order/current exposure

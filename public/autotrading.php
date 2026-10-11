@@ -90,6 +90,8 @@ $csrf = (string) $_SESSION['autotrading_csrf'];
 $message = '';
 $messageType = 'info';
 $demoReconciliation = is_array($_SESSION['autotrading_demo_status'] ?? null) ? $_SESSION['autotrading_demo_status'] : null;
+$savedAccountMode = $_SESSION['autotrading_account_mode'] ?? 'paper';
+$accountMode = is_string($savedAccountMode) && in_array($savedAccountMode, ['paper', 'demo', 'real'], true) ? $savedAccountMode : 'paper';
 $isLocal = in_array((string) ($_SERVER['REMOTE_ADDR'] ?? ''), ['127.0.0.1', '::1'], true);
 $params = static fn (string $name, string $default = ''): string => trim((string) ($_GET[$name] ?? $default));
 $symbol = strtoupper($params('symbol', (string) ($config['symbols'][0] ?? 'BTCUSDT')));
@@ -121,7 +123,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!hash_equals($csrf, (string) ($_POST['csrf'] ?? ''))) throw new RuntimeException('Сессия формы истекла. Обновите страницу и повторите действие.');
         $action = (string) ($_POST['action'] ?? '');
         $argsBase = ['--state', $statePath, '--pid-file', $pidPath, '--control', $controlPath];
-        if ($action === 'add_favorite') {
+        if ($action === 'account-mode') {
+            $requestedMode = (string) ($_POST['account_mode'] ?? '');
+            if (!in_array($requestedMode, ['paper', 'demo', 'real'], true)) throw new RuntimeException('Выбран неизвестный режим счёта.');
+            $_SESSION['autotrading_account_mode'] = $requestedMode;
+            $accountMode = $requestedMode;
+            $message = $requestedMode === 'paper'
+                ? 'Выбран Paper: запустится виртуальный портфель без ордеров на Bitget.'
+                : ($requestedMode === 'demo'
+                    ? 'Demo выбран как целевой счёт. Исполнитель пока работает только в Paper; Demo доступен только для сверки.'
+                    : 'Реальный счёт выбран как целевой. Запуск заблокирован, пока production адаптер не подключён к общему портфелю.');
+            $messageType = $requestedMode === 'paper' ? 'success' : 'warning';
+        } elseif ($action === 'add_favorite') {
             [$currentCode, $currentOut] = runPython(array_merge(['status'], $argsBase), $root, $python);
             $currentStatus = $currentCode === 0 ? json_decode($currentOut, true) : null;
             if (is_array($currentStatus) && !empty($currentStatus['service']['running']) && ($currentStatus['service']['mode'] ?? '') !== 'portfolio') throw new RuntimeException('Сейчас работает старый одиночный paper процесс. Остановите его, добавьте избранное и запустите общий портфель.');
@@ -243,6 +256,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = ($report['matched'] ?? false) ? 'Demo сверка завершена: расхождений нет.' : 'Demo сверка завершена: обнаружено расхождение или ошибка подключения.';
             $messageType = ($report['matched'] ?? false) ? 'success' : 'warning';
         } elseif ($action === 'start') {
+            if ($accountMode !== 'paper') throw new RuntimeException('Запуск биржевого режима заблокирован: общий исполнитель пока поддерживает только Paper. Выберите Paper, чтобы запустить виртуальный портфель.');
             [$listCode, $listOut] = runPython(['status', '--state', $statePath], $root, $python);
             $portfolioState = $listCode === 0 ? json_decode($listOut, true) : null;
             if ((!is_array($portfolioState) || empty($portfolioState['portfolio_strategies'])) && is_file($activeReleasePath)) {
@@ -317,6 +331,12 @@ $postHidden = [
 <section class="panel how-to"><h2>Общий paper портфель</h2><ol><li>Добавьте выбранную конфигурацию из «Базовых проверок» или нажмите «Добавить в автоторговлю» у записи в «Избранном».</li><li>Добавляйте несколько стратегий и хедж-пар. Их позиции и результат учитываются в одном виртуальном балансе; лимит на вход каждой стратегии автоматически ограничен её долей портфеля.</li><li>Нажмите «Запустить общий портфель». Сервис будет обрабатывать их вместе на одном потоке публичных котировок.</li></ol><p class="note">Это paper-режим: ордера на Bitget не отправляются. Избранный хедж открывает long и short одновременно и закрывает обе ноги вместе при команде «Закрыть paper позиции».</p></section>
 <?php if ($message !== ''): ?><p class="status <?= h($messageType) ?>" role="status"><?= h($message) ?></p><?php endif; ?>
 <?php if (!$isLocal): ?><p class="status warning">Просмотр доступен, но управление работает только при открытии страницы с этого компьютера.</p><?php endif; ?>
+<section class="panel"><h2>Режим счёта</h2><div class="actions" role="group" aria-label="Выбор режима счёта">
+<?php foreach (['paper' => 'Paper', 'demo' => 'Bitget Demo', 'real' => 'Bitget Real'] as $modeKey => $modeLabel): ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="account-mode"><input type="hidden" name="account_mode" value="<?= h($modeKey) ?>"><button class="<?= $accountMode === $modeKey ? '' : 'secondary' ?>" aria-pressed="<?= $accountMode === $modeKey ? 'true' : 'false' ?>" <?= !$isLocal ? 'disabled' : '' ?>><?= h($modeLabel) ?><?= $accountMode === $modeKey ? ' · выбран' : '' ?></button></form><?php endforeach; ?>
+</div>
+<?php if ($accountMode === 'paper'): ?><p class="note">Исполнитель сейчас действительно работает в Paper. Этот режим использует общий виртуальный баланс и публичные котировки.</p>
+<?php elseif ($accountMode === 'demo'): ?><p class="status warning">Выбран Bitget Demo, но торговый адаптер ещё не подключён к общему портфелю. Сейчас для Demo доступна только чтение и сверка аккаунта; запуск исполнителя заблокирован.</p>
+<?php else: ?><p class="status warning">Выбран Bitget Real, но общий портфель пока не связан с production адаптером. Запуск заблокирован до интеграции реальных ордеров, сверки позиций и восстановления после перезапуска. Сам выбор режима не отправляет ордера.</p><?php endif; ?></section>
 <?php if (is_array($selectedFavorite)): $favoriteParams = is_array($selectedFavorite['params'] ?? null) ? $selectedFavorite['params'] : []; $favoriteName = (string) ($selectedFavorite['name'] ?? 'Избранное'); $favoriteKind = (string) ($selectedFavorite['type'] ?? '') === 'hedge' ? 'Хедж-пара' : 'Стратегия'; $favoriteTicker = $favoriteKind === 'Хедж-пара' ? 'Лонг ' . (string) ($favoriteParams['long_symbol'] ?? '—') . ' / шорт ' . (string) ($favoriteParams['short_symbol'] ?? '—') : (string) ($favoriteParams['symbol'] ?? '—'); ?>
 <section class="panel"><h2>Добавить запись из избранного</h2><p><strong><?= h($favoriteName) ?></strong> · <?= h($favoriteKind) ?> · <?= h($favoriteTicker) ?></p><p class="note">В общий портфель попадёт эта конфигурация; для хедж-пары обе ноги используют равные части её доли капитала.</p><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_favorite"><input type="hidden" name="favorite_id" value="<?= h($selectedFavoriteId) ?>"><button <?= !$isLocal ? 'disabled' : '' ?>>Добавить в общий портфель</button></form></section>
 <?php endif; ?>
@@ -343,7 +363,7 @@ $postHidden = [
 </section>
 <?php else: ?><p class="status warning">Стратегия ещё не опубликована. Сначала выберите и опубликуйте её в блоке ниже.</p><?php endif; ?>
 <div class="actions">
-<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><button <?= !$isLocal || (empty($status['portfolio_strategies']) && !is_array($published)) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? ((($status['service']['mode'] ?? '') === 'portfolio') ? 'Общий портфель уже запущен' : 'Остановите старую одиночную службу') : 'Запустить общий портфель' ?></button></form>
+<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><button <?= !$isLocal || $accountMode !== 'paper' || (empty($status['portfolio_strategies']) && !is_array($published)) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? ((($status['service']['mode'] ?? '') === 'portfolio') ? 'Общий портфель уже запущен' : 'Остановите старую одиночную службу') : 'Запустить общий портфель' ?></button></form>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="stop"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Остановить процесс</button></form>
 <form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="<?= ($status['controls']['entries_paused'] ?? false) ? 'resume' : 'pause' ?>"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['controls']['entries_paused'] ?? false) ? 'Возобновить новые входы' : 'Приостановить новые входы' ?></button></form>
 <form method="post" onsubmit="return confirm('Закрыть все открытые paper позиции по ближайшим свежим котировкам?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="close"><button class="danger" <?= !$isLocal || !($status['service']['running'] ?? false) || ($status['open_positions'] ?? 0) < 1 ? 'disabled' : '' ?>>Закрыть paper позиции</button></form>
