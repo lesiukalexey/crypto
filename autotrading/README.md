@@ -31,7 +31,7 @@ Stopping the process preserves open positions and the active strategy run for th
 next start. Each strategy can also be stopped separately; that blocks new
 entries, closes only its own positions, and writes a completed session record.
 
-Set the shared stop floor under **Настройки → Автоторговля**. The default is
+Set the shared stop floor under **Настройки → Общие настройки → Автоторговля**. The default is
 75% of each strategy run's own peak equity. Equity includes the run's allocated
 starting balance, its realized PnL since the run began, and its fresh unrealized
 PnL. A strategy that starts with 10 USDT stops at 7.50 USDT; if its equity later

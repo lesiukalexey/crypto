@@ -112,40 +112,67 @@ $quoteSets = loadQuoteSets($config);
 $riskSettingsPath = autotradingRiskSettingsPath();
 $riskSettings = is_file($riskSettingsPath) ? json_decode((string) file_get_contents($riskSettingsPath), true) : null;
 $minimumEquityPercent = is_array($riskSettings) && is_numeric($riskSettings['minimum_equity_percent'] ?? null) && (float) $riskSettings['minimum_equity_percent'] >= 1 && (float) $riskSettings['minimum_equity_percent'] <= 100 ? (string) $riskSettings['minimum_equity_percent'] : '75';
+$settingsPages = [
+    'ticker-lists' => 'Списки тикеров',
+    'active-tickers' => 'Активные тикеры',
+    'general' => 'Общие настройки',
+    'autotrading' => 'Автоторговля',
+    'ranking-cache' => 'Кэш рейтингов',
+];
+$settingsPage = (string) ($_GET['page'] ?? 'ticker-lists');
+if (!isset($settingsPages[$settingsPage])) $settingsPage = 'ticker-lists';
+$isGeneralPage = in_array($settingsPage, ['general', 'autotrading', 'ranking-cache'], true);
 if (!isset($_SESSION['settings_csrf'])) $_SESSION['settings_csrf'] = bin2hex(random_bytes(32));
 ?><!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Настройки тикеров · Bitget</title>
+<title><?= settingsH($settingsPages[$settingsPage]) ?> · Настройки · Bitget</title>
 <style>
 :root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--line:#273149;--text:#e9eefb;--muted:#8995ad}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1000px;margin:0 auto;padding:36px 24px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.nav a:hover,.nav a[aria-current=page]{background:#263968;color:#fff}h1{margin:0 0 8px;font-size:30px}.intro,.settings-status{color:var(--muted)}.panel{margin-top:20px;padding:12px 20px;border:1px solid var(--line);border-radius:16px;background:var(--panel)}.ticker-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:13px 2px;border-bottom:1px solid var(--line)}.ticker-row:last-child{border-bottom:0}.ticker-name{font-weight:700}.ticker-state{font-size:12px;color:var(--muted)}.switch{position:relative;display:inline-flex;align-items:center;flex:0 0 48px;width:48px;height:28px}.switch input{position:absolute;width:1px;height:1px;opacity:0}.switch-track{width:48px;height:28px;border:1px solid #52617d;border-radius:999px;background:#263149;cursor:pointer;transition:.18s}.switch-track:after{content:"";display:block;width:20px;height:20px;margin:3px;border-radius:50%;background:#b7c1d5;transition:.18s}.switch input:checked+.switch-track{background:#176647;border-color:#42d6a4}.switch input:checked+.switch-track:after{transform:translateX(20px);background:#42d6a4}.switch input:focus-visible+.switch-track{outline:2px solid #8ea5ff;outline-offset:3px}.switch input:disabled+.switch-track{opacity:.55;cursor:progress}.settings-status{min-height:22px;margin:12px 2px 0;font-size:13px}.settings-status.error{color:#ff9eaa}@media(max-width:600px){.wrap{padding:24px 14px}.nav{width:100%}.nav a{flex:1;text-align:center}.panel{padding:10px 14px}}
 </style>
 <style>
 .market-cap-status{margin:8px 0;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}.ticker-row-main{min-width:0}.ticker-cap-rank{margin-top:2px;color:#aebbe0;font-size:12px;font-variant-numeric:tabular-nums}.ticker-cap-unranked{color:var(--muted)}@media(max-width:600px){.ticker-row{gap:10px}.ticker-cap-rank{max-width:calc(100vw - 118px);overflow-wrap:anywhere}}
 .quote-sets-panel{padding:18px 20px}.quote-sets-panel h2{margin:2px 0 6px;font-size:20px}.quote-sets-intro{margin:0 0 14px;color:var(--muted);font-size:13px}.quote-set-create,.quote-set-add{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.quote-set-create input,.quote-set-add select{min-width:220px;padding:9px 11px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.quote-set-create button,.quote-set-add button{min-width:0;padding:9px 13px;border:0;border-radius:9px;background:#607df4;color:#fff;font:inherit;font-weight:700;cursor:pointer}.quote-set-list{display:grid;gap:12px;margin-top:16px}.quote-set-card{padding:14px;border:1px solid var(--line);border-radius:12px;background:#0e1527}.quote-set-card h3{margin:0 0 10px;font-size:16px}.quote-set-members{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px;padding:0;list-style:none}.quote-set-members li{display:inline-flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #34415e;border-radius:8px;color:#dce5ff;font-size:13px}.quote-set-remove{padding:0;border:0;background:none;color:#ff9eaa;font:inherit;cursor:pointer}.quote-set-empty{margin:0 0 12px;color:var(--muted);font-size:13px}.quote-set-status{min-height:20px;margin:10px 0 0;color:var(--muted);font-size:13px}.quote-set-status.error{color:#ff9eaa}.ranking-cache-reset{padding:9px 13px;border:1px solid #6b5263;border-radius:9px;background:#211b2c;color:#f0d7e1;font:inherit;font-weight:700;cursor:pointer}.ranking-cache-reset:disabled{cursor:progress;opacity:.65}.ranking-cache-status{min-height:20px;margin:10px 0 0;color:var(--muted);font-size:13px}.ranking-cache-status.error{color:#ff9eaa}.field{display:grid;gap:5px;color:var(--muted);font-size:13px}.field input{width:100%}@media(max-width:600px){.quote-sets-panel{padding:14px}.quote-set-create input,.quote-set-add select{min-width:0;width:100%}.quote-set-create button,.quote-set-add button{width:100%}}
-.settings-subnav{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 4px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.settings-subnav a{padding:8px 13px;border-radius:8px;color:#b7c1d5;text-decoration:none}.settings-subnav a:hover,.settings-subnav a:focus-visible{background:#263968;color:#fff;outline:none}.settings-section{scroll-margin-top:18px}.settings-section>h2{margin:2px 0 8px;font-size:20px}@media(max-width:600px){.settings-subnav{width:100%}.settings-subnav a{flex:1;text-align:center}}
+.settings-subnav{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 4px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.settings-subnav a{padding:8px 13px;border-radius:8px;color:#b7c1d5;text-decoration:none}.settings-subnav a:hover,.settings-subnav a:focus-visible,.settings-subnav a[aria-current=page]{background:#263968;color:#fff;outline:none}.settings-section>h2{margin:2px 0 8px;font-size:20px}.settings-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:20px}.settings-card{display:block;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);text-decoration:none}.settings-card:hover{border-color:#607df4}.settings-card strong{display:block;margin-bottom:5px}.settings-card span{color:var(--muted);font-size:13px}@media(max-width:600px){.settings-subnav{width:100%}.settings-subnav a{flex:1;text-align:center}}
 </style>
 </head>
 <body><main class="wrap">
 <nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php" aria-current="page">Настройки</a><a href="autotrading.php?mode=demo">Автоторговля (Тест)</a><a href="autotrading.php?mode=real">Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
-<h1>Настройки</h1><p class="intro">Выключенные тикеры продолжают собираться и сохраняться в MySQL, но скрыты на других страницах и исключены из расчётов. История котировок и избранное остаются на месте.</p><p class="market-cap-status" id="market-cap-status" role="status" aria-live="polite">Загружаю капитализацию тикеров…</p>
-<nav class="settings-subnav" aria-label="Разделы настроек"><a href="#ticker-lists">Списки тикеров</a><a href="#active-tickers">Активные тикеры</a><a href="#autotrading-risk">Автоторговля</a><a href="#ranking-cache">Кэш рейтингов</a></nav>
-<section class="panel quote-sets-panel settings-section" id="ticker-lists" aria-labelledby="quote-sets-heading"><h2 id="quote-sets-heading">Списки тикеров</h2><p class="quote-sets-intro">Создавайте списки и добавляйте в каждый нужные тикеры по одному.</p><form class="quote-set-create" id="quote-set-create"><input type="text" name="name" maxlength="100" placeholder="Название списка" aria-label="Название нового списка тикеров" required><button type="submit">Создать список</button></form><p class="quote-set-status" id="quote-set-status" role="status" aria-live="polite"></p><div class="quote-set-list" id="quote-set-list"></div></section>
-<section class="panel settings-section" id="active-tickers" aria-labelledby="active-tickers-heading"><h2 id="active-tickers-heading">Активные тикеры</h2>
+<h1><?= settingsH($settingsPages[$settingsPage]) ?></h1>
+<nav class="settings-subnav" aria-label="Разделы настроек">
+<a href="settings.php?page=ticker-lists" <?= $settingsPage === 'ticker-lists' ? 'aria-current="page"' : '' ?>>Списки тикеров</a>
+<a href="settings.php?page=active-tickers" <?= $settingsPage === 'active-tickers' ? 'aria-current="page"' : '' ?>>Активные тикеры</a>
+<a href="settings.php?page=general" <?= $isGeneralPage ? 'aria-current="page"' : '' ?>>Общие настройки</a>
+</nav>
+<?php if ($isGeneralPage): ?><nav class="settings-subnav" aria-label="Общие настройки">
+<a href="settings.php?page=autotrading" <?= $settingsPage === 'autotrading' ? 'aria-current="page"' : '' ?>>Автоторговля</a>
+<a href="settings.php?page=ranking-cache" <?= $settingsPage === 'ranking-cache' ? 'aria-current="page"' : '' ?>>Кэш рейтингов</a>
+</nav><?php endif; ?>
+<?php if ($settingsPage === 'general'): ?>
+<div class="settings-cards"><a class="settings-card" href="settings.php?page=autotrading"><strong>Автоторговля</strong><span>Порог остановки стратегии при снижении баланса.</span></a><a class="settings-card" href="settings.php?page=ranking-cache"><strong>Кэш рейтингов</strong><span>Остановка расчётов и сброс кэша рейтингов.</span></a></div>
+<?php elseif ($settingsPage === 'ticker-lists'): ?>
+<p class="intro">Создавайте списки тикеров и добавляйте в каждый нужные пары.</p>
+<section class="panel quote-sets-panel settings-section" aria-labelledby="quote-sets-heading"><h2 id="quote-sets-heading">Списки тикеров</h2><p class="quote-sets-intro">Создавайте списки и добавляйте в каждый нужные тикеры по одному.</p><form class="quote-set-create" id="quote-set-create"><input type="text" name="name" maxlength="100" placeholder="Название списка" aria-label="Название нового списка тикеров" required><button type="submit">Создать список</button></form><p class="quote-set-status" id="quote-set-status" role="status" aria-live="polite"></p><div class="quote-set-list" id="quote-set-list"></div></section>
+<?php elseif ($settingsPage === 'active-tickers'): ?>
+<p class="intro">Выключенные тикеры продолжают собираться и сохраняться в MySQL, но скрыты на других страницах и исключены из расчётов. История котировок и избранное остаются на месте.</p><p class="market-cap-status" id="market-cap-status" role="status" aria-live="polite">Загружаю капитализацию тикеров…</p>
+<section class="panel settings-section" aria-labelledby="active-tickers-heading"><h2 id="active-tickers-heading">Активные тикеры</h2>
 <?php foreach ($configuredSymbols as $symbol): $isEnabled = isset($enabledLookup[$symbol]); ?>
 <div class="ticker-row"><div class="ticker-row-main"><div class="ticker-name"><?= settingsH($symbol) ?></div><div class="ticker-cap-rank" data-market-cap-for="<?= settingsH($symbol) ?>">Загружаю капитализацию…</div><div class="ticker-state" data-state-for="<?= settingsH($symbol) ?>"><?= $isEnabled ? 'Включён' : 'Выключен' ?></div></div><label class="switch"><input type="checkbox" role="switch" data-symbol="<?= settingsH($symbol) ?>" aria-label="Участвует тикер <?= settingsH($symbol) ?>" <?= $isEnabled ? 'checked' : '' ?>><span class="switch-track"></span></label></div>
 <?php endforeach; ?>
 </section>
-<section class="panel settings-section" id="autotrading-risk" aria-labelledby="autotrading-risk-heading"><h2 id="autotrading-risk-heading">Автоторговля</h2><p class="quote-sets-intro">Остановить стратегию, если её баланс упадёт до указанной доли от личного максимума. Например, 75% означает закрытие позиций и остановку после снижения от максимума на 25%. Настройка действует на Paper, Demo и Real.</p><form id="autotrading-risk-form" class="quote-set-create"><input type="hidden" name="action" value="save_autotrading_risk"><input type="hidden" name="csrf" value="<?= settingsH((string) $_SESSION['settings_csrf']) ?>"><label class="field">Минимальный баланс от максимума, %<input name="minimum_equity_percent" type="number" min="1" max="100" step="0.01" value="<?= settingsH($minimumEquityPercent) ?>" required></label><button type="submit">Сохранить порог остановки</button></form><p class="quote-set-status" id="autotrading-risk-status" role="status" aria-live="polite"></p></section>
-<section class="panel settings-section ranking-cache-panel" id="ranking-cache" aria-labelledby="ranking-cache-heading"><h2 id="ranking-cache-heading">Кэш рейтингов</h2><p class="quote-sets-intro">Остановить текущие расчёты и очистить очередь, затем сбросить кэш для всех периодов и списков тикеров. История котировок и сохранённые общие рейтинги останутся. После сброса обновите уже открытые страницы рейтингов.</p><button class="ranking-cache-reset" type="button" id="reset-ranking-cache">🧹 Сбросить кэш рейтингов по всем данным</button><p class="ranking-cache-status" id="ranking-cache-status" role="status" aria-live="polite"></p></section>
+<?php elseif ($settingsPage === 'autotrading'): ?>
+<section class="panel settings-section" aria-labelledby="autotrading-risk-heading"><h2 id="autotrading-risk-heading">Автоторговля</h2><p class="quote-sets-intro">Остановить стратегию, если её баланс упадёт до указанной доли от личного максимума. Например, 75% означает закрытие позиций и остановку после снижения от максимума на 25%. Настройка действует на Paper, Demo и Real.</p><form id="autotrading-risk-form" class="quote-set-create"><input type="hidden" name="action" value="save_autotrading_risk"><input type="hidden" name="csrf" value="<?= settingsH((string) $_SESSION['settings_csrf']) ?>"><label class="field">Минимальный баланс от максимума, %<input name="minimum_equity_percent" type="number" min="1" max="100" step="0.01" value="<?= settingsH($minimumEquityPercent) ?>" required></label><button type="submit">Сохранить порог остановки</button></form><p class="quote-set-status" id="autotrading-risk-status" role="status" aria-live="polite"></p></section>
+<?php elseif ($settingsPage === 'ranking-cache'): ?>
+<section class="panel settings-section ranking-cache-panel" aria-labelledby="ranking-cache-heading"><h2 id="ranking-cache-heading">Кэш рейтингов</h2><p class="quote-sets-intro">Остановить текущие расчёты и очистить очередь, затем сбросить кэш для всех периодов и списков тикеров. История котировок и сохранённые общие рейтинги останутся. После сброса обновите уже открытые страницы рейтингов.</p><button class="ranking-cache-reset" type="button" id="reset-ranking-cache">🧹 Сбросить кэш рейтингов по всем данным</button><p class="ranking-cache-status" id="ranking-cache-status" role="status" aria-live="polite"></p></section>
+<?php endif; ?>
 <p class="settings-status" id="settings-status" role="status" aria-live="polite"></p>
 </main><script>
 const statusNode=document.querySelector('#settings-status');
 const quoteSetStatusNode=document.querySelector('#quote-set-status');
 const autotradingRiskForm=document.querySelector('#autotrading-risk-form');
 const autotradingRiskStatus=document.querySelector('#autotrading-risk-status');
-autotradingRiskForm.addEventListener('submit',async(event)=>{
+autotradingRiskForm?.addEventListener('submit',async(event)=>{
     event.preventDefault();
     const button=autotradingRiskForm.querySelector('button');button.disabled=true;autotradingRiskStatus.textContent='Сохраняю…';
     try{
@@ -161,6 +188,7 @@ const quoteSetListNode=document.querySelector('#quote-set-list');
 const configuredQuoteSymbols=<?= json_encode($configuredSymbols, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 let quoteSets=<?= json_encode($quoteSets, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 function renderQuoteSets(){
+    if(!quoteSetListNode)return;
     quoteSetListNode.replaceChildren();
     for(const set of quoteSets){
         const card=document.createElement('article');card.className='quote-set-card';
@@ -200,6 +228,7 @@ async function saveQuoteSetAction(values){
         quoteSets=result.sets;renderQuoteSets();quoteSetStatusNode.textContent='Список сохранён.';return true;
     }catch(error){quoteSetStatusNode.textContent=error.message||'Ошибка сохранения списка.';quoteSetStatusNode.classList.add('error');return false}
 }
+if(quoteSetListNode){
 renderQuoteSets();
 document.querySelector('#quote-set-create').addEventListener('submit',async event=>{
     event.preventDefault();const form=event.currentTarget;const input=form.elements.namedItem('name');
@@ -214,9 +243,10 @@ quoteSetListNode.addEventListener('click',event=>{
     const button=event.target.closest('[data-remove-symbol]');if(!button)return;
     saveQuoteSetAction({action:'set_remove_symbol',set_id:button.dataset.setId,symbol:button.dataset.removeSymbol});
 });
+}
 const rankingCacheResetButton=document.querySelector('#reset-ranking-cache');
 const rankingCacheStatusNode=document.querySelector('#ranking-cache-status');
-rankingCacheResetButton.addEventListener('click',async()=>{
+rankingCacheResetButton?.addEventListener('click',async()=>{
     rankingCacheResetButton.disabled=true;
     rankingCacheResetButton.textContent='Сбрасываю…';
     rankingCacheStatusNode.classList.remove('error');
@@ -257,6 +287,7 @@ function renderMarketCapRankings(data){
     }
 }
 async function loadMarketCapRankings(){
+    if(!marketCapStatusNode)return;
     try{
         const response=await fetch('market-cap-rankings.php',{headers:{Accept:'application/json'}});
         const data=await response.json();
@@ -268,7 +299,7 @@ async function loadMarketCapRankings(){
         document.querySelectorAll('[data-market-cap-for]').forEach(row=>row.textContent='Капитализация временно недоступна.');
     }
 }
-loadMarketCapRankings();
+if(marketCapStatusNode)loadMarketCapRankings();
 document.querySelectorAll('input[data-symbol]').forEach(toggle=>toggle.addEventListener('change',async()=>{
     const desired=toggle.checked,previous=!desired,symbol=toggle.dataset.symbol;
     toggle.disabled=true;statusNode.classList.remove('error');statusNode.textContent='Сохраняю…';
