@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
 from autotrading.market import parse_tickers
+from autotrading.service import read_json, set_controls
 
 
 class PublicTickerTests(unittest.TestCase):
@@ -23,6 +26,15 @@ class PublicTickerTests(unittest.TestCase):
             parse_tickers({"code": "400", "data": []}, ["BTCUSDT"])
         with self.assertRaises(RuntimeError):
             parse_tickers({"code": "00000", "data": [{"symbol": "BTCUSDT", "bid1Price": "101", "ask1Price": "100", "lastPrice": "100.5", "ts": "1700000000000"}]}, ["BTCUSDT"])
+
+    def test_control_file_keeps_pause_and_close_actions_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "controls.json"
+            set_controls(path, entries_paused=True)
+            set_controls(path, close_positions=True)
+            self.assertEqual(read_json(path, {}), {"entries_paused": True, "close_positions": True})
+            set_controls(path, entries_paused=False)
+            self.assertEqual(read_json(path, {}), {"entries_paused": False, "close_positions": True})
 
 
 if __name__ == "__main__":

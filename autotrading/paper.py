@@ -28,22 +28,31 @@ class SQLiteStateStore:
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS releases(digest TEXT PRIMARY KEY, payload TEXT NOT NULL, activated_at_ms INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS runtime_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS quotes(symbol TEXT NOT NULL, ts INTEGER NOT NULL, bid TEXT NOT NULL, ask TEXT NOT NULL, last TEXT NOT NULL, PRIMARY KEY(symbol,ts));
           CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, type TEXT NOT NULL, symbol TEXT, payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS positions(symbol TEXT PRIMARY KEY, side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, entry_fee TEXT NOT NULL, entry_ts INTEGER NOT NULL, pending_exit TEXT, pending_count INTEGER NOT NULL DEFAULT 0);
-          CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, exit_price TEXT NOT NULL, entry_ts INTEGER NOT NULL, exit_ts INTEGER NOT NULL, pnl TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, exit_price TEXT NOT NULL, entry_ts INTEGER NOT NULL, exit_ts INTEGER NOT NULL, pnl TEXT NOT NULL, release_digest TEXT NOT NULL DEFAULT '');
           CREATE TABLE IF NOT EXISTS account(id INTEGER PRIMARY KEY CHECK(id=1), balance TEXT NOT NULL, realized_pnl TEXT NOT NULL, day TEXT NOT NULL, daily_pnl TEXT NOT NULL);
         """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(trades)")}
+        if "release_digest" not in columns:
+            self.db.execute("ALTER TABLE trades ADD COLUMN release_digest TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
     def activate(self, release: dict[str, Any]) -> str:
         payload = validate_strategy_release(release)
         digest = release_digest(payload)
-        active = self.db.execute("SELECT digest FROM releases ORDER BY activated_at_ms DESC LIMIT 1").fetchone()
+        active = self.db.execute("SELECT value AS digest FROM runtime_meta WHERE key='active_release_digest'").fetchone()
+        if active is None:
+            active = self.db.execute("SELECT digest FROM releases ORDER BY activated_at_ms DESC LIMIT 1").fetchone()
         if active and active["digest"] != digest and self.db.execute("SELECT COUNT(*) FROM positions").fetchone()[0]:
             raise ValueError("Cannot switch strategy release while paper positions are open")
+        if active and active["digest"] != digest:
+            self.db.execute("UPDATE account SET balance=?,realized_pnl='0',daily_pnl='0',day=? WHERE id=1", (payload["execution"]["starting_balance_usdt"], datetime.now(KYIV).date().isoformat()))
         self.db.execute("INSERT INTO releases VALUES(?,?,?) ON CONFLICT(digest) DO UPDATE SET activated_at_ms=excluded.activated_at_ms", (digest, json.dumps(payload, sort_keys=True), int(time.time() * 1000)))
         self.db.execute("INSERT OR IGNORE INTO account VALUES(1,?,?,?,?)", (payload["execution"]["starting_balance_usdt"], "0", datetime.now(KYIV).date().isoformat(), "0"))
+        self.db.execute("INSERT INTO runtime_meta VALUES('active_release_digest',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (digest,))
         self.db.commit()
         return digest
 
@@ -75,7 +84,8 @@ class SQLiteStateStore:
         self.db.execute("UPDATE positions SET pending_exit=?,pending_count=? WHERE symbol=?", (kind, count, symbol)); self.db.commit()
 
     def close_position(self, pos: sqlite3.Row, quote: Quote, price: Decimal, pnl: Decimal) -> None:
-        self.db.execute("INSERT INTO trades(symbol,side,quantity,entry_price,exit_price,entry_ts,exit_ts,pnl) VALUES(?,?,?,?,?,?,?,?)", (pos["symbol"], pos["side"], pos["quantity"], pos["entry_price"], str(price), pos["entry_ts"], quote.timestamp_ms, str(pnl)))
+        active = self.db.execute("SELECT value FROM runtime_meta WHERE key='active_release_digest'").fetchone()
+        self.db.execute("INSERT INTO trades(symbol,side,quantity,entry_price,exit_price,entry_ts,exit_ts,pnl,release_digest) VALUES(?,?,?,?,?,?,?,?,?)", (pos["symbol"], pos["side"], pos["quantity"], pos["entry_price"], str(price), pos["entry_ts"], quote.timestamp_ms, str(pnl), active["value"] if active else ""))
         self.db.execute("DELETE FROM positions WHERE symbol=?", (pos["symbol"],))
         account = self.account()
         day = datetime.fromtimestamp(quote.timestamp_ms / 1000, KYIV).date().isoformat()
@@ -88,9 +98,11 @@ class SQLiteStateStore:
 
     def health(self) -> dict[str, Any]:
         account = self.account()
-        active = self.db.execute("SELECT payload,digest FROM releases ORDER BY activated_at_ms DESC LIMIT 1").fetchone()
+        active = self.db.execute("SELECT r.payload,r.digest FROM runtime_meta m JOIN releases r ON r.digest=m.value WHERE m.key='active_release_digest'").fetchone()
+        if active is None:
+            active = self.db.execute("SELECT payload,digest FROM releases ORDER BY activated_at_ms DESC LIMIT 1").fetchone()
         if account is None:
-            return {"mode": "paper", "initialized": False, "active_release_digest": active["digest"] if active else None, "open_positions": 0, "positions": [], "unrealized_pnl_usdt": "0", "trades": 0, "latest_event": None}
+            return {"mode": "paper", "initialized": False, "active_release_digest": active["digest"] if active else None, "open_positions": 0, "positions": [], "unrealized_pnl_usdt": "0", "trades": 0, "recent_trades": [], "recent_events": [], "latest_event": None}
         positions: list[dict[str, Any]] = []
         unrealized = Decimal(0)
         if active:
@@ -109,7 +121,9 @@ class SQLiteStateStore:
                     ts = row["ts"]
                 positions.append({"symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None if pnl is None else str(pnl), "quote_timestamp_ms": ts})
         latest = self.db.execute("SELECT type,ts FROM events ORDER BY id DESC LIMIT 1").fetchone()
-        return {"mode": "paper", "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "latest_event": None if latest is None else dict(latest)}
+        recent_trades = [dict(row) for row in self.db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")]
+        recent_events = [{"id": row["id"], "timestamp_ms": row["ts"], "type": row["type"], "symbol": row["symbol"], "payload": json.loads(row["payload"])} for row in self.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 100")]
+        return {"mode": "paper", "initialized": True, "active_release_digest": active["digest"] if active else None, "balance_usdt": account["balance"], "realized_pnl_usdt": account["realized_pnl"], "daily_pnl_usdt": account["daily_pnl"], "open_positions": len(positions), "positions": positions, "unrealized_pnl_usdt": str(unrealized), "trades": self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], "recent_trades": recent_trades, "recent_events": recent_events, "latest_event": None if latest is None else dict(latest)}
 
     def close(self) -> None:
         self.db.close()
@@ -117,17 +131,29 @@ class SQLiteStateStore:
 
 class PaperExecutor:
     def __init__(self, release: dict[str, Any], store: SQLiteStateStore, *, stale_after_seconds: int = 30) -> None:
-        self.release = validate_strategy_release(release)
+        self.release = self.validate_release(release)
         self.store = store
         self.stale_after_ms = stale_after_seconds * 1000
         strategy = self.release["strategy"]
-        if strategy["martingale_mode"] != "none":
-            raise ValueError("Paper v1 supports only martingale_mode=none")
-        if self.release["execution"]["include_funding"]:
-            raise ValueError("Paper v1 does not model funding; set execution.include_funding=false")
         self.entry = self._parse_entry(strategy["entry_config"], strategy["entry_signal_mode"], strategy["entry_direction_mode"])
         self.take, self.stop = self._parse_exit(strategy["exit_config"])
+        self.entries_paused = False
+        self.close_requested = False
         self.store.activate(self.release)
+
+    @classmethod
+    def validate_release(cls, release: dict[str, Any]) -> dict[str, Any]:
+        payload = validate_strategy_release(release)
+        if payload["market"]["category"] != "USDT-FUTURES":
+            raise ValueError("Paper v1 currently supports only linear USDT futures")
+        strategy = payload["strategy"]
+        if strategy["martingale_mode"] != "none":
+            raise ValueError("Paper v1 supports only martingale_mode=none")
+        if payload["execution"]["include_funding"]:
+            raise ValueError("Paper v1 does not model funding; set execution.include_funding=false")
+        cls._parse_entry(strategy["entry_config"], strategy["entry_signal_mode"], strategy["entry_direction_mode"])
+        cls._parse_exit(strategy["exit_config"])
+        return payload
 
     @staticmethod
     def _parse_entry(value: str, signal_mode: str, direction_mode: str) -> tuple[str, int, Decimal, bool, bool]:
@@ -168,11 +194,23 @@ class PaperExecutor:
             return
         pos = self.store.position(quote.symbol)
         if pos:
-            self._manage_position(pos, quote)
+            if self.close_requested:
+                self._close_position(pos, quote, "manual_close")
+            else:
+                self._manage_position(pos, quote)
         else:
             self._consider_entry(quote)
 
+    def set_controls(self, *, entries_paused: bool, close_positions: bool) -> None:
+        was_paused = self.entries_paused
+        self.entries_paused = entries_paused
+        self.close_requested = close_positions
+        if was_paused != entries_paused:
+            self.store.event("entries_paused" if entries_paused else "entries_resumed", {"entries_paused": entries_paused})
+
     def _consider_entry(self, quote: Quote) -> None:
+        if self.entries_paused or self.close_requested:
+            return
         direction, window, threshold, within, reverse = self.entry
         prior = self.store.prior_quotes(quote.symbol, quote.timestamp_ms, window + 1)
         if direction.startswith("immediate:"):
@@ -246,5 +284,16 @@ class PaperExecutor:
         needed = self.release["strategy"]["exit_confirmation_snapshots"] if mode != "immediate" else 0
         if count <= needed:
             self.store.update_pending(quote.symbol, kind, count); return
+        self._close_position(pos, quote, kind, exit_price=exit_price, pnl=pnl)
+
+    def _close_position(self, pos: sqlite3.Row, quote: Quote, reason: str, *, exit_price: Decimal | None = None, pnl: Decimal | None = None) -> None:
+        if exit_price is None or pnl is None:
+            execution = self.release["execution"]
+            quantity, entry = Decimal(pos["quantity"]), Decimal(pos["entry_price"])
+            market = quote.ask if pos["side"] == "short" else quote.bid
+            slip = Decimal(execution["slippage_bps"]) / 10000
+            exit_price = market * (1 + slip) if pos["side"] == "short" else market * (1 - slip)
+            gross = quantity * (entry - exit_price if pos["side"] == "short" else exit_price - entry)
+            pnl = gross - Decimal(pos["entry_fee"]) - quantity * exit_price * Decimal(execution["taker_fee_rate"])
         self.store.close_position(pos, quote, exit_price, pnl)
-        self.store.event("paper_exit", {"reason": kind, "pnl": str(pnl), "price": str(exit_price)}, quote.symbol, quote.timestamp_ms)
+        self.store.event("paper_exit", {"reason": reason, "pnl": str(pnl), "price": str(exit_price)}, quote.symbol, quote.timestamp_ms)

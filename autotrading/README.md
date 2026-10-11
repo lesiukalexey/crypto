@@ -21,8 +21,17 @@ values. `paper-run` is an independent process that polls only Bitget's public
 market ticker endpoint and stores quotes, events, virtual positions and trades
 in SQLite. No private endpoint, API key, or order endpoint is used.
 
-Use a state path outside the repository so it can be protected and moved with
-the executor:
+Open `Автоторговля` from **Базовые проверки** to carry over the currently
+selected symbol, entry/exit rules, dates, fees and backtest result. Set paper
+risk limits there, publish the immutable release, then start the service. The
+workstation page shows process status, current position/PnL, recent paper
+trades and runtime events. It supports pausing new entries, resuming them,
+requesting position closes at the next fresh quote, and stopping the process.
+Stopping preserves virtual positions for the next start.
+
+The page stores runtime files outside Git under `/var/tmp/bitget-autotrading-<uid>`
+with private permissions; this path survives ordinary reboots. It can be changed
+with `BITGET_AUTOTRADING_DIR`. For direct terminal use, supply any durable path:
 
 ```bash
 python3 -m autotrading paper-run autotrading/example-release.json \
@@ -38,3 +47,10 @@ paper executor. Set `execution.include_funding` to `false`. A release cannot be
 switched while a virtual position is open. This is an initial local paper
 runtime; it does not place exchange orders and is not evidence that live fills
 will match the analytics backtest.
+
+The dashboard only accepts linear USDT futures releases and is writable from
+loopback with a CSRF-protected session. PHP starts the managed Python service
+as the same local web-server user; the PID file is checked against the actual
+`/proc` command before a stop signal is sent. Releases, SQLite, control files,
+and logs are stored in the per-user runtime directory with restrictive file
+permissions.

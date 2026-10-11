@@ -6,7 +6,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from autotrading.contracts import Quote
+from autotrading.contracts import Quote, release_digest
 from autotrading.paper import PaperExecutor, SQLiteStateStore
 
 
@@ -71,6 +71,11 @@ class PaperExecutorTests(unittest.TestCase):
             martingale["strategy"]["martingale_mode"] = "simple"
             with self.assertRaisesRegex(ValueError, "martingale_mode=none"):
                 PaperExecutor(martingale, store)
+            malformed = release()
+            malformed["execution"]["include_funding"] = False
+            malformed["strategy"]["exit_config"] = "unknown-exit"
+            with self.assertRaisesRegex(ValueError, "Unsupported exit_config"):
+                PaperExecutor.validate_release(malformed)
             store.close()
 
     def test_release_cannot_change_while_position_is_open(self) -> None:
@@ -95,6 +100,38 @@ class PaperExecutorTests(unittest.TestCase):
         position = store.position("BTCUSDT")
         self.assertIsNotNone(position)
         self.assertEqual(position["side"], "short")
+        store.close()
+
+    def test_pause_entries_and_close_position_are_separate_controls(self) -> None:
+        store = SQLiteStateStore(self.path)
+        executor = PaperExecutor(self.payload, store)
+        executor.set_controls(entries_paused=True, close_positions=False)
+        executor.on_quote(self.quote("99.9", "100", 1_000_000), now_ms=1_000_000)
+        self.assertEqual(store.health()["open_positions"], 0)
+        executor.set_controls(entries_paused=False, close_positions=False)
+        executor.on_quote(self.quote("99.9", "100", 1_005_000), now_ms=1_005_000)
+        self.assertEqual(store.health()["open_positions"], 1)
+        executor.set_controls(entries_paused=True, close_positions=True)
+        executor.on_quote(self.quote("99.8", "99.9", 1_010_000), now_ms=1_010_000)
+        self.assertEqual(store.health()["open_positions"], 0)
+        self.assertEqual(store.db.execute("SELECT json_extract(payload,'$.reason') FROM events WHERE type='paper_exit'").fetchone()[0], "manual_close")
+        store.close()
+
+    def test_strategy_change_starts_a_new_paper_balance_and_tags_old_trades(self) -> None:
+        store = SQLiteStateStore(self.path)
+        executor = PaperExecutor(self.payload, store)
+        old_digest = release_digest(self.payload)
+        executor.on_quote(self.quote("99.9", "100", 1_000_000), now_ms=1_000_000)
+        executor.set_controls(entries_paused=True, close_positions=True)
+        executor.on_quote(self.quote("99.8", "99.9", 1_005_000), now_ms=1_005_000)
+        changed = json.loads(json.dumps(self.payload))
+        changed["release_id"] = "new-paper-session"
+        changed["execution"]["starting_balance_usdt"] = "50"
+        PaperExecutor(changed, store)
+        account = store.account()
+        self.assertEqual(account["balance"], "50")
+        self.assertEqual(account["realized_pnl"], "0")
+        self.assertEqual(store.db.execute("SELECT release_digest FROM trades").fetchone()[0], old_digest)
         store.close()
 
 

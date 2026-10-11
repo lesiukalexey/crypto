@@ -1048,6 +1048,16 @@ $closedTradeCount = count($trades) - $openTradeCount;
 $entrySideLabel = 'Сторона · цена';
 $exitSideLabel = 'Сторона · цена';
 $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayInput . ' — ' . $endDayInput;
+$autotradingUrl = 'autotrading.php?' . http_build_query([
+    'category' => $config['category'], 'symbol' => $symbol, 'start_date' => $startDayInput, 'end_date' => $endDayInput,
+    'entry_config' => $entryConfig, 'entry_signal_mode' => $entrySignalMode, 'entry_direction_mode' => $entryDirectionMode,
+    'exit_config' => $exitConfig, 'martingale_mode' => $martingaleMode, 'martingale_timing' => $martingaleTiming,
+    'martingale_attempts' => $martingaleAttempts, 'martingale_target_policy' => $martingaleTargetPolicy,
+    'max_chain_loss_usdt' => $martingaleRiskLimits['max_chain_loss'], 'strategy_max_day_loss_usdt' => $martingaleRiskLimits['max_day_loss'],
+    'exit_confirmation_mode' => $exitConfirmationMode, 'exit_confirmation_snapshots' => $exitConfirmationSnapshots,
+    'balance' => $startingBalance, 'fee' => $feePercent, 'slippage_bps' => $simulationCosts['slippage_bps'],
+    'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'net_result_usdt' => $totalPnl, 'trade_count' => $closedTradeCount,
+]);
 ?>
 <!doctype html>
 <html lang="ru">
@@ -1085,7 +1095,7 @@ $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayIn
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><button class="collector-status" id="collector-status" type="button" data-status="unknown" aria-label="Загрузить последние данные для активных тикеров выбранного списка" title="Нажмите, чтобы загрузить минутные данные активных тикеров выбранного списка от последних сохранённых котировок до последней доступной минуты">Загружаю последнюю котировку…</button></div></header>
-<nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a></nav>
+<nav class="view-nav" aria-label="Разделы"><a href="<?= h('./?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="<?= h($autotradingUrl) ?>">Автоторговля</a></nav>
 <section class="panel ticker-set-panel" aria-label="Выбранный список тикеров"><label for="ticker-set-select">Выбранный список тикеров</label><select id="ticker-set-select" <?= $favoriteView ? 'disabled' : '' ?>><?php foreach ($tickerSetOptions as $tickerSet): ?><option value="<?= h((string) ($tickerSet['id'] ?? '')) ?>" <?= ($tickerSet['id'] ?? '') === $tickerSetId ? 'selected' : '' ?>><?= h((string) ($tickerSet['name'] ?? '')) ?></option><?php endforeach; ?></select><span class="small-note"><?= count($enabledSymbols) ?> активных тикеров в списке</span></section>
 <?php if ($favoriteView): ?><p class="favorite-readonly-note">Просмотр сохранённой стратегии «<?= h((string) ($favorite['name'] ?? $favoriteId)) ?>». Параметры доступны только для чтения. <a class="strategy-link" href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
 <?php if ($combinationDetail): ?>
