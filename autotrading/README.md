@@ -48,6 +48,47 @@ switched while a virtual position is open. This is an initial local paper
 runtime; it does not place exchange orders and is not evidence that live fills
 will match the analytics backtest.
 
+## Bitget demo adapter (API building block)
+
+`autotrading.bitget_demo.BitgetDemoAdapter` is a separate adapter for the
+Bitget Classic USDT futures demo environment. It is not wired into `paper-run`
+or the dashboard, so the existing service continues to place no exchange
+orders. The adapter has a fixed Bitget API host, always sends
+`paptrading: 1`, and accepts demo credentials only from the executor
+environment (`BITGET_DEMO_API_KEY`, `BITGET_DEMO_API_SECRET`,
+`BITGET_DEMO_API_PASSPHRASE`). Keep those variables in a protected local
+service environment file; never put them in a release or this repository.
+
+Before any order, the caller must successfully reconcile local positions and
+pending client order IDs. Reconciliation checks each allowed symbol's account
+is in one-way/crossed mode, compares open positions, queries pending order
+details and fills, and blocks new orders when exchange state is unknown or
+does not match local state. Persist returned fill rows by `tradeId`. A network
+failure resets the adapter to a locked state; reconcile again after reconnect.
+Order IDs must be deterministic and unique. The adapter checks the same ID
+before a POST, and requires another reconciliation after order submission.
+Only market orders are currently supported; quantities must meet live Bitget
+contract metadata. Position mode, margin mode, product, and symbol allowlist
+are deliberately restricted.
+
+For example, initialize and reconcile without sending an order:
+
+```python
+from autotrading.bitget_demo import BitgetDemoAdapter
+
+adapter = BitgetDemoAdapter(["BTCUSDT"])
+state = adapter.reconcile(expected_positions=[], pending_orders=[])
+if not state.matched:
+    raise RuntimeError("Demo account differs from local executor state")
+```
+
+An actual Bitget demo order smoke test still requires a Demo API key and the
+matching demo account. Unit tests use an injected transport and never contact
+the exchange. See [Bitget demo REST setup](https://www.bitget.com/docs/classic/demo-trading/rest-api),
+[futures order API](https://www.bitget.com/docs/catalog/classic-contract-trade/classic-contract-trade),
+[position API](https://www.bitget.com/docs/catalog/classic-contract-position/classic-contract-position),
+and [contract metadata](https://www.bitget.com/docs/catalog/classic-contract-market/classic-contract-market).
+
 The dashboard only accepts linear USDT futures releases and is writable from
 loopback with a CSRF-protected session. PHP starts the managed Python service
 as the same local web-server user; the PID file is checked against the actual
