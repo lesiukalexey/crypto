@@ -5,6 +5,8 @@ session_set_cookie_params(['httponly' => true, 'samesite' => 'Strict', 'secure' 
 session_start();
 $savedAccountMode = $_SESSION['autotrading_account_mode'] ?? 'paper';
 $accountMode = is_string($savedAccountMode) && in_array($savedAccountMode, ['paper', 'demo', 'real'], true) ? $savedAccountMode : 'paper';
+$requestedMode = (string) ($_GET['mode'] ?? '');
+if (in_array($requestedMode, ['paper', 'demo', 'real'], true)) $accountMode = $requestedMode;
 header('Cache-Control: no-store');
 
 function h(string $value): string { return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
@@ -87,7 +89,17 @@ chmod($runtime, 0700);
 $statePath = $runtime . ($accountMode === 'paper' ? '/state.sqlite' : ($accountMode === 'demo' ? '/state-demo.sqlite' : '/state-live.sqlite'));
 $controlPath = $runtime . '/controls-' . $accountMode . '.json';
 $riskSettingsPath = $runtime . '/risk-settings.json';
-$pidPath = $runtime . '/paper.pid.json';
+$modeStatePaths = ['paper' => $runtime . '/state.sqlite', 'demo' => $runtime . '/state-demo.sqlite', 'real' => $runtime . '/state-live.sqlite'];
+$modePidPaths = [];
+foreach ($modeStatePaths as $modeKey => $modeStatePath) {
+    $modePidPath = $runtime . '/autotrading-' . $modeKey . '.pid.json';
+    if (!is_file($modePidPath) && is_file($runtime . '/paper.pid.json')) {
+        $legacyPid = json_decode((string) file_get_contents($runtime . '/paper.pid.json'), true);
+        if (is_array($legacyPid) && (string) ($legacyPid['state'] ?? '') === $modeStatePath) $modePidPath = $runtime . '/paper.pid.json';
+    }
+    $modePidPaths[$modeKey] = $modePidPath;
+}
+$pidPath = $modePidPaths[$accountMode];
 $logPath = $runtime . '/autotrading-' . $accountMode . '.log';
 $activeReleasePath = $runtime . '/active-release.json';
 $favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
@@ -134,10 +146,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'account-mode') {
             $requestedMode = (string) ($_POST['account_mode'] ?? '');
             if (!in_array($requestedMode, ['paper', 'demo', 'real'], true)) throw new RuntimeException('Выбран неизвестный режим счёта.');
-            [$serviceCode, $serviceOut] = runPython(['status', '--state', $statePath, '--pid-file', $pidPath], $root, $python);
-            $serviceHealth = $serviceCode === 0 ? json_decode($serviceOut, true) : null;
-            if (is_array($serviceHealth) && !empty($serviceHealth['service']['running'])) throw new RuntimeException('Сначала остановите работающий исполнитель, затем переключите режим счёта.');
             $_SESSION['autotrading_account_mode'] = $requestedMode;
+            $_GET['mode'] = $requestedMode;
             $accountMode = $requestedMode;
             $message = $requestedMode === 'paper'
                 ? 'Выбран Paper: запустится виртуальный портфель без ордеров на Bitget.'
@@ -257,7 +267,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $messageType = 'success';
         } elseif ($action === 'demo-reconcile') {
             $demoStatePath = $runtime . '/state-demo.sqlite';
-            [$demoStatusCode, $demoStatusOut] = runPython(['status', '--state', $demoStatePath, '--pid-file', $pidPath], $root, $python);
+            [$demoStatusCode, $demoStatusOut] = runPython(['status', '--state', $demoStatePath, '--pid-file', $modePidPaths['demo']], $root, $python);
             $demoLocalStatus = $demoStatusCode === 0 ? json_decode($demoStatusOut, true) : null;
             if (is_array($demoLocalStatus) && !empty($demoLocalStatus['service']['running']) && ($demoLocalStatus['service']['execution_mode'] ?? '') === 'demo') throw new RuntimeException('Для ручной сверки сначала остановите Demo исполнитель.');
             $demoSymbols = [(string) ($_POST['symbol'] ?? $symbol)];
@@ -349,6 +359,7 @@ $status = ['mode' => 'paper', 'initialized' => false, 'open_positions' => 0, 'po
 if ($statusCode === 0 && is_array($decoded = json_decode($statusOut, true))) $status = array_merge($status, $decoded);
 $portfolioNameById = [];
 foreach (($status['portfolio_strategies'] ?? []) as $portfolioStrategy) $portfolioNameById[(string) ($portfolioStrategy['strategy_id'] ?? '')] = (string) ($portfolioStrategy['name'] ?? '');
+$displayMode = !empty($status['service']['running']) ? (string) ($status['service']['execution_mode'] ?? $accountMode) : $accountMode;
 $activeRunByStrategy = [];
 foreach (($status['strategy_runs'] ?? []) as $strategyRun) if (in_array((string) ($strategyRun['status'] ?? ''), ['running', 'stopping'], true)) $activeRunByStrategy[(string) ($strategyRun['strategy_id'] ?? '')] = $strategyRun;
 $published = is_file($activeReleasePath) ? json_decode((string) file_get_contents($activeReleasePath), true) : null;
@@ -376,7 +387,7 @@ $postHidden = [
  .published-summary{margin:16px 0;padding:14px;border:1px solid #3c527e;border-radius:12px;background:#101a30}.published-summary .stat strong,.selected-summary .stat strong{display:block;font-size:14px;line-height:1.45;overflow-wrap:anywhere}.how-to ol{margin:8px 0 12px;padding-left:23px}.how-to li{margin:5px 0}
 </style></head><body><main class="wrap">
 <div class="muted">Bitget · локальный исполнитель</div><h1>Автоторговля</h1>
-<nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="autotrading.php" aria-current="page">Автоторговля</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="autotrading.php?mode=paper" <?= $accountMode === 'paper' ? 'aria-current="page"' : '' ?>>Автоторговля (Тест)</a><a href="autotrading.php?mode=real" <?= $accountMode === 'real' ? 'aria-current="page"' : '' ?>>Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
 <section class="panel how-to"><h2>Общий портфель</h2><ol><li>Добавьте конфигурации из «Базовых проверок» или «Избранного».</li><li>Выберите Paper, Bitget Demo или Bitget Real. Для Demo/Real портфельные стратегии копируются в отдельное состояние выбранного счёта.</li><li>Запустите портфель. Исполнитель применяет стратегические сигналы и ведёт отдельный журнал фактических биржевых исполнений.</li></ol><p class="note">Demo и Real требуют один-way режима и crossed margin в Bitget. Для Real дополнительно нужны отдельный ключ, BITGET_LIVE_TRADING_ENABLED=1 и точное подтверждение при запуске.</p></section>
 <?php if ($message !== ''): ?><p class="status <?= h($messageType) ?>" role="status"><?= h($message) ?></p><?php endif; ?>
 <?php if (!$isLocal): ?><p class="status warning">Просмотр доступен, но управление работает только при открытии страницы с этого компьютера.</p><?php endif; ?>
@@ -391,7 +402,7 @@ $postHidden = [
 <?php endif; ?>
 <section class="panel"><h2>Состояние исполнителя</h2><div class="grid">
 <div class="stat"><span>Процесс</span><strong><?= ($status['service']['running'] ?? false) ? (($status['service']['mode'] ?? '') === 'portfolio' ? 'Портфель работает' : 'Старая одиночная служба') : 'Остановлен' ?></strong></div>
-<div class="stat"><span>Фактический режим</span><strong><?= h(['paper' => 'Paper', 'demo' => 'Bitget Demo', 'live' => 'Bitget Real'][$status['mode'] ?? 'paper'] ?? 'неизвестен') ?></strong></div><div class="stat"><span>Общий лимит портфеля</span><strong><?= h((string) ($status['initial_balance_usdt'] ?? ($published['execution']['starting_balance_usdt'] ?? '—'))) ?> USDT</strong></div>
+<div class="stat"><span>Фактический режим</span><strong><?= h(['paper' => 'Paper', 'demo' => 'Bitget Demo', 'live' => 'Bitget Real', 'real' => 'Bitget Real'][$displayMode] ?? 'неизвестен') ?></strong></div><div class="stat"><span>Общий лимит портфеля</span><strong><?= h((string) ($status['initial_balance_usdt'] ?? ($published['execution']['starting_balance_usdt'] ?? '—'))) ?> USDT</strong></div>
 <div class="stat"><span>Реализованный результат</span><strong><?= h((string) ($status['realized_pnl_usdt'] ?? '0')) ?> USDT</strong></div>
 <div class="stat"><span>Плавающий результат</span><strong><?= h((string) ($status['unrealized_pnl_usdt'] ?? '0')) ?> USDT</strong></div>
 <div class="stat"><span>Закрытые сделки</span><strong><?= h((string) ($status['trades'] ?? 0)) ?></strong></div>
