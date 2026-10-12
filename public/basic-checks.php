@@ -117,7 +117,7 @@ if ($entrySignalMode === 'within') $defaultEntryConfig .= ':within';
 if ($entryDirectionMode === 'reverse') $defaultEntryConfig .= ':reverse';
 $entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
 $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
-$balanceAutoManaged = (string) ($_GET['balance_auto'] ?? (array_key_exists('balance', $_GET) ? '0' : '1')) === '1';
+$balanceAutoManaged = (string) ($_GET['balance_auto'] ?? '0') === '1';
 $startingBalance = trim((string) ($_GET['balance'] ?? '100'));
 $balanceAutoAdjustedFrom = null;
 $minimumOrderBudgetInfo = null;

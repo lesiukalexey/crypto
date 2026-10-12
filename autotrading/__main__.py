@@ -167,6 +167,7 @@ def main() -> int:
     portfolio_remove = commands.add_parser("portfolio-remove", help="remove a flat strategy and release its portfolio allocation")
     portfolio_remove.add_argument("--state", required=True)
     portfolio_remove.add_argument("--strategy-id", required=True)
+    portfolio_remove.add_argument("--defer", action="store_true", help="request removal after the running strategy is flat and reconciled")
     portfolio_copy = commands.add_parser("portfolio-copy", help="copy missing strategy releases from another mode's portfolio")
     portfolio_copy.add_argument("--state", required=True, help="target mode SQLite state")
     portfolio_copy.add_argument("--source-state", required=True, help="source portfolio SQLite state")
@@ -300,8 +301,8 @@ def main() -> int:
     if args.command == "portfolio-remove":
         store = SQLiteStateStore(args.state)
         try:
-            store.remove_portfolio_strategy(args.strategy_id)
-            print(json.dumps({"removed": True, "strategy_id": args.strategy_id}))
+            removed = store.remove_portfolio_strategy(args.strategy_id, defer=args.defer)
+            print(json.dumps({"removed": removed, "requested": not removed, "strategy_id": args.strategy_id}))
             return 0
         except ValueError as exc:
             print(str(exc), file=sys.stderr)

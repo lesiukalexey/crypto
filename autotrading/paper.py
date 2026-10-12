@@ -161,10 +161,20 @@ class SQLiteStateStore:
         self.db.commit()
         return digest
 
-    def remove_portfolio_strategy(self, strategy_id: str) -> None:
+    def remove_portfolio_strategy(self, strategy_id: str, *, defer: bool = False) -> bool:
         row = self.db.execute("SELECT strategy_id FROM portfolio_strategies WHERE strategy_id=?", (strategy_id,)).fetchone()
         if row is None:
             raise ValueError("Стратегия не найдена в портфеле")
+        if defer:
+            run = self.active_strategy_run(strategy_id)
+            if run is None:
+                raise ValueError("Запущенная стратегия не найдена")
+            now_ms = int(time.time() * 1000)
+            with self.db:
+                self.db.execute("UPDATE portfolio_strategies SET enabled=0 WHERE strategy_id=?", (strategy_id,))
+                self.db.execute("UPDATE strategy_runs SET status='stopping',stop_reason='removed_from_portfolio' WHERE id=? AND status IN ('running','stopping')", (run["id"],))
+                self.db.execute("INSERT INTO events(ts,type,payload) VALUES(?,?,?)", (now_ms, "strategy_removal_requested", json.dumps({"strategy_id": strategy_id}, sort_keys=True)))
+            return False
         if self.db.execute("SELECT 1 FROM positions WHERE strategy_id=? LIMIT 1", (strategy_id,)).fetchone():
             raise ValueError("Нельзя удалить стратегию с открытыми позициями")
         if self.db.execute("SELECT 1 FROM exchange_orders WHERE strategy_id=? AND status IN ('submitting','uncertain','submitted','partial') LIMIT 1", (strategy_id,)).fetchone():
@@ -175,6 +185,7 @@ class SQLiteStateStore:
             self.db.execute("DELETE FROM portfolio_strategies WHERE strategy_id=?", (strategy_id,))
             self.db.execute("INSERT INTO portfolio_removed(strategy_id,removed_at_ms) VALUES(?,?) ON CONFLICT(strategy_id) DO UPDATE SET removed_at_ms=excluded.removed_at_ms", (strategy_id, now_ms))
             self._sync_portfolio_budget()
+        return True
 
     def reject_initial_strategy_entry(self, strategy_id: str, *, now_ms: int | None = None) -> None:
         """Release an entry that was definitely rejected, closing any accepted hedge leg first."""
@@ -304,13 +315,15 @@ class SQLiteStateStore:
             return False
         if self.db.execute("SELECT 1 FROM positions WHERE strategy_id=? LIMIT 1", (strategy_id,)).fetchone():
             return False
+        if self.db.execute("SELECT 1 FROM exchange_orders WHERE strategy_id=? AND status IN ('submitting','uncertain','submitted','partial') LIMIT 1", (strategy_id,)).fetchone():
+            return False
         ending = equity if equity is not None else Decimal(run["last_equity_usdt"])
         now_ms = now_ms or int(time.time() * 1000)
         with self.db:
             self.db.execute("UPDATE strategy_runs SET status='stopped',ended_at_ms=?,ending_equity_usdt=?,last_equity_usdt=? WHERE id=?", (now_ms, str(ending), str(ending), run["id"]))
             self.db.execute("UPDATE portfolio_strategies SET enabled=0 WHERE strategy_id=?", (strategy_id,))
             self.db.execute("INSERT INTO events(ts,type,payload) VALUES(?,?,?)", (now_ms, "strategy_run_ended", json.dumps({"strategy_id": strategy_id, "reason": run["stop_reason"], "ending_equity_usdt": str(ending)}, sort_keys=True)))
-            if run["stop_reason"] == "initial_order_rejected":
+            if run["stop_reason"] in ("initial_order_rejected", "removed_from_portfolio"):
                 self.db.execute("DELETE FROM portfolio_strategies WHERE strategy_id=?", (strategy_id,))
                 self.db.execute("INSERT INTO portfolio_removed(strategy_id,removed_at_ms) VALUES(?,?) ON CONFLICT(strategy_id) DO UPDATE SET removed_at_ms=excluded.removed_at_ms", (strategy_id, now_ms))
                 self._sync_portfolio_budget()
