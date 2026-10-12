@@ -36,16 +36,19 @@ try {
         $password,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
     );
-    $symbolPlaceholders = implode(',', array_fill(0, count($symbols), '?'));
+    $latestPerSymbolQueries = [];
+    $latestPerSymbolParams = [];
+    foreach ($symbols as $ticker) {
+        $latestPerSymbolQueries[] = 'SELECT ? AS symbol, MAX(received_at_utc) AS latest FROM quote_snapshots WHERE category = ? AND symbol = ?';
+        $latestPerSymbolParams[] = $ticker;
+        $latestPerSymbolParams[] = $config['category'];
+        $latestPerSymbolParams[] = $ticker;
+    }
     $stmt = $pdo->prepare(
-        "SELECT symbol, MAX(received_at_utc) AS latest
-         FROM quote_snapshots
-         WHERE category = ? AND symbol IN ($symbolPlaceholders)
-         GROUP BY symbol
-         ORDER BY latest ASC, symbol ASC
-         LIMIT 1"
+        'SELECT symbol, latest FROM (' . implode(' UNION ALL ', $latestPerSymbolQueries) . ') AS latest_by_symbol '
+        . 'WHERE latest IS NOT NULL ORDER BY latest ASC, symbol ASC LIMIT 1'
     );
-    $stmt->execute([$config['category'], ...$symbols]);
+    $stmt->execute($latestPerSymbolParams);
     $oldestLatestQuote = $stmt->fetch();
 
     if (!is_array($oldestLatestQuote) || !is_string($oldestLatestQuote['latest'] ?? null) || $oldestLatestQuote['latest'] === '') {

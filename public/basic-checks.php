@@ -88,12 +88,17 @@ if ($startDayAuto && $enabledSymbols !== []) {
                 $password,
                 [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_EMULATE_PREPARES => false]
             );
-            $placeholders = implode(', ', array_fill(0, count($enabledSymbols), '?'));
+            $earliestQueries = [];
+            $earliestParams = [];
+            foreach ($enabledSymbols as $enabledSymbol) {
+                $earliestQueries[] = 'SELECT MIN(received_at_utc) AS earliest FROM quote_snapshots WHERE category = ? AND symbol = ?';
+                $earliestParams[] = $config['category'];
+                $earliestParams[] = $enabledSymbol;
+            }
             $earliestStatement = $pdo->prepare(
-                'SELECT MIN(received_at_utc) FROM quote_snapshots '
-                . 'WHERE category = ? AND symbol IN (' . $placeholders . ')'
+                'SELECT MIN(earliest) FROM (' . implode(' UNION ALL ', $earliestQueries) . ') AS per_symbol'
             );
-            $earliestStatement->execute([$config['category'], ...$enabledSymbols]);
+            $earliestStatement->execute($earliestParams);
             $earliestQuote = $earliestStatement->fetchColumn();
             if (is_string($earliestQuote) && $earliestQuote !== '') {
                 $startDayInput = (new DateTimeImmutable($earliestQuote, new DateTimeZone('UTC')))
