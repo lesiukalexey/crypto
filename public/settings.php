@@ -138,7 +138,7 @@ if (!isset($_SESSION['settings_csrf'])) $_SESSION['settings_csrf'] = bin2hex(ran
 </style>
 </head>
 <body><main class="wrap">
-<nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php" aria-current="page">Настройки</a><a href="autotrading.php?mode=paper">Автоторговля (Paper)</a><a href="autotrading.php?mode=demo">Автоторговля (Тест)</a><a href="autotrading.php?mode=real">Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<nav class="nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="basic-checks.php">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php" aria-current="page">Настройки</a><a href="autotrading.php?mode=paper">Автоторговля (Paper)</a><a href="autotrading.php?mode=demo">Автоторговля (Тест)</a><a href="autotrading.php?mode=real">Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
 <h1><?= settingsH($settingsPages[$settingsPage]) ?></h1>
 <nav class="settings-subnav" aria-label="Разделы настроек">
 <a href="settings.php?page=ticker-lists" <?= $settingsPage === 'ticker-lists' ? 'aria-current="page"' : '' ?>>Списки тикеров</a>
