@@ -61,6 +61,30 @@ function selectedTickerSet(array $config, ?string $setId = null): array
     ];
 }
 
+function loadDemoTickerAvailability(array $config, ?PDO $pdo = null): array
+{
+    try {
+        if ($pdo === null) {
+            $database = is_array($config['mysql'] ?? null) ? $config['mysql'] : [];
+            $passwordName = (string) ($database['password_env'] ?? '');
+            $password = $passwordName !== '' ? (getenv($passwordName) ?: '') : '';
+            if ($password === '' || !isset($database['host'], $database['port'], $database['database'], $database['user'])) return [];
+            $pdo = new PDO(
+                sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $database['host'], $database['port'], $database['database']),
+                $database['user'], $password,
+                [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC],
+            );
+        }
+        $category = (string) ($config['category'] ?? 'USDT-FUTURES');
+        $query = $pdo->prepare('SELECT symbol FROM ticker_capability_checks WHERE category = ? AND demo_available = 1 AND demo_checked_at_utc = (SELECT MAX(demo_checked_at_utc) FROM ticker_capability_checks WHERE category = ?) ORDER BY symbol');
+        $query->execute([$category, $category]);
+        return array_values(array_map(static fn (array $row): string => strtoupper((string) $row['symbol']), $query->fetchAll()));
+    } catch (Throwable $error) {
+        error_log('Unable to read Bitget Demo ticker availability: ' . $error->getMessage());
+        return [];
+    }
+}
+
 function filterEnabledTickerSnapshotIds(array $snapshotIds, array $config, ?string $setId = null): array
 {
     $selected = array_fill_keys(selectedTickerSet($config, $setId)['symbols'], true);
