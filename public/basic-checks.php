@@ -64,7 +64,7 @@ $exitRangeText = static function (array $ranges): string {
     }, array_is_list($ranges) ? $ranges : [$ranges])) . ' от стартового баланса';
 };
 $db = $config['mysql'];
-$symbols = [];
+$symbols = $enabledSymbols;
 $rows = [];
 $error = $rankingError;
 $timezone = new DateTimeZone('Europe/Kyiv');
@@ -207,88 +207,85 @@ $favoriteExitLabel = $favoriteView ? trim((string) ($favorite['exit_label'] ?? $
 $favoriteSymbolDisabled = $favoriteView && !in_array(strtoupper((string) ($favorite['params']['symbol'] ?? '')), $enabledSymbols, true);
 
 try {
-    $password = getenv($db['password_env']) ?: '';
-    if ($password === '') {
-        throw new RuntimeException('Не задан пароль подключения к MySQL.');
+    $startDay = DateTimeImmutable::createFromFormat('!Y-m-d', $startDayInput, $timezone);
+    $startDateErrors = DateTimeImmutable::getLastErrors();
+    if ($startDay === false || ($startDateErrors !== false && ($startDateErrors['warning_count'] > 0 || $startDateErrors['error_count'] > 0)) || $startDay->format('Y-m-d') !== $startDayInput) {
+        throw new InvalidArgumentException('Укажите корректную начальную дату.');
     }
-    $pdo ??= new PDO(
-        sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $db['host'], $db['port'], $db['database']),
-        $db['user'],
-        $password,
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_EMULATE_PREPARES => false]
-    );
-    $demoAvailableSymbols = array_fill_keys(loadDemoTickerAvailability($config, $pdo), true);
-    $stmt = $pdo->prepare('SELECT DISTINCT symbol FROM quote_snapshots WHERE category = ? ORDER BY symbol');
-    $stmt->execute([$config['category']]);
-    $symbols = array_values(array_intersect($stmt->fetchAll(PDO::FETCH_COLUMN), $enabledSymbols));
+    $endDay = DateTimeImmutable::createFromFormat('!Y-m-d', $endDayInput, $timezone);
+    $endDateErrors = DateTimeImmutable::getLastErrors();
+    if ($endDay === false || ($endDateErrors !== false && ($endDateErrors['warning_count'] > 0 || $endDateErrors['error_count'] > 0)) || $endDay->format('Y-m-d') !== $endDayInput) {
+        throw new InvalidArgumentException('Укажите корректную конечную дату.');
+    }
+    if ($endDay < $startDay) {
+        throw new InvalidArgumentException('Конечная дата не может быть раньше начальной.');
+    }
+    $isCurrentDay = $endDay->format('Y-m-d') === $today->format('Y-m-d');
+    $dayAfterEnd = $endDay->modify('+1 day');
+    $startUtc = $startDay->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
+    $endUtc = $dayAfterEnd->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
+    if ($symbols === [] || !in_array($symbol, $symbols, true)) {
+        $symbol = '';
+        $symbolWasSubmitted = false;
+    }
 
     if ($favoriteSymbolDisabled) {
         $error = 'Этот тикер выключен в настройках и не участвует в расчётах.';
-    } elseif ($symbols !== []) {
-        if (!in_array($symbol, $symbols, true)) {
-            $symbol = $symbols[0];
-            $symbolWasSubmitted = false;
+    } elseif ($symbol !== '') {
+        $password = getenv($db['password_env']) ?: '';
+        if ($password === '') {
+            throw new RuntimeException('Не задан пароль подключения к MySQL.');
         }
-        $martingaleContractRules = rankingCurrentBitgetContract($config['category'], $symbol);
-        $latestOrderQuoteStatement = $pdo->prepare(
-            'SELECT bid_price, ask_price FROM quote_snapshots '
-            . 'WHERE category = ? AND symbol = ? ORDER BY received_at_utc DESC, id DESC LIMIT 1'
+        $pdo ??= new PDO(
+            sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $db['host'], $db['port'], $db['database']),
+            $db['user'],
+            $password,
+            [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_EMULATE_PREPARES => false]
         );
-        $latestOrderQuoteStatement->execute([$config['category'], $symbol]);
-        $latestOrderQuote = $latestOrderQuoteStatement->fetch();
-        $latestOrderQuoteStatement->closeCursor();
-        if (is_array($latestOrderQuote)) {
-            $referencePrice = bccomp((string) $latestOrderQuote['ask_price'], (string) $latestOrderQuote['bid_price'], 24) >= 0
-                ? (string) $latestOrderQuote['ask_price'] : (string) $latestOrderQuote['bid_price'];
-            $minimumOrderBudgetInfo = rankingMinimumOrderBudget($martingaleContractRules, $referencePrice, bcdiv($feePercent, '100', 24));
-            $balanceFloor = $minimumOrderBudgetInfo['minimum_balance_usdt'];
-            if ($balanceAutoManaged || bccomp($startingBalance, $balanceFloor, 2) < 0) {
-                $balanceAutoAdjustedFrom = $startingBalance;
-                $startingBalance = $balanceFloor;
-                $viewParams['balance'] = $startingBalance;
-                $viewParams['balance_auto'] = $balanceAutoManaged ? '1' : '0';
-                $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
+        $demoAvailableSymbols = array_fill_keys(loadDemoTickerAvailability($config, $pdo), true);
+            $martingaleContractRules = rankingCurrentBitgetContract($config['category'], $symbol);
+            $latestOrderQuoteStatement = $pdo->prepare(
+                'SELECT bid_price, ask_price FROM quote_snapshots '
+                . 'WHERE category = ? AND symbol = ? ORDER BY received_at_utc DESC, id DESC LIMIT 1'
+            );
+            $latestOrderQuoteStatement->execute([$config['category'], $symbol]);
+            $latestOrderQuote = $latestOrderQuoteStatement->fetch();
+            $latestOrderQuoteStatement->closeCursor();
+            if (is_array($latestOrderQuote)) {
+                $referencePrice = bccomp((string) $latestOrderQuote['ask_price'], (string) $latestOrderQuote['bid_price'], 24) >= 0
+                    ? (string) $latestOrderQuote['ask_price'] : (string) $latestOrderQuote['bid_price'];
+                $minimumOrderBudgetInfo = rankingMinimumOrderBudget($martingaleContractRules, $referencePrice, bcdiv($feePercent, '100', 24));
+                $balanceFloor = $minimumOrderBudgetInfo['minimum_balance_usdt'];
+                if ($balanceAutoManaged || bccomp($startingBalance, $balanceFloor, 2) < 0) {
+                    $balanceAutoAdjustedFrom = $startingBalance;
+                    $startingBalance = $balanceFloor;
+                    $viewParams['balance'] = $startingBalance;
+                    $viewParams['balance_auto'] = $balanceAutoManaged ? '1' : '0';
+                    $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
+                }
             }
-        }
-        if ($martingaleContractRules['symbolStatus'] !== 'normal'
-            || bccomp((string) $martingaleContractRules['minLever'], '1', 12) > 0
-            || bccomp((string) $martingaleContractRules['maxLever'], '1', 12) < 0) {
-            throw new RuntimeException('Текущие правила Bitget не разрешают открыть эту пару с плечом 1×.');
-        }
-        $startDay = DateTimeImmutable::createFromFormat('!Y-m-d', $startDayInput, $timezone);
-        $startDateErrors = DateTimeImmutable::getLastErrors();
-        if ($startDay === false || ($startDateErrors !== false && ($startDateErrors['warning_count'] > 0 || $startDateErrors['error_count'] > 0)) || $startDay->format('Y-m-d') !== $startDayInput) {
-            throw new InvalidArgumentException('Укажите корректную начальную дату.');
-        }
-        $endDay = DateTimeImmutable::createFromFormat('!Y-m-d', $endDayInput, $timezone);
-        $endDateErrors = DateTimeImmutable::getLastErrors();
-        if ($endDay === false || ($endDateErrors !== false && ($endDateErrors['warning_count'] > 0 || $endDateErrors['error_count'] > 0)) || $endDay->format('Y-m-d') !== $endDayInput) {
-            throw new InvalidArgumentException('Укажите корректную конечную дату.');
-        }
-        if ($endDay < $startDay) {
-            throw new InvalidArgumentException('Конечная дата не может быть раньше начальной.');
-        }
-        $isCurrentDay = $endDay->format('Y-m-d') === $today->format('Y-m-d');
-        $dayAfterEnd = $endDay->modify('+1 day');
-        $startUtc = $startDay->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
-        $endUtc = $dayAfterEnd->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
-        if (!is_dir($rankingCacheDir) && !mkdir($rankingCacheDir, 0700, true) && !is_dir($rankingCacheDir)) {
-            throw new RuntimeException('Не удалось подготовить кэш рейтинга.');
-        }
-        $snapshotIds = rankingSnapshotIds(
-            $pdo, $rankingCacheDir, $config['category'], $startDayInput, $endDayInput,
-            $startUtc, $endUtc, $rankingGeneration,
-        );
-        $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config, $tickerSetId);
-        $maxQuoteId = (int) ($snapshotIds[$symbol] ?? 0);
-        if ($martingaleMode === 'none') {
-            $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc < ? ORDER BY received_at_utc, id");
-            $stmt->execute([$config['category'], $symbol, $maxQuoteId, $endUtc]);
-        } else {
-            $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc >= ? AND received_at_utc < ? ORDER BY received_at_utc, id");
-            $stmt->execute([$config['category'], $symbol, $maxQuoteId, $startUtc, $endUtc]);
-        }
-        $rows = $stmt->fetchAll();
+            if ($martingaleContractRules['symbolStatus'] !== 'normal'
+                || bccomp((string) $martingaleContractRules['minLever'], '1', 12) > 0
+                || bccomp((string) $martingaleContractRules['maxLever'], '1', 12) < 0) {
+                throw new RuntimeException('Текущие правила Bitget не разрешают открыть эту пару с плечом 1×.');
+            }
+            if (!is_dir($rankingCacheDir) && !mkdir($rankingCacheDir, 0700, true) && !is_dir($rankingCacheDir)) {
+                throw new RuntimeException('Не удалось подготовить кэш рейтинга.');
+            }
+            $snapshotIds = rankingSnapshotIds(
+                $pdo, $rankingCacheDir, $config['category'], $startDayInput, $endDayInput,
+                $startUtc, $endUtc, $rankingGeneration,
+            );
+            $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config, $tickerSetId);
+            $maxQuoteId = (int) ($snapshotIds[$symbol] ?? 0);
+            if ($martingaleMode === 'none') {
+                $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc < ? ORDER BY received_at_utc, id");
+                $stmt->execute([$config['category'], $symbol, $maxQuoteId, $endUtc]);
+            } else {
+                $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc >= ? AND received_at_utc < ? ORDER BY received_at_utc, id");
+                $stmt->execute([$config['category'], $symbol, $maxQuoteId, $startUtc, $endUtc]);
+            }
+            $rows = $stmt->fetchAll();
     }
 } catch (Throwable $e) {
     $error ??= ($e instanceof InvalidArgumentException || str_contains($e->getMessage(), 'Bitget'))
@@ -1169,12 +1166,12 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 <section class="entry-strategy-group" aria-labelledby="entry-strategy-heading"><h2 class="entry-strategy-heading" id="entry-strategy-heading">Стратегия входа</h2><div class="entry-strategy-fields">
 <label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
 <label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
-<label class="field">Порог входа<select name="entry_config" id="entry-config"><option value="<?= h($entryConfig) ?>"><?= h($favoriteView ? $favoriteEntryLabel : $entryLoadingLabel) ?></option></select></label>
+<label class="field">Порог входа<select name="entry_config" id="entry-config" <?= !$symbolWasSubmitted ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $entryConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару для загрузки рейтинга' : ($favoriteView ? $favoriteEntryLabel : $entryLoadingLabel)) ?></option></select></label>
 <p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию при первом пересечении порога относительно любого из последних X снимков.</p>
 </div></section>
 <section class="exit-strategy-group" aria-labelledby="exit-strategy-heading"><h2 class="exit-strategy-heading" id="exit-strategy-heading">Стратегия выхода</h2><div class="exit-strategy-fields">
 <label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL (сразу)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с учетом интервалов</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP с учетом интервалов, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL с учетом интервалов</option></select></label>
-<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config"><option value="<?= h($selectedExitConfig) ?>" selected><?= h($favoriteView ? $favoriteExitLabel : 'Загружаю варианты TP/SL…') ?></option></select></label>
+<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config" <?= !$symbolWasSubmitted ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $selectedExitConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару для загрузки TP/SL' : ($favoriteView ? $favoriteExitLabel : 'Загружаю варианты TP/SL…')) ?></option></select></label>
 <input type="hidden" name="exit_confirmation_snapshots" id="exit-confirmation-snapshots" value="<?= h((string) $exitConfirmationSnapshots) ?>">
 <p class="small-note">Варианты TP/SL сгруппированы по числу интервалов проверки. При достижении TP или SL позиция закроется, если порог всё ещё достигнут через указанное число интервалов.</p>
 </div></section>
@@ -2226,6 +2223,22 @@ const exitConfirmationSnapshotCounts = [1, 2, 3, 5, 10, 20, 30, 40, 60, 80];
 async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (rankingMaintenancePending) return;
     const params = new URLSearchParams(new FormData(filtersForm));
+    if (!(params.get('symbol') || '').trim()) {
+        strategyRankingTimer.reset();
+        entryConfigSelect.replaceChildren();
+        const entryPrompt = new Option('Выберите торговую пару для загрузки рейтинга', '', true, true);
+        entryPrompt.disabled = true;
+        entryConfigSelect.appendChild(entryPrompt);
+        exitConfigSelect.replaceChildren();
+        const exitPrompt = new Option('Выберите торговую пару для загрузки TP/SL', '', true, true);
+        exitPrompt.disabled = true;
+        exitConfigSelect.appendChild(exitPrompt);
+        entryConfigSelect.disabled = true;
+        exitConfigSelect.disabled = true;
+        return;
+    }
+    entryConfigSelect.disabled = false;
+    exitConfigSelect.disabled = false;
     if (!isPoll) params.set('retry_cancelled', '1');
     if (!isPoll) {
         strategyRankingTimer.reset();
@@ -3119,11 +3132,9 @@ window.setInterval(refreshCalculationQueue, 5000);
 updateMartingaleInitialNotional();
 if (!favoriteView && symbolSortMode.value === 'profit') {
     loadPortfolioRanking();
-} else if (!favoriteView) {
-    ensurePortfolioRankingCacheChecked();
 }
 if (!favoriteView) {
-    loadCachedTickerBestResults();
+    if (symbolSelect.value) loadCachedTickerBestResults();
     loadExitRanking();
 }
 </script></body></html>
