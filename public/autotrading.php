@@ -22,29 +22,43 @@ function signedDecimalInput(mixed $value, string $label): string {
     if (!preg_match('/^-?\d{1,12}(?:\.\d{1,24})?$/', $text) || abs((float) $text) > 1000000000) throw new RuntimeException($label . ': неверный формат.');
     return $text;
 }
-function unavailableDemoSymbols(array $config, array $symbols): array {
+function demoTickerCapabilitySnapshot(array $config): ?array {
     $database = is_array($config['mysql'] ?? null) ? $config['mysql'] : [];
     $passwordName = (string) ($database['password_env'] ?? '');
     $password = $passwordName !== '' ? (getenv($passwordName) ?: '') : '';
-    if ($password === '' || $symbols === []) return [];
+    if ($password === '' || !isset($database['host'], $database['port'], $database['database'], $database['user'])) return null;
     try {
         $pdo = new PDO(
             sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $database['host'], $database['port'], $database['database']),
             $database['user'], $password,
             [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC],
         );
-        $query = $pdo->prepare('SELECT demo_available FROM ticker_capability_checks WHERE category = ? AND symbol = ? ORDER BY demo_checked_at_utc DESC LIMIT 1');
+        $query = $pdo->prepare('SELECT symbol, demo_available, demo_checked_at_utc FROM ticker_capability_checks WHERE category = ? AND demo_checked_at_utc = (SELECT MAX(demo_checked_at_utc) FROM ticker_capability_checks WHERE category = ?) ORDER BY symbol');
+        $category = (string) ($config['category'] ?? 'USDT-FUTURES');
+        $query->execute([$category, $category]);
+        $available = [];
         $unavailable = [];
-        foreach ($symbols as $symbol) {
-            $query->execute([(string) ($config['category'] ?? 'USDT-FUTURES'), $symbol]);
-            $value = $query->fetchColumn();
-            if ($value !== false && (int) $value !== 1) $unavailable[] = $symbol;
+        $checkedAt = null;
+        foreach ($query->fetchAll() as $row) {
+            $symbol = strtoupper((string) ($row['symbol'] ?? ''));
+            if ($symbol === '') continue;
+            if ((int) ($row['demo_available'] ?? 0) === 1) $available[] = $symbol;
+            else $unavailable[] = $symbol;
+            $checkedAt ??= (string) ($row['demo_checked_at_utc'] ?? '');
         }
-        return $unavailable;
+        if ($available === [] && $unavailable === []) return null;
+        return ['available' => $available, 'unavailable' => $unavailable, 'checked_at' => $checkedAt];
     } catch (Throwable $error) {
         error_log('Unable to read Demo ticker availability: ' . $error->getMessage());
-        return [];
+        return null;
     }
+}
+function assertDemoSymbolsAvailable(array $config, array $symbols): void {
+    $snapshot = demoTickerCapabilitySnapshot($config);
+    if (!is_array($snapshot)) throw new RuntimeException('Не удалось подтвердить доступность тикеров в Bitget Demo. Обновите список доступности и повторите запуск.');
+    $available = array_fill_keys($snapshot['available'], true);
+    $unavailable = array_values(array_unique(array_filter(array_map('strtoupper', $symbols), static fn (string $symbol): bool => $symbol !== '' && !isset($available[$symbol]))));
+    if ($unavailable !== []) throw new RuntimeException('Запуск Bitget Demo запрещён: тикеры недоступны или не проверены — ' . implode(', ', $unavailable) . '.');
 }
 function timeMsLabel(mixed $value): string {
     if (!is_numeric($value) || (int) $value <= 0) return '—';
@@ -195,7 +209,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 : [strtoupper((string) ($favoriteParams['symbol'] ?? ''))];
             $enabled = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
             if (in_array('', $symbols, true) || count(array_unique($symbols)) !== count($symbols) || count(array_filter($symbols, static fn (string $value): bool => isset($enabled[$value]))) !== count($symbols)) throw new RuntimeException('В избранном есть тикер, который выключен или не поддерживается настройками.');
-            if ($accountMode === 'demo' && ($unavailable = unavailableDemoSymbols($config, $symbols)) !== []) throw new RuntimeException('В Bitget Demo недоступны тикеры: ' . implode(', ', $unavailable) . '. Выберите другую пару или используйте Real после отдельной проверки.');
+            if ($accountMode === 'demo') assertDemoSymbolsAvailable($config, $symbols);
             $starting = decimalInput($favoriteParams['balance'] ?? '10', 'Стартовый баланс', false);
             $fee = decimalInput($favoriteParams['fee'] ?? '0.06', 'Комиссия');
             $entry = $kind === 'hedge' ? 'immediate:long' : (string) ($favoriteParams['entry_config'] ?? $favoriteParams['ranking_entry_config'] ?? '');
@@ -236,7 +250,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $shortSymbol = strtoupper(trim((string) ($_POST['hedge_short'] ?? '')));
             $enabled = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
             if ($longSymbol === $shortSymbol || !isset($enabled[$longSymbol], $enabled[$shortSymbol])) throw new RuntimeException('Проверьте выбранные тикеры: лонг и шорт должны быть разными активными тикерами.');
-            if ($accountMode === 'demo' && ($unavailable = unavailableDemoSymbols($config, [$longSymbol, $shortSymbol])) !== []) throw new RuntimeException('В Bitget Demo недоступны тикеры: ' . implode(', ', $unavailable) . '. Выберите другую пару.');
+            if ($accountMode === 'demo') assertDemoSymbolsAvailable($config, [$longSymbol, $shortSymbol]);
             $starting = decimalInput($_POST['hedge_balance'] ?? '', 'Стартовый баланс', false);
             $fee = decimalInput($_POST['hedge_fee'] ?? '', 'Комиссия');
             foreach (($currentStatus['portfolio_strategies'] ?? []) as $existingStrategy) {
@@ -367,6 +381,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 [$addCode, $addOut, $addErr] = runPython(['portfolio-add', '--state', $statePath, '--release', $activeReleasePath, '--kind', 'strategy', '--name', (string) ($published['release_id'] ?? 'Ранее опубликованная стратегия')], $root, $python);
                 if ($addCode !== 0) throw new RuntimeException($addErr ?: $addOut ?: 'Не удалось перенести опубликованную стратегию в общий портфель.');
             }
+            if ($accountMode === 'demo') {
+                $demoPortfolioSymbols = [];
+                foreach (($portfolioState['portfolio_strategies'] ?? []) as $portfolioStrategy) {
+                    foreach (($portfolioStrategy['symbols'] ?? []) as $portfolioSymbol) $demoPortfolioSymbols[] = strtoupper((string) $portfolioSymbol);
+                }
+                if ($demoPortfolioSymbols === [] && is_array($published)) $demoPortfolioSymbols = array_map('strtoupper', array_map('strval', $published['market']['symbols'] ?? []));
+                if ($demoPortfolioSymbols === []) throw new RuntimeException('Запуск Bitget Demo запрещён: не удалось определить тикеры портфеля.');
+                assertDemoSymbolsAvailable($config, $demoPortfolioSymbols);
+            }
             $startArgs = ['portfolio-start', '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--risk-settings', $riskSettingsPath, '--interval', '5', '--mode', $accountMode];
             if ($enableLive) $startArgs[] = '--enable-live';
             [$code, $out, $err] = runPython($startArgs, $root, $python);
@@ -425,6 +448,18 @@ if ($message === '' && is_array($_SESSION['autotrading_flash'] ?? null)) {
 $status = ['mode' => 'paper', 'initialized' => false, 'open_positions' => 0, 'positions' => [], 'unrealized_pnl_usdt' => '0', 'recent_trades' => [], 'recent_events' => [], 'trades' => 0, 'service' => ['running' => false], 'controls' => ['entries_paused' => false, 'close_positions' => false]];
 [$statusCode, $statusOut] = runPython(['status', '--state', $statePath, '--pid-file', $pidPath, '--control', $controlPath], $root, $python);
 if ($statusCode === 0 && is_array($decoded = json_decode($statusOut, true))) $status = array_merge($status, $decoded);
+$demoTickerSnapshot = $accountMode === 'demo' ? demoTickerCapabilitySnapshot($config) : null;
+$demoStartBlockedSymbols = [];
+if ($accountMode === 'demo') {
+    foreach (($status['portfolio_strategies'] ?? []) as $portfolioStrategy) foreach (($portfolioStrategy['symbols'] ?? []) as $portfolioSymbol) $demoStartBlockedSymbols[] = strtoupper((string) $portfolioSymbol);
+    if ($demoStartBlockedSymbols === [] && is_array($published)) $demoStartBlockedSymbols = array_map('strtoupper', array_map('strval', $published['market']['symbols'] ?? []));
+    if (is_array($demoTickerSnapshot)) {
+        $demoAvailableLookup = array_fill_keys($demoTickerSnapshot['available'], true);
+        $demoStartBlockedSymbols = array_values(array_unique(array_filter($demoStartBlockedSymbols, static fn (string $ticker): bool => !isset($demoAvailableLookup[$ticker]))));
+    } elseif ($demoStartBlockedSymbols !== []) {
+        $demoStartBlockedSymbols[] = 'нет актуального списка доступности';
+    }
+}
 $portfolioNameById = [];
 foreach (($status['portfolio_strategies'] ?? []) as $portfolioStrategy) $portfolioNameById[(string) ($portfolioStrategy['strategy_id'] ?? '')] = (string) ($portfolioStrategy['name'] ?? '');
 $historyStrategies = is_array($status['portfolio_strategies'] ?? null) ? $status['portfolio_strategies'] : [];
@@ -507,7 +542,7 @@ $postHidden = [
 .history-filters{display:flex;align-items:end;gap:12px;flex-wrap:wrap}.history-filters .field{min-width:150px}.history-filters select,.history-filters input{width:100%;padding:9px 10px;border:1px solid #34415e;border-radius:8px;color:var(--text);background:#0c1222;font:inherit}.history-chart{display:block;width:100%;height:auto;min-height:260px;margin-top:12px;overflow:visible}.history-chart text{fill:#8995ad;font:12px system-ui,sans-serif}.history-chart .grid-line{stroke:#273149;stroke-width:1}.history-chart .price-line{fill:none;stroke:#86a8ff;stroke-width:2}.history-chart .paper-trade{stroke:#f0bd65;fill:#f0bd65}.history-chart .actual-trade{stroke:#42d6a4;fill:#42d6a4}.history-chart .trade-link{fill:none;stroke-width:1.5;opacity:.6}.history-chart .trade-entry{stroke-width:2}.history-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:14px 0}.history-summary .stat strong{font-size:16px}.history-table{min-width:1000px}.history-status{min-height:22px;color:var(--muted)}
 </style></head><body><main class="wrap">
 <div class="muted">Bitget · локальный исполнитель</div><h1>Автоторговля</h1>
-<nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="<?= h($autotradingModeViewUrl('demo')) ?>" <?= $accountMode === 'demo' ? 'aria-current="page"' : '' ?>>Автоторговля (Тест)</a><a href="<?= h($autotradingModeViewUrl('real')) ?>" <?= $accountMode === 'real' ? 'aria-current="page"' : '' ?>>Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="<?= h($autotradingModeViewUrl('paper')) ?>" <?= $accountMode === 'paper' ? 'aria-current="page"' : '' ?>>Автоторговля (Paper)</a><a href="<?= h($autotradingModeViewUrl('demo')) ?>" <?= $accountMode === 'demo' ? 'aria-current="page"' : '' ?>>Автоторговля (Тест)</a><a href="<?= h($autotradingModeViewUrl('real')) ?>" <?= $accountMode === 'real' ? 'aria-current="page"' : '' ?>>Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
 <nav class="nav subnav" aria-label="Подразделы автоторговли">
 <?php foreach (['setup' => 'Подготовка', 'portfolio' => 'Портфель', 'state' => 'Состояние исполнителя', 'deals' => 'История сделок', 'runs' => 'Запуски', 'events' => 'События'] as $viewKey => $viewLabel): ?><a href="<?= h($autotradingViewUrl($viewKey)) ?>" <?= $autotradingView === $viewKey ? 'aria-current="page"' : '' ?>><?= h($viewLabel) ?></a><?php endforeach; ?>
 </nav>
@@ -550,10 +585,11 @@ $postHidden = [
 </section>
 <?php endif; ?>
 <?php if ($autotradingView === 'setup'): ?><section class="panel"><h2>Режим счёта</h2><div class="actions" role="group" aria-label="Выбор режима счёта">
-<?php foreach (['paper' => 'Paper · локальная симуляция', 'demo' => 'Bitget Demo', 'real' => 'Bitget Real'] as $modeKey => $modeLabel): ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="account-mode"><input type="hidden" name="account_mode" value="<?= h($modeKey) ?>"><button class="<?= $accountMode === $modeKey ? '' : 'secondary' ?>" aria-pressed="<?= $accountMode === $modeKey ? 'true' : 'false' ?>" <?= !$isLocal ? 'disabled' : '' ?>><?= h($modeLabel) ?><?= $accountMode === $modeKey ? ' · выбран' : '' ?></button></form><?php endforeach; ?>
+<?php $modeOptions = $accountMode === 'paper' ? ['paper' => 'Paper · локальная симуляция'] : ['demo' => 'Bitget Demo', 'real' => 'Bitget Real']; foreach ($modeOptions as $modeKey => $modeLabel): ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="account-mode"><input type="hidden" name="account_mode" value="<?= h($modeKey) ?>"><button class="<?= $accountMode === $modeKey ? '' : 'secondary' ?>" aria-pressed="<?= $accountMode === $modeKey ? 'true' : 'false' ?>" <?= !$isLocal ? 'disabled' : '' ?>><?= h($modeLabel) ?><?= $accountMode === $modeKey ? ' · выбран' : '' ?></button></form><?php endforeach; ?>
 </div>
 <?php if ($accountMode === 'paper'): ?><p class="note">Paper использует виртуальные позиции и публичные котировки; ордера на Bitget не отправляются.</p>
 <?php elseif ($accountMode === 'demo'): ?><p class="note">Demo отправляет ордера только в Bitget Demo с paptrading: 1. Перед запуском проверьте, что у выбранного аккаунта нет посторонних позиций и ордеров по портфельным тикерам.</p>
+<?php if (is_array($demoTickerSnapshot)): ?><p class="status success">Доступно тикеров: <?= count($demoTickerSnapshot['available']) ?> из <?= count($demoTickerSnapshot['available']) + count($demoTickerSnapshot['unavailable']) ?> · проверка: <?= h((string) ($demoTickerSnapshot['checked_at'] ?? '—')) ?> UTC</p><p class="note"><strong>Можно использовать в Demo:</strong> <?= h(implode(', ', $demoTickerSnapshot['available'])) ?></p><?php if ($demoTickerSnapshot['unavailable'] !== []): ?><details><summary>Недоступны в Demo (<?= count($demoTickerSnapshot['unavailable']) ?>)</summary><p class="note"><?= h(implode(', ', $demoTickerSnapshot['unavailable'])) ?></p></details><?php endif; ?><?php else: ?><p class="status warning">Не удалось загрузить список доступности Demo. Запуск будет заблокирован, пока доступность тикеров нельзя подтвердить.</p><?php endif; ?>
 <?php else: ?><p class="status warning">Real отправляет реальные USDT futures ордера. Запуск требует производственный API ключ с правом торговли, BITGET_LIVE_TRADING_ENABLED=1 и ручное подтверждение запуска.</p><?php endif; ?></section><?php endif; ?>
 <?php if ($autotradingView === 'setup' && is_array($selectedFavorite)): $favoriteParams = is_array($selectedFavorite['params'] ?? null) ? $selectedFavorite['params'] : []; $favoriteName = (string) ($selectedFavorite['name'] ?? 'Избранное'); $favoriteKind = (string) ($selectedFavorite['type'] ?? '') === 'hedge' ? 'Хедж-пара' : 'Стратегия'; $favoriteTicker = $favoriteKind === 'Хедж-пара' ? 'Лонг ' . (string) ($favoriteParams['long_symbol'] ?? '—') . ' / шорт ' . (string) ($favoriteParams['short_symbol'] ?? '—') : (string) ($favoriteParams['symbol'] ?? '—'); ?>
 <section class="panel"><h2>Добавить запись из избранного</h2><p><strong><?= h($favoriteName) ?></strong> · <?= h($favoriteKind) ?> · <?= h($favoriteTicker) ?></p><p class="note">В общий портфель попадёт эта конфигурация; для хедж-пары обе ноги используют равные части её доли капитала.</p><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_favorite"><input type="hidden" name="favorite_id" value="<?= h($selectedFavoriteId) ?>"><button <?= !$isLocal ? 'disabled' : '' ?>>Добавить в общий портфель</button></form></section>
@@ -571,7 +607,7 @@ $postHidden = [
 
 <?php if ($autotradingView === 'setup'): ?>
 <?php if (is_array($published) && !$hasHedgePreview): ?><section class="panel published-summary" aria-label="Последняя добавленная стратегия"><h2>Текущая конфигурация</h2><div class="grid"><div class="stat"><span>Тикеры</span><strong><?= h(implode(', ', array_map('strval', $published['market']['symbols'] ?? [])) ?: '—') ?></strong></div><div class="stat"><span>Условие входа</span><strong><?= h(entryDescription($published['strategy'] ?? [])) ?></strong></div><div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription((string) ($published['strategy']['exit_config'] ?? ''))) ?></strong></div><div class="stat"><span>Период</span><strong><?= h((string) ($published['backtest']['start_date'] ?? '—')) ?> — <?= h((string) ($published['backtest']['end_date'] ?? '—')) ?></strong></div><div class="stat"><span>Стартовый баланс</span><strong><?= h((string) ($published['execution']['starting_balance_usdt'] ?? '—')) ?> USDT</strong></div></div></section><?php endif; ?>
-<section class="panel"><h2>Запуск</h2><?php if ($hasHedgePreview && !$selectedHedgeInPortfolio): ?><p class="note">Сначала добавьте выбранную пару в портфель выше. Ничего не запускается автоматически.</p><?php else: ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><?php if ($accountMode === 'real'): ?><label class="field">Подтвердите реальный запуск<input name="live_acknowledgement" autocomplete="off" required pattern="I_ACKNOWLEDGE_LIVE_ORDERS" placeholder="I_ACKNOWLEDGE_LIVE_ORDERS"></label><?php endif; ?><button <?= !$isLocal || ($hasHedgePreview ? !$selectedHedgeInPortfolio : (empty($status['portfolio_strategies']) && !is_array($published))) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? 'Портфель уже запущен' : ($accountMode === 'paper' ? 'Запустить Paper портфель' : ($accountMode === 'demo' ? 'Запустить Bitget Demo' : 'Запустить Bitget Real')) ?></button></form><?php endif; ?></section>
+<section class="panel"><h2>Запуск</h2><?php if ($accountMode === 'demo' && $demoStartBlockedSymbols !== []): ?><p class="status warning">Запуск Demo заблокирован: <?= h(implode(', ', $demoStartBlockedSymbols)) ?>.</p><?php endif; ?><?php if ($hasHedgePreview && !$selectedHedgeInPortfolio): ?><p class="note">Сначала добавьте выбранную пару в портфель выше. Ничего не запускается автоматически.</p><?php else: ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><?php if ($accountMode === 'real'): ?><label class="field">Подтвердите реальный запуск<input name="live_acknowledgement" autocomplete="off" required pattern="I_ACKNOWLEDGE_LIVE_ORDERS" placeholder="I_ACKNOWLEDGE_LIVE_ORDERS"></label><?php endif; ?><button <?= !$isLocal || ($hasHedgePreview ? !$selectedHedgeInPortfolio : (empty($status['portfolio_strategies']) && !is_array($published))) || ($accountMode === 'demo' && $demoStartBlockedSymbols !== []) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? 'Портфель уже запущен' : ($accountMode === 'paper' ? 'Запустить Paper портфель' : ($accountMode === 'demo' ? 'Запустить Bitget Demo' : 'Запустить Bitget Real')) ?></button></form><?php endif; ?></section>
 <?php endif; ?>
 
 <?php if ($autotradingView === 'events' && $accountMode === 'demo'): ?><section class="panel"><h2>Сверка Bitget Demo</h2>
