@@ -94,6 +94,37 @@ class SQLiteStateStore:
         self.db.execute("INSERT INTO events(ts,type,symbol,payload) VALUES(?,?,?,?)", (ts or int(time.time() * 1000), kind, symbol, json.dumps(payload, sort_keys=True)))
         self.db.commit()
 
+    def event_error(self, kind: str, payload: dict[str, Any], symbol: str | None = None, ts: int | None = None) -> None:
+        """Keep one recent row per recurring error signature and count repeats."""
+        timestamp = ts or int(time.time() * 1000)
+        identity_fields = ("error_code", "code", "exception_type", "message", "endpoint", "method", "phase", "intent", "category")
+        identity = {key: payload[key] for key in identity_fields if key in payload}
+        if not identity:
+            identity = payload
+        for row in self.db.execute(
+            "SELECT id, ts, payload FROM events WHERE type=? AND symbol IS ? AND ts>=? ORDER BY id DESC LIMIT 100",
+            (kind, symbol, timestamp - 60_000),
+        ):
+            previous = json.loads(row["payload"])
+            previous_identity = {key: previous[key] for key in identity_fields if key in previous}
+            if not previous_identity:
+                previous_identity = {key: value for key, value in previous.items() if key not in {"first_seen_ms", "last_seen_ms", "repeat_count"}}
+            if previous_identity != identity:
+                continue
+            payload_with_count = dict(payload)
+            payload_with_count.update({
+                "first_seen_ms": previous.get("first_seen_ms", row["ts"]),
+                "last_seen_ms": timestamp,
+                "repeat_count": int(previous.get("repeat_count", 1)) + 1,
+            })
+            self.db.execute("UPDATE events SET ts=?,payload=? WHERE id=?", (timestamp, json.dumps(payload_with_count, sort_keys=True), row["id"]))
+            self.db.commit()
+            return
+        payload_with_count = dict(payload)
+        payload_with_count.update({"first_seen_ms": timestamp, "last_seen_ms": timestamp, "repeat_count": 1})
+        self.db.execute("INSERT INTO events(ts,type,symbol,payload) VALUES(?,?,?,?)", (timestamp, kind, symbol, json.dumps(payload_with_count, sort_keys=True)))
+        self.db.commit()
+
     def quote(self, quote: Quote) -> bool:
         cur = self.db.execute("INSERT OR IGNORE INTO quotes VALUES(?,?,?,?,?)", (quote.symbol, quote.timestamp_ms, str(quote.bid), str(quote.ask), str(quote.last)))
         self.db.commit()
@@ -327,9 +358,9 @@ class SQLiteStateStore:
                     unrealized += pnl
                     ts = row["ts"]
                 positions.append({"strategy_id": strategy_id, "leg": leg, "symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None if pnl is None else str(pnl), "quote_timestamp_ms": ts})
-        latest = self.db.execute("SELECT type,ts FROM events ORDER BY id DESC LIMIT 1").fetchone()
+        latest = self.db.execute("SELECT type,ts FROM events ORDER BY ts DESC,id DESC LIMIT 1").fetchone()
         recent_trades = [dict(row) for row in self.db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")]
-        recent_events = [{"id": row["id"], "timestamp_ms": row["ts"], "type": row["type"], "symbol": row["symbol"], "payload": json.loads(row["payload"])} for row in self.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 100")]
+        recent_events = [{"id": row["id"], "timestamp_ms": row["ts"], "type": row["type"], "symbol": row["symbol"], "payload": json.loads(row["payload"])} for row in self.db.execute("SELECT * FROM events ORDER BY ts DESC,id DESC LIMIT 100")]
         portfolio = [{"strategy_id": row["strategy_id"], "kind": row["kind"], "digest": row["digest"], "enabled": bool(row["enabled"]), "name": row["name"] or row["strategy_id"], "symbols": json.loads(row["payload"])["market"]["symbols"], "allocation_usdt": json.loads(row["payload"])["execution"]["starting_balance_usdt"]} for row in self.db.execute("SELECT * FROM portfolio_strategies ORDER BY added_at_ms")] if "portfolio_strategies" in tables else []
         account_columns = {row[1] for row in self.db.execute("PRAGMA table_info(account)")}
         initial_balance = account["initial_balance"] if "initial_balance" in account_columns else account["balance"]

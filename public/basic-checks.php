@@ -118,6 +118,8 @@ if ($entryDirectionMode === 'reverse') $defaultEntryConfig .= ':reverse';
 $entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
 $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
 $startingBalance = trim((string) ($_GET['balance'] ?? '10'));
+$balanceAutoAdjustedFrom = null;
+$minimumOrderBudgetInfo = null;
 $feePercent = trim((string) ($_GET['fee'] ?? '0.06'));
 $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
 $martingaleContractRules = null;
@@ -221,6 +223,25 @@ try {
             $symbol = $symbols[0];
         }
         $martingaleContractRules = rankingCurrentBitgetContract($config['category'], $symbol);
+        $latestOrderQuoteStatement = $pdo->prepare(
+            'SELECT bid_price, ask_price FROM quote_snapshots '
+            . 'WHERE category = ? AND symbol = ? ORDER BY received_at_utc DESC, id DESC LIMIT 1'
+        );
+        $latestOrderQuoteStatement->execute([$config['category'], $symbol]);
+        $latestOrderQuote = $latestOrderQuoteStatement->fetch();
+        $latestOrderQuoteStatement->closeCursor();
+        if (is_array($latestOrderQuote)) {
+            $referencePrice = bccomp((string) $latestOrderQuote['ask_price'], (string) $latestOrderQuote['bid_price'], 24) >= 0
+                ? (string) $latestOrderQuote['ask_price'] : (string) $latestOrderQuote['bid_price'];
+            $minimumOrderBudgetInfo = rankingMinimumOrderBudget($martingaleContractRules, $referencePrice, bcdiv($feePercent, '100', 24));
+            $balanceFloor = $minimumOrderBudgetInfo['minimum_balance_usdt'];
+            if (bccomp($startingBalance, $balanceFloor, 2) < 0) {
+                $balanceAutoAdjustedFrom = $startingBalance;
+                $startingBalance = $balanceFloor;
+                $viewParams['balance'] = $startingBalance;
+                $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
+            }
+        }
         if ($martingaleContractRules['symbolStatus'] !== 'normal'
             || bccomp((string) $martingaleContractRules['minLever'], '1', 12) > 0
             || bccomp((string) $martingaleContractRules['maxLever'], '1', 12) < 0) {
@@ -1150,6 +1171,7 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 </div></section>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
+<?php if ($balanceAutoAdjustedFrom !== null && is_array($minimumOrderBudgetInfo)): ?><p class="small-note">Баланс увеличен с <?= h($balanceAutoAdjustedFrom) ?> до <?= h($startingBalance) ?> USDT для выбранного тикера <?= h($symbol) ?>: минимум <?= h($minimumOrderBudgetInfo['minimum_quantity']) ?> по шагу <?= h($minimumOrderBudgetInfo['quantity_step']) ?> при цене <?= h($minimumOrderBudgetInfo['reference_price']) ?> USDT, с учётом комиссии за вход.</p><?php endif; ?>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
 <label class="field">Проскальзывание (б.п.)<input type="number" name="slippage_bps" min="0" max="9999.9999" step="0.1" value="<?= h($simulationCosts['slippage_bps']) ?>" required></label>
 <label class="save-mode-toggle"><input type="hidden" name="include_funding" value="0"><input type="checkbox" name="include_funding" value="1" <?= $simulationCosts['include_funding'] ? 'checked' : '' ?>><span class="save-mode-detail">Учитывать funding</span></label>

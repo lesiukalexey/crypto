@@ -163,8 +163,12 @@ class BitgetProductionAdapter(BitgetDemoAdapter):
         }
         try:
             response = self._transport(method.upper(), API_BASE + request_path, headers, body, self.timeout_seconds)
-        except Exception:
+        except Exception as exc:
             self._reconciled = False
+            if isinstance(exc, BitgetAPIError):
+                exc.mode = self.mode
+                exc.method = exc.method or method.upper()
+                exc.endpoint = exc.endpoint or path
             raise
         if isinstance(response, dict) and response.get("code") in allow_error_codes:
             return {"code": "00000", "data": None}
@@ -173,7 +177,12 @@ class BitgetProductionAdapter(BitgetDemoAdapter):
             code = response.get("code", "invalid") if isinstance(response, dict) else "invalid"
             detail = _safe_api_message(response)
             suffix = f": {detail}" if detail else ""
-            raise BitgetAPIError(f"Bitget production API rejected {method.upper()} {path} (code {code}){suffix}")
+            raise BitgetAPIError(
+                f"Bitget production API rejected {method.upper()} {path} (code {code}){suffix}",
+                code=str(code), api_message=detail or None, method=method.upper(),
+                endpoint=path, mode=self.mode, category="api_rejection",
+                retryable=str(code) in {"429", "40725", "40808", "45001"},
+            )
         data = response.get("data")
         if not isinstance(data, (dict, list, str, type(None))):
             self._reconciled = False

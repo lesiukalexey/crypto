@@ -210,6 +210,39 @@ function rankingCurrentBitgetContract(string $productType, string $symbol): arra
     }
 }
 
+function rankingMinimumOrderBudget(array $contract, string $price, string $feeRate = '0'): array
+{
+    foreach ([$price, $feeRate] as $value) {
+        if (!is_numeric($value) || bccomp((string) $value, '0', 24) < 0) throw new InvalidArgumentException('Для оценки минимального ордера нужна корректная цена и комиссия.');
+    }
+    $step = (string) ($contract['sizeMultiplier'] ?? '0');
+    $minimum = (string) ($contract['minTradeNum'] ?? '0');
+    $minimumNotional = (string) ($contract['minTradeUSDT'] ?? '0');
+    if (bccomp($step, '0', 24) <= 0 || bccomp($minimum, '0', 24) <= 0 || bccomp((string) $price, '0', 24) <= 0) {
+        throw new RuntimeException('Bitget не вернул полные правила минимального размера контракта.');
+    }
+    $steps = bcdiv($minimum, $step, 0);
+    if (bccomp(bcmul($steps, $step, 24), $minimum, 24) < 0) $steps = bcadd($steps, '1', 0);
+    if (bccomp($minimumNotional, '0', 24) > 0) {
+        $notionalPerStep = bcmul((string) $price, $step, 24);
+        $notionalSteps = bcdiv($minimumNotional, $notionalPerStep, 0);
+        if (bccomp(bcmul($notionalSteps, $notionalPerStep, 24), $minimumNotional, 24) < 0) $notionalSteps = bcadd($notionalSteps, '1', 0);
+        if (bccomp($notionalSteps, $steps, 0) > 0) $steps = $notionalSteps;
+    }
+    $minimumQuantity = bcmul($steps, $step, 24);
+    $notional = bcmul($minimumQuantity, (string) $price, 24);
+    $requiredBalance = bcmul($notional, bcadd('1', (string) $feeRate, 24), 24);
+    $cents = bcdiv($requiredBalance, '0.01', 0);
+    if (bccomp(bcmul($cents, '0.01', 24), $requiredBalance, 24) < 0) $cents = bcadd($cents, '1', 0);
+    return [
+        'minimum_quantity' => $minimumQuantity,
+        'quantity_step' => $step,
+        'minimum_notional_usdt' => $notional,
+        'minimum_balance_usdt' => bcmul($cents, '0.01', 2),
+        'reference_price' => (string) $price,
+    ];
+}
+
 function rankingFundingDecimal(int|float|string $value): string
 {
     if (!is_numeric($value) || !is_finite((float) $value)) throw new RuntimeException('Bitget вернул некорректную ставку funding.');

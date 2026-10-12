@@ -30,17 +30,47 @@ MARGIN_COIN = "USDT"
 
 
 class BitgetAPIError(RuntimeError):
-    pass
+    """Safe, structured failure returned by or encountered while calling Bitget."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        api_message: str | None = None,
+        method: str | None = None,
+        endpoint: str | None = None,
+        mode: str | None = None,
+        category: str = "api",
+        retryable: bool = False,
+        outcome: str = "rejected",
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code, self.api_message = code, api_message
+        self.method, self.endpoint, self.mode = method, endpoint, mode
+        self.category, self.retryable, self.outcome = category, retryable, outcome
+        self.details = dict(details or {})
 
 
 class ExchangeStateMismatch(RuntimeError):
     pass
 
 
+class OrderSizeError(ValueError):
+    """A locally detected order size that violates Bitget contract rules."""
+
+    def __init__(self, message: str, *, code: str, details: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details)
+
+
 def _safe_api_message(response: object) -> str:
     if not isinstance(response, dict) or not isinstance(response.get("msg"), str):
         return ""
     message = " ".join(response["msg"].split())
+    message = re.sub(r"(?i)(access[-_ ]?key|secret[-_ ]?key|passphrase|signature|token)(\s*[:=]\s*)\S+", r"\1\2[скрыто]", message)
     return message[:200] if message and all(ord(character) >= 32 for character in message) else ""
 
 
@@ -86,9 +116,13 @@ def _default_transport(method: str, url: str, headers: Mapping[str, str], body: 
         # cases such as a missing client order ID without exposing the body.
         if isinstance(payload, dict) and isinstance(payload.get("code"), str):
             return payload
-        raise BitgetAPIError(f"Bitget API returned HTTP {exc.code}") from exc
+        raise BitgetAPIError(f"Bitget API returned HTTP {exc.code}", category="http", details={"http_status": exc.code}) from exc
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise BitgetAPIError(f"Bitget API request failed: {type(exc).__name__}") from exc
+        raise BitgetAPIError(
+            f"Bitget API request failed: {type(exc).__name__}",
+            category="transport", retryable=True, outcome="unknown",
+            details={"exception_type": type(exc).__name__},
+        ) from exc
 
 
 class BitgetDemoAdapter:
@@ -147,8 +181,12 @@ class BitgetDemoAdapter:
         }
         try:
             response = self._transport(method.upper(), API_BASE + request_path, headers, body, self.timeout_seconds)
-        except Exception:
+        except Exception as exc:
             self._reconciled = False
+            if isinstance(exc, BitgetAPIError):
+                exc.mode = self.mode
+                exc.method = exc.method or method.upper()
+                exc.endpoint = exc.endpoint or path
             raise
         if isinstance(response, dict) and response.get("code") in allow_error_codes:
             return {"code": "00000", "data": None}
@@ -157,7 +195,12 @@ class BitgetDemoAdapter:
             code = response.get("code", "invalid") if isinstance(response, dict) else "invalid"
             detail = _safe_api_message(response)
             suffix = f": {detail}" if detail else ""
-            raise BitgetAPIError(f"Bitget demo API rejected {method.upper()} {path} (code {code}){suffix}")
+            raise BitgetAPIError(
+                f"Bitget demo API rejected {method.upper()} {path} (code {code}){suffix}",
+                code=str(code), api_message=detail or None, method=method.upper(),
+                endpoint=path, mode=self.mode, category="api_rejection",
+                retryable=str(code) in {"429", "40725", "40808", "45001"},
+            )
         data = response.get("data")
         if not isinstance(data, (dict, list, str, type(None))):
             self._reconciled = False
@@ -271,8 +314,18 @@ class BitgetDemoAdapter:
             maximum_value = public_contract.get("maxMarketOrderQty") if public_contract else None
         maximum = _decimal(maximum_value, "maximum market order quantity")
         normalized = (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
+        minimum_notional = _decimal(contract.get("minTradeUSDT", "0"), "minimum order notional", allow_zero=True)
         if normalized < minimum or normalized > maximum:
-            raise ValueError(f"Quantity for {symbol} violates Bitget contract size rules")
+            raise OrderSizeError(
+                f"Order quantity for {symbol} is outside Bitget contract limits",
+                code="ORDER_SIZE_OUT_OF_RANGE",
+                details={
+                    "symbol": symbol, "requested_quantity": str(quantity),
+                    "normalized_quantity": str(normalized), "minimum_quantity": str(minimum),
+                    "size_step": str(step), "maximum_market_quantity": str(maximum),
+                    "minimum_notional_usdt": str(minimum_notional),
+                },
+            )
         if normalized != quantity:
             self._validate_contract_size(symbol, normalized)
         return normalized

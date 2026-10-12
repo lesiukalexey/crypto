@@ -438,7 +438,22 @@ def main() -> int:
                     write_json_atomic(control_path, controls)
             except Exception as exc:
                 logging.exception("Public quote cycle failed")
-                store.event("market_data_error", {"message": str(exc)[:500]})
+                event_kind = "exchange_runtime_error" if is_portfolio and mode in {"demo", "live"} else "market_data_error"
+                error_payload = {
+                    "mode": mode, "phase": "portfolio_cycle" if is_portfolio else "market_data_cycle",
+                    "category": "exchange_runtime" if is_portfolio and mode in {"demo", "live"} else "market_data",
+                    "exception_type": type(exc).__name__, "message": str(exc)[:500],
+                    "retryable": isinstance(exc, (OSError, TimeoutError)),
+                }
+                if isinstance(exc, BitgetAPIError):
+                    error_payload.update({
+                        "category": exc.category, "error_code": exc.code,
+                        "api_message": exc.api_message, "endpoint": exc.endpoint,
+                        "method": exc.method, "mode": exc.mode or mode,
+                        "retryable": exc.retryable, "outcome": exc.outcome,
+                        **exc.details,
+                    })
+                store.event_error(event_kind, error_payload)
             time.sleep(max(0, args.interval - (time.monotonic() - began)))
         store.event("service_stopped", {"mode": mode})
         return 0

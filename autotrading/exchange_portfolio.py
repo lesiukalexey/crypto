@@ -14,7 +14,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Mapping, Sequence
 
-from .bitget_demo import ExchangeStateMismatch
+from .bitget_demo import BitgetAPIError, ExchangeStateMismatch, OrderSizeError
 from .contracts import ExecutionAdapter, OrderRequest, Position, Quote, release_digest
 from .paper import KYIV, PaperExecutor, SQLiteStateStore
 
@@ -70,6 +70,39 @@ class ExchangePortfolioExecutor:
     def _pending_orders(self) -> list[tuple[str, str]]:
         rows = self.store.db.execute("SELECT symbol,client_order_id FROM exchange_orders WHERE status IN ('submitting','uncertain','submitted','partial') ORDER BY created_at_ms").fetchall()
         return [(row["symbol"], row["client_order_id"]) for row in rows]
+
+    def _order_error_payload(self, exc: Exception, *, phase: str, strategy_id: str, leg: str, intent: str, side: str, quantity: Decimal, quote: Quote, submitted: bool) -> dict[str, Any]:
+        reference_price = quote.ask if side == "buy" else quote.bid
+        payload: dict[str, Any] = {
+            "mode": self.mode, "phase": phase, "exception_type": type(exc).__name__,
+            "message": str(exc)[:500], "retryable": False,
+            "order_submitted": submitted, "strategy_id": strategy_id,
+            "leg": leg, "intent": intent, "side": side,
+            "requested_quantity": str(quantity), "reference_price": str(reference_price),
+            "requested_notional_usdt": str(quantity * reference_price),
+        }
+        if isinstance(exc, BitgetAPIError):
+            payload.update({
+                "category": exc.category, "error_code": exc.code,
+                "api_message": exc.api_message, "endpoint": exc.endpoint,
+                "method": exc.method, "mode": exc.mode or self.mode,
+                "retryable": exc.retryable, "outcome": exc.outcome,
+                **exc.details,
+            })
+        elif getattr(exc, "code", None):
+            payload["error_code"] = str(getattr(exc, "code"))
+            payload["category"] = "contract_validation"
+            payload.update(getattr(exc, "details", {}))
+        elif isinstance(exc, ValueError):
+            payload["category"] = "local_validation"
+        elif isinstance(exc, ExchangeStateMismatch):
+            payload["category"] = "exchange_state_safety_check"
+        if isinstance(exc, OrderSizeError):
+            price = quote.ask if side == "buy" else quote.bid
+            minimum_qty = Decimal(str(exc.details.get("minimum_quantity", "0")))
+            minimum_notional = Decimal(str(exc.details.get("minimum_notional_usdt", "0")))
+            payload["estimated_minimum_order_usdt"] = str(max(minimum_qty * price, minimum_notional))
+        return payload
 
     @staticmethod
     def _fill_fee(row: Mapping[str, Any], fallback: Decimal) -> Decimal:
@@ -180,11 +213,11 @@ class ExchangePortfolioExecutor:
             if result.matched and not applied:
                 return True
             if not applied:
-                self.store.event("exchange_reconciliation_mismatch", {"mode": self.mode, "discrepancies": list(result.discrepancies)})
+                self.store.event_error("exchange_reconciliation_mismatch", {"mode": self.mode, "phase": "reconciliation", "category": "exchange_state_mismatch", "discrepancies": list(result.discrepancies), "message": "; ".join(result.discrepancies)[:500], "retryable": False})
                 return False
         result = self.adapter.reconcile(self._expected_positions(), self._pending_orders())
         if not result.matched:
-            self.store.event("exchange_reconciliation_mismatch", {"mode": self.mode, "discrepancies": list(result.discrepancies)})
+            self.store.event_error("exchange_reconciliation_mismatch", {"mode": self.mode, "phase": "reconciliation", "category": "exchange_state_mismatch", "discrepancies": list(result.discrepancies), "message": "; ".join(result.discrepancies)[:500], "retryable": False})
         return result.matched
 
     def _new_order(self, strategy_id: str, payload: dict[str, Any], symbol: str, leg: str, intent: str, side: str, quantity: Decimal, reason: str, quote: Quote) -> bool:
@@ -195,7 +228,8 @@ class ExchangePortfolioExecutor:
                     raise ValueError("Position quantity is not an exact Bitget contract step")
                 quantity = normalized
             except Exception as exc:
-                self.store.event("exchange_order_rejected", {"mode": self.mode, "reason": type(exc).__name__}, symbol, quote.timestamp_ms)
+                error = self._order_error_payload(exc, phase="contract_validation", strategy_id=strategy_id, leg=leg, intent=intent, side=side, quantity=quantity, quote=quote, submitted=False)
+                self.store.event_error("exchange_order_preflight_failed", error, symbol, quote.timestamp_ms)
                 return False
         now = int(time.time() * 1000)
         seed = f"{self.mode}:{strategy_id}:{symbol}:{leg}:{intent}:{quote.timestamp_ms}:{quantity}"
@@ -206,12 +240,21 @@ class ExchangePortfolioExecutor:
         try:
             result = self.adapter.submit(OrderRequest(symbol, side, quantity, client_id, reduce_only=intent == "close"))
         except Exception as exc:
-            self.store.db.execute("UPDATE exchange_orders SET status='uncertain',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()
-            self.store.event("exchange_order_uncertain", {"mode": self.mode, "client_order_id": client_id, "error": type(exc).__name__}, symbol, quote.timestamp_ms)
+            definite_rejection = isinstance(exc, BitgetAPIError) and exc.category == "api_rejection" and exc.outcome == "rejected"
+            definite_local_failure = isinstance(exc, (ValueError, ExchangeStateMismatch))
+            if definite_rejection or definite_local_failure:
+                self.store.db.execute("UPDATE exchange_orders SET status='rejected',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()
+                order_request_sent = isinstance(exc, BitgetAPIError) and exc.method == "POST" and exc.endpoint == "/api/v2/mix/order/place-order"
+                error = self._order_error_payload(exc, phase="exchange_submit", strategy_id=strategy_id, leg=leg, intent=intent, side=side, quantity=quantity, quote=quote, submitted=order_request_sent)
+                self.store.event_error("exchange_order_rejected" if order_request_sent else "exchange_order_preflight_failed", error, symbol, quote.timestamp_ms)
+            else:
+                self.store.db.execute("UPDATE exchange_orders SET status='uncertain',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()
+                error = self._order_error_payload(exc, phase="exchange_submit", strategy_id=strategy_id, leg=leg, intent=intent, side=side, quantity=quantity, quote=quote, submitted=True)
+                self.store.event_error("exchange_order_uncertain", error, symbol, quote.timestamp_ms)
             return False
         if not result.accepted:
             self.store.db.execute("UPDATE exchange_orders SET status='rejected',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()
-            self.store.event("exchange_order_rejected", {"mode": self.mode, "client_order_id": client_id, "message": result.message[:300]}, symbol, quote.timestamp_ms)
+            self.store.event_error("exchange_order_rejected", {"mode": self.mode, "phase": "exchange_submit", "category": "adapter_rejection", "message": result.message[:300], "retryable": False, "order_submitted": True, "strategy_id": strategy_id, "leg": leg, "intent": intent, "side": side, "requested_quantity": str(quantity)}, symbol, quote.timestamp_ms)
             return False
         if not result.order_id:
             self.store.db.execute("UPDATE exchange_orders SET status='uncertain',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()

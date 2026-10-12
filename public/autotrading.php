@@ -71,6 +71,44 @@ function timeMsLabel(mixed $value): string {
     if (!is_numeric($value) || (int) $value <= 0) return '—';
     return (new DateTimeImmutable('@' . (int) floor((int) $value / 1000)))->setTimezone(new DateTimeZone('Europe/Kyiv'))->format('d.m.Y H:i:s');
 }
+function autotradingEventTitle(array $event): string {
+    $type = (string) ($event['type'] ?? '');
+    $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+    $code = (string) ($payload['error_code'] ?? $payload['code'] ?? '');
+    if ($code === '' && preg_match('/\\bcode\\s+(\\d+)\\b/i', (string) ($payload['message'] ?? ''), $codeMatch)) $code = $codeMatch[1];
+    if (str_starts_with($code, 'ORDER_')) return 'Не пройдена проверка размера заявки';
+    if ($code !== '') return 'Ошибка Bitget API · код ' . $code;
+    return match ($type) {
+        'exchange_order_preflight_failed' => 'Ордер не прошёл проверку до отправки',
+        'exchange_order_rejected' => 'Bitget отклонил ордер',
+        'exchange_order_uncertain' => 'Неизвестно, принял ли Bitget ордер',
+        'exchange_runtime_error' => 'Ошибка Bitget или сверки счёта',
+        'exchange_reconciliation_mismatch' => 'Данные Bitget не совпали с портфелем',
+        'market_data_error' => 'Ошибка получения котировок',
+        default => $type !== '' ? $type : 'Ошибка исполнителя',
+    };
+}
+function autotradingEventExplanation(array $event): string {
+    $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+    $code = (string) ($payload['error_code'] ?? $payload['code'] ?? '');
+    if ($code === '' && preg_match('/\bcode\s+(\d+)\b/i', (string) ($payload['message'] ?? ''), $codeMatch)) $code = $codeMatch[1];
+    if ($code === 'ORDER_SIZE_OUT_OF_RANGE') {
+        $requested = (string) ($payload['requested_quantity'] ?? '—');
+        $minimum = (string) ($payload['minimum_quantity'] ?? '—');
+        $step = (string) ($payload['size_step'] ?? '—');
+        $spent = (string) ($payload['requested_notional_usdt'] ?? '—');
+        $required = (string) ($payload['estimated_minimum_order_usdt'] ?? '—');
+        return "Количество {$requested} меньше минимума {$minimum} или не соответствует шагу {$step}. Сумма заявки около {$spent} USDT; минимальный ориентир по контракту — {$required} USDT.";
+    }
+    if ($code === '40034') return 'Bitget сообщает, что параметр запроса не существует. Нужны проверка endpoint и состава параметров.';
+    if ($code !== '') return 'Bitget вернул ошибку с кодом ' . $code . '.';
+    if (($event['type'] ?? '') === 'exchange_order_uncertain') {
+        if (array_key_exists('order_submitted', $payload) && !$payload['order_submitted']) return 'Не удалось проверить состояние до отправки. Новая заявка не отправлялась; восстановите связь и повторите после проверки счёта.';
+        return 'Ответ потерян или не подтверждён. Сначала проверьте ордер и позиции через сверку; повторная отправка может создать дубликат.';
+    }
+    if (($payload['reason'] ?? '') === 'ValueError') return 'В старой записи сохранён только тип ошибки без причины. Новые события будут содержать сообщение и параметры проверки.';
+    return (string) ($payload['api_message'] ?? $payload['message'] ?? $payload['reason'] ?? 'Исполнитель сохранил ошибку; откройте технические подробности.');
+}
 function percentageLabel(int $units, int $scale): string {
     $value = number_format($units / $scale, 4, '.', '');
     return rtrim(rtrim($value, '0'), '.') . '%';
@@ -456,6 +494,14 @@ if ($message === '' && is_array($_SESSION['autotrading_flash'] ?? null)) {
 $status = ['mode' => 'paper', 'initialized' => false, 'open_positions' => 0, 'positions' => [], 'unrealized_pnl_usdt' => '0', 'recent_trades' => [], 'recent_events' => [], 'trades' => 0, 'service' => ['running' => false], 'controls' => ['entries_paused' => false, 'close_positions' => false]];
 [$statusCode, $statusOut] = runPython(['status', '--state', $statePath, '--pid-file', $pidPath, '--control', $controlPath], $root, $python);
 if ($statusCode === 0 && is_array($decoded = json_decode($statusOut, true))) $status = array_merge($status, $decoded);
+$latestExecutionError = null;
+foreach (($status['recent_events'] ?? []) as $executionEvent) {
+    $eventType = (string) ($executionEvent['type'] ?? '');
+    if (str_contains($eventType, 'error') || str_contains($eventType, 'failed') || str_contains($eventType, 'rejected') || str_contains($eventType, 'uncertain') || str_contains($eventType, 'mismatch')) {
+        $latestExecutionError = $executionEvent;
+        break;
+    }
+}
 $demoTickerSnapshot = $accountMode === 'demo' ? demoTickerCapabilitySnapshot($config) : null;
 $demoStartBlockedSymbols = [];
 if ($accountMode === 'demo') {
@@ -609,6 +655,7 @@ $postHidden = [
 <div class="stat"><span>Фактический режим</span><strong><?= h(['paper' => 'Paper', 'demo' => 'Bitget Demo', 'live' => 'Bitget Real', 'real' => 'Bitget Real'][$displayMode] ?? 'неизвестен') ?></strong></div><div class="stat"><span>Общий лимит портфеля</span><strong><?= h((string) ($status['initial_balance_usdt'] ?? ($published['execution']['starting_balance_usdt'] ?? '—'))) ?> USDT</strong></div>
 <div class="stat"><span>Реализованный результат</span><strong><?= h((string) ($status['realized_pnl_usdt'] ?? '0')) ?> USDT</strong></div><div class="stat"><span>Плавающий результат</span><strong><?= h((string) ($status['unrealized_pnl_usdt'] ?? '0')) ?> USDT</strong></div><div class="stat"><span>Закрытые сделки</span><strong><?= h((string) ($status['trades'] ?? 0)) ?></strong></div>
 </div><p class="note">PID <?= h((string) ($status['service']['pid'] ?? '—')) ?> · открытых позиций: <?= h((string) ($status['open_positions'] ?? 0)) ?></p>
+<?php if (is_array($latestExecutionError)): ?><p class="status warning"><strong><?= h(autotradingEventTitle($latestExecutionError)) ?> · <?= h((string) ($latestExecutionError['symbol'] ?? '—')) ?> · <?= h(timeMsLabel($latestExecutionError['timestamp_ms'] ?? null)) ?></strong><br><?= h(autotradingEventExplanation($latestExecutionError)) ?> · <a href="<?= h($autotradingViewUrl('events')) ?>">Все события и технические данные</a></p><?php endif; ?>
 <div class="actions"><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="stop"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Остановить процесс</button></form><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="<?= ($status['controls']['entries_paused'] ?? false) ? 'resume' : 'pause' ?>"><button class="secondary" <?= !$isLocal || !($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['controls']['entries_paused'] ?? false) ? 'Возобновить новые входы' : 'Приостановить новые входы' ?></button></form><form method="post" onsubmit="return confirm('Отправить ордера для закрытия всех открытых позиций выбранного режима?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="close"><button class="danger" <?= !$isLocal || !($status['service']['running'] ?? false) || ($status['open_positions'] ?? 0) < 1 ? 'disabled' : '' ?>><?= $accountMode === 'paper' ? 'Закрыть paper позиции' : 'Закрыть позиции на Bitget' ?></button></form></div>
 <p class="note">Остановка сохраняет позиции и журнал. Для Demo/Real закрытие проходит биржевым ордером с последующей сверкой.</p></section>
 <section class="panel"><h2>Открытые позиции</h2><?php if (($status['positions'] ?? []) === []): ?><p class="empty">Открытых позиций нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Стратегия</th><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Вход</th><th>Плавающий PnL · USDT</th><th>Последняя котировка · Киев</th></tr></thead><tbody><?php foreach ($status['positions'] as $position): ?><tr><td><?= h($portfolioNameById[(string) ($position['strategy_id'] ?? '')] ?? 'Старая стратегия') ?><?= ($position['leg'] ?? 'single') !== 'single' ? ' · ' . h((string) $position['leg']) : '' ?></td><td><?= h((string) $position['symbol']) ?></td><td><?= h((string) $position['side']) ?></td><td><?= h((string) $position['quantity']) ?></td><td><?= h((string) $position['entry_price']) ?></td><td><?= h((string) ($position['unrealized_pnl_usdt'] ?? '—')) ?></td><td><?= h(timeMsLabel($position['quote_timestamp_ms'] ?? null)) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section><?php endif; ?>
@@ -657,9 +704,9 @@ $postHidden = [
 
 <?php if ($accountMode === 'paper' && $autotradingView === 'deals'): ?><section class="panel"><h2>Последние сделки</h2><?php if (($status['recent_trades'] ?? []) === []): ?><p class="empty">Сделок пока нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Стратегия</th><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Вход · Киев</th><th>Выход · Киев</th><th>Результат · USDT</th></tr></thead><tbody><?php foreach (($status['recent_trades'] ?? []) as $trade): ?><tr><td><?= h($portfolioNameById[(string) ($trade['strategy_id'] ?? '')] ?? 'Старая стратегия') ?><?= ($trade['leg'] ?? 'single') !== 'single' ? ' · ' . h((string) $trade['leg']) : '' ?></td><td><?= h((string) $trade['symbol']) ?></td><td><?= h((string) $trade['side']) ?></td><td><?= h((string) $trade['quantity']) ?></td><td><?= h(timeMsLabel($trade['entry_ts'] ?? null)) ?></td><td><?= h(timeMsLabel($trade['exit_ts'] ?? null)) ?></td><td><?= h((string) $trade['pnl']) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section><?php endif; ?>
 
-<?php if ($autotradingView === 'events'): ?><section class="panel"><h2>События и ошибки</h2><?php if (($status['recent_events'] ?? []) === []): ?><p class="empty">Событий пока нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Время · Киев</th><th>Тип</th><th>Тикер</th><th>Данные</th></tr></thead><tbody><?php foreach ($status['recent_events'] as $event): ?><tr><td><?= h(timeMsLabel($event['timestamp_ms'] ?? null)) ?></td><td><?= h((string) $event['type']) ?></td><td><?= h((string) ($event['symbol'] ?? '—')) ?></td><td><?= h(json_encode($event['payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '') ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section><?php endif; ?>
+<?php if ($autotradingView === 'events'): ?><section class="panel"><h2>События и ошибки</h2><?php if (($status['recent_events'] ?? []) === []): ?><p class="empty">Событий пока нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Время · Киев</th><th>Событие</th><th>Тикер</th><th>Причина и что проверить</th><th>Технические данные</th></tr></thead><tbody><?php foreach ($status['recent_events'] as $event): $eventPayload = is_array($event['payload'] ?? null) ? $event['payload'] : []; ?><tr><td><?= h(timeMsLabel($event['timestamp_ms'] ?? null)) ?><?php if ((int) ($eventPayload['repeat_count'] ?? 1) > 1): ?><br><small>Повторилось <?= h((string) $eventPayload['repeat_count']) ?> раз · с <?= h(timeMsLabel($eventPayload['first_seen_ms'] ?? null)) ?></small><?php endif; ?></td><td><?= h(autotradingEventTitle($event)) ?></td><td><?= h((string) ($event['symbol'] ?? '—')) ?></td><td><?= h(autotradingEventExplanation($event)) ?></td><td><details><summary>Подробности</summary><pre><?= h(json_encode($eventPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '') ?></pre></details></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section><?php endif; ?>
 </main>
-<?php if ($autotradingView === 'deals' && !empty($status['service']['running'])): ?><script>setTimeout(()=>location.reload(),5000);</script><?php endif; ?>
+<?php if (in_array($autotradingView, ['deals', 'state', 'events'], true) && !empty($status['service']['running'])): ?><script>setTimeout(()=>location.reload(),5000);</script><?php endif; ?>
 <?php if (in_array($accountMode, ['demo', 'real'], true) && $isLocal): ?>
 <script>
 (()=>{

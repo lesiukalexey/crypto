@@ -5,6 +5,7 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 require_once dirname(__DIR__) . '/hedge_simulation.php';
 require_once __DIR__ . '/ticker-settings-lib.php';
+require_once __DIR__ . '/ranking-parameters.php';
 
 function hedge_respond(array $payload, int $status = 200): never
 {
@@ -57,6 +58,28 @@ try {
             PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => false,
         ]
     );
+    $latestPriceStatement = $pdo->prepare(
+        'SELECT bid_price, ask_price FROM quote_snapshots '
+        . 'WHERE category = ? AND symbol = ? ORDER BY received_at_utc DESC, id DESC LIMIT 1'
+    );
+    $currentPrices = [];
+    foreach ([$longSymbol, $shortSymbol] as $selectedSymbol) {
+        $latestPriceStatement->execute([$config['category'], $selectedSymbol]);
+        $currentPrices[$selectedSymbol] = $latestPriceStatement->fetch() ?: null;
+        $latestPriceStatement->closeCursor();
+        if (!is_array($currentPrices[$selectedSymbol])) throw new RuntimeException('Нет сохранённой текущей котировки для ' . $selectedSymbol . '; невозможно рассчитать минимальный размер позиции.');
+    }
+    $longRules = rankingCurrentBitgetContract($config['category'], $longSymbol);
+    $shortRules = rankingCurrentBitgetContract($config['category'], $shortSymbol);
+    $longMinimum = rankingMinimumOrderBudget($longRules, (string) $currentPrices[$longSymbol]['ask_price'], bcdiv($feePercent, '100', 24));
+    $shortMinimum = rankingMinimumOrderBudget($shortRules, (string) $currentPrices[$shortSymbol]['bid_price'], bcdiv($feePercent, '100', 24));
+    $requestedStartingBalance = $balance;
+    $minimumStartingBalance = bcadd($longMinimum['minimum_balance_usdt'], $shortMinimum['minimum_balance_usdt'], 2);
+    if (bccomp($balance, $minimumStartingBalance, 2) < 0) $balance = $minimumStartingBalance;
+    $minimumOrderRequirements = [
+        'long' => ['symbol' => $longSymbol] + $longMinimum,
+        'short' => ['symbol' => $shortSymbol] + $shortMinimum,
+    ];
     $startUtc = $startDay->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
     $endUtc = $endDay->modify('+1 day')->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
     $countStatement = $pdo->prepare(
@@ -114,6 +137,10 @@ try {
             'sampled_short_quotes' => count($quotes[$shortSymbol]),
             'long_sampling_interval' => $samplingSteps[$longSymbol],
             'short_sampling_interval' => $samplingSteps[$shortSymbol],
+            'requested_starting_balance' => (float) $requestedStartingBalance,
+            'starting_balance' => (float) $balance,
+            'minimum_starting_balance' => (float) $minimumStartingBalance,
+            'minimum_order_requirements' => $minimumOrderRequirements,
         ]);
     }
     $summary = $simulation['summary'];
@@ -134,6 +161,9 @@ try {
         'start_day' => $startValue,
         'end_day' => $endValue,
         'starting_balance' => (float) $balance,
+        'requested_starting_balance' => (float) $requestedStartingBalance,
+        'minimum_starting_balance' => (float) $minimumStartingBalance,
+        'minimum_order_requirements' => $minimumOrderRequirements,
         'fee_percent' => (float) $feePercent,
         'long_quotes' => $quoteCounts[$longSymbol],
         'short_quotes' => $quoteCounts[$shortSymbol],
