@@ -164,6 +164,7 @@ def main() -> int:
     portfolio_add.add_argument("--release", required=True)
     portfolio_add.add_argument("--kind", choices=("strategy", "hedge"), default="strategy")
     portfolio_add.add_argument("--name", default="")
+    portfolio_add.add_argument("--disabled", action="store_true", help="add the strategy without allowing executor entries")
     portfolio_remove = commands.add_parser("portfolio-remove", help="remove a flat strategy and release its portfolio allocation")
     portfolio_remove.add_argument("--state", required=True)
     portfolio_remove.add_argument("--strategy-id", required=True)
@@ -293,8 +294,8 @@ def main() -> int:
     if args.command == "portfolio-add":
         store = SQLiteStateStore(args.state)
         try:
-            digest = store.add_portfolio_strategy(load_strategy_release(args.release), kind=args.kind, name=args.name)
-            print(json.dumps({"added": True, "strategy_id": digest, "kind": args.kind}))
+            digest = store.add_portfolio_strategy(load_strategy_release(args.release), kind=args.kind, name=args.name, enabled=not args.disabled)
+            print(json.dumps({"added": True, "enabled": not args.disabled, "strategy_id": digest, "kind": args.kind}))
         finally:
             store.close()
         return 0

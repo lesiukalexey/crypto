@@ -144,7 +144,7 @@ class SQLiteStateStore:
             return self.db.execute("SELECT * FROM positions WHERE symbol=? ORDER BY entry_ts LIMIT 1", (symbol,)).fetchone()
         return self.db.execute("SELECT * FROM positions WHERE symbol=? AND strategy_id=? AND leg=?", (symbol, strategy_id, leg)).fetchone()
 
-    def add_portfolio_strategy(self, release: dict[str, Any], *, kind: str = "strategy", name: str = "") -> str:
+    def add_portfolio_strategy(self, release: dict[str, Any], *, kind: str = "strategy", name: str = "", enabled: bool = True) -> str:
         payload = PaperExecutor.validate_release(release)
         digest = release_digest(payload)
         serialized = json.dumps(payload, sort_keys=True)
@@ -153,7 +153,7 @@ class SQLiteStateStore:
             starting = payload["execution"]["starting_balance_usdt"]
             self.db.execute("INSERT INTO account(id,balance,realized_pnl,day,daily_pnl,initial_balance) VALUES(1,?,'0',?,'0',?)", (starting, datetime.now(KYIV).date().isoformat(), starting))
         self.db.execute("INSERT INTO releases(digest,payload,activated_at_ms) VALUES(?,?,?) ON CONFLICT(digest) DO NOTHING", (digest, serialized, int(time.time() * 1000)))
-        self.db.execute("INSERT INTO portfolio_strategies(strategy_id,kind,digest,payload,enabled,added_at_ms,name) VALUES(?,?,?,?,1,?,?) ON CONFLICT(strategy_id) DO UPDATE SET enabled=1,name=excluded.name", (digest, kind, digest, serialized, int(time.time() * 1000), name or payload["release_id"]))
+        self.db.execute("INSERT INTO portfolio_strategies(strategy_id,kind,digest,payload,enabled,added_at_ms,name) VALUES(?,?,?,?,?,?,?) ON CONFLICT(strategy_id) DO UPDATE SET enabled=excluded.enabled,name=excluded.name", (digest, kind, digest, serialized, int(enabled), int(time.time() * 1000), name or payload["release_id"]))
         self.db.execute("DELETE FROM portfolio_removed WHERE strategy_id=?", (digest,))
         # Each strategy keeps the budget configured in its own release. The shared
         # account is the sum of those budgets, with PnL still booked once globally.
