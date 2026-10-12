@@ -386,6 +386,10 @@ $savedFavorites = is_file($favoritesPath) ? json_decode((string) file_get_conten
 $selectedFavoriteId = trim((string) ($_GET['favorite_id'] ?? ''));
 $selectedFavorite = null;
 foreach (is_array($savedFavorites) ? $savedFavorites : [] as $candidate) if (is_array($candidate) && (string) ($candidate['id'] ?? '') === $selectedFavoriteId) { $selectedFavorite = $candidate; break; }
+$hedgePreviewLong = strtoupper(trim((string) ($_GET['hedge_long'] ?? '')));
+$hedgePreviewShort = strtoupper(trim((string) ($_GET['hedge_short'] ?? '')));
+$enabledHedgeSymbols = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
+$hasHedgePreview = $accountMode === 'demo' && $hedgePreviewLong !== '' && $hedgePreviewShort !== '' && $hedgePreviewLong !== $hedgePreviewShort && isset($enabledHedgeSymbols[$hedgePreviewLong], $enabledHedgeSymbols[$hedgePreviewShort]);
 $selectedStrategyPresent = isset($_GET['symbol']);
 $paperStrategySupported = $category === 'USDT-FUTURES' && !$includeFunding && $martingaleMode === 'none';
 $postHidden = [
@@ -408,6 +412,7 @@ $postHidden = [
 </style></head><body><main class="wrap">
 <div class="muted">Bitget · локальный исполнитель</div><h1>Автоторговля</h1>
 <nav class="nav" aria-label="Разделы"><a href="./">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="autotrading.php?mode=demo" <?= $accountMode === 'demo' ? 'aria-current="page"' : '' ?>>Автоторговля (Тест)</a><a href="autotrading.php?mode=real" <?= $accountMode === 'real' ? 'aria-current="page"' : '' ?>>Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<?php if ($hasHedgePreview): ?><section class="panel selected-summary" aria-label="Пара из хеджирования"><h2>Выбрано в хеджировании</h2><div class="grid"><div class="stat"><span>Лонг</span><strong><?= h($hedgePreviewLong) ?></strong></div><div class="stat"><span>Шорт</span><strong><?= h($hedgePreviewShort) ?></strong></div></div><p class="note">Это предварительный выбор из хеджирования. Пара ещё не добавлена в тестовый портфель.</p></section><?php endif; ?>
 <section class="panel how-to"><h2>Общий портфель</h2><ol><li>Добавьте конфигурации из «Базовых проверок» или «Избранного».</li><li>Выберите Paper, Bitget Demo или Bitget Real. Для Demo/Real портфельные стратегии копируются в отдельное состояние выбранного счёта.</li><li>Запустите портфель. Исполнитель применяет стратегические сигналы и ведёт отдельный журнал фактических биржевых исполнений.</li></ol><p class="note">Demo и Real требуют один-way режима и crossed margin в Bitget. Для Real дополнительно нужны отдельный ключ, BITGET_LIVE_TRADING_ENABLED=1 и точное подтверждение при запуске.</p></section>
 <?php if ($message !== ''): ?><p class="status <?= h($messageType) ?>" role="status"><?= h($message) ?></p><?php endif; ?>
 <?php if (!$isLocal): ?><p class="status warning">Просмотр доступен, но управление работает только при открытии страницы с этого компьютера.</p><?php endif; ?>
