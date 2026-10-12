@@ -402,21 +402,25 @@ class SQLiteStateStore:
                 if strategy is None and active:
                     strategy = json.loads(active["payload"])
                 if strategy is None:
-                    positions.append({"strategy_id": strategy_id, "leg": leg, "symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None, "quote_timestamp_ms": None})
+                    positions.append({"strategy_id": strategy_id, "leg": leg, "symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None, "quote_timestamp_ms": None, "mark_price": None, "equity_price_sensitivity_usdt": None})
                     continue
                 execution = strategy["execution"]
                 fee_rate, slip = Decimal(execution["taker_fee_rate"]), Decimal(execution["slippage_bps"]) / 10000
                 row = self.db.execute("SELECT * FROM quotes WHERE symbol=? ORDER BY ts DESC LIMIT 1", (pos["symbol"],)).fetchone()
                 pnl = None
                 ts = None
+                mark_price = None
+                price_sensitivity = None
                 if row:
                     qty, entry = Decimal(pos["quantity"]), Decimal(pos["entry_price"])
                     market = Decimal(row["ask"] if pos["side"] == "short" else row["bid"])
                     exit_price = market * (1 + slip) if pos["side"] == "short" else market * (1 - slip)
                     pnl = qty * (entry - exit_price if pos["side"] == "short" else exit_price - entry) - Decimal(pos["entry_fee"]) - qty * exit_price * fee_rate
+                    price_sensitivity = qty * (1 + slip) * (1 + fee_rate) if pos["side"] == "short" else qty * (1 - slip) * (1 - fee_rate)
+                    mark_price = market
                     unrealized += pnl
                     ts = row["ts"]
-                positions.append({"strategy_id": strategy_id, "leg": leg, "symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None if pnl is None else str(pnl), "quote_timestamp_ms": ts})
+                positions.append({"strategy_id": strategy_id, "leg": leg, "symbol": pos["symbol"], "side": pos["side"], "quantity": pos["quantity"], "entry_price": pos["entry_price"], "entry_timestamp_ms": pos["entry_ts"], "unrealized_pnl_usdt": None if pnl is None else str(pnl), "quote_timestamp_ms": ts, "mark_price": None if mark_price is None else str(mark_price), "equity_price_sensitivity_usdt": None if price_sensitivity is None else str(price_sensitivity)})
         latest = self.db.execute("SELECT type,ts FROM events ORDER BY ts DESC,id DESC LIMIT 1").fetchone()
         recent_trades = [dict(row) for row in self.db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")]
         recent_events = [{"id": row["id"], "timestamp_ms": row["ts"], "type": row["type"], "symbol": row["symbol"], "payload": json.loads(row["payload"])} for row in self.db.execute("SELECT * FROM events ORDER BY ts DESC,id DESC LIMIT 100")]
