@@ -35,7 +35,7 @@ try {
     $entryConfig = (string) ($_GET['entry_config'] ?? 'entry:10:1');
     $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
     $minTrades = $saveMode ? 3 : 1;
-    $balance = (string) ($_GET['balance'] ?? '10');
+    $balance = (string) ($_GET['balance'] ?? '100');
     $fee = (string) ($_GET['fee'] ?? '0.06');
     $martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
     $martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');

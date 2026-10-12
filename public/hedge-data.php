@@ -38,7 +38,8 @@ try {
         || $startDay->format('Y-m-d') !== $startValue || $endDay->format('Y-m-d') !== $endValue || $endDay < $startDay) {
         hedge_respond(['status' => 'error', 'message' => 'Проверьте выбранный диапазон дат.'], 400);
     }
-    $balance = (string) ($_GET['balance'] ?? '10');
+    $balance = (string) ($_GET['balance'] ?? '100');
+    $balanceAutoManaged = (string) ($_GET['balance_auto'] ?? '0') === '1';
     $feePercent = (string) ($_GET['fee'] ?? '0.06');
     $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
     if (!preg_match($decimalPattern, $balance) || (float) $balance <= 0 || (float) $balance > 1000000000
@@ -75,7 +76,7 @@ try {
     $shortMinimum = rankingMinimumOrderBudget($shortRules, (string) $currentPrices[$shortSymbol]['bid_price'], bcdiv($feePercent, '100', 24));
     $requestedStartingBalance = $balance;
     $minimumStartingBalance = bcadd($longMinimum['minimum_balance_usdt'], $shortMinimum['minimum_balance_usdt'], 2);
-    if (bccomp($balance, $minimumStartingBalance, 2) < 0) $balance = $minimumStartingBalance;
+    if ($balanceAutoManaged || bccomp($balance, $minimumStartingBalance, 2) < 0) $balance = $minimumStartingBalance;
     $minimumOrderRequirements = [
         'long' => ['symbol' => $longSymbol] + $longMinimum,
         'short' => ['symbol' => $shortSymbol] + $shortMinimum,

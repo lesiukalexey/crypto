@@ -213,7 +213,7 @@ $maxChainLoss = $params('max_chain_loss_usdt', '0');
 $strategyMaxDayLoss = $params('strategy_max_day_loss_usdt', '0');
 $exitConfirmationMode = $params('exit_confirmation_mode', 'immediate');
 $exitConfirmationSnapshots = $params('exit_confirmation_snapshots', '0');
-$balance = $params('balance', '10');
+$balance = $params('balance', '100');
 $feePercent = $params('fee', '0.06');
 $slippageBps = $params('slippage_bps', '0');
 $includeFunding = $params('include_funding', '1') === '1';
@@ -255,7 +255,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $enabled = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
             if (in_array('', $symbols, true) || count(array_unique($symbols)) !== count($symbols) || count(array_filter($symbols, static fn (string $value): bool => isset($enabled[$value]))) !== count($symbols)) throw new RuntimeException('В избранном есть тикер, который выключен или не поддерживается настройками.');
             if ($accountMode === 'demo') assertDemoSymbolsAvailable($config, $symbols);
-            $starting = decimalInput($favoriteParams['balance'] ?? '10', 'Стартовый баланс', false);
+            $starting = decimalInput($favoriteParams['balance'] ?? '100', 'Стартовый баланс', false);
             $fee = decimalInput($favoriteParams['fee'] ?? '0.06', 'Комиссия');
             $entry = $kind === 'hedge' ? 'immediate:long' : (string) ($favoriteParams['entry_config'] ?? $favoriteParams['ranking_entry_config'] ?? '');
             $exit = $kind === 'hedge' ? 'fixed:100:100' : (string) ($favoriteParams['exit_config'] ?? '');

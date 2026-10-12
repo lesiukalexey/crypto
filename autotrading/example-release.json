@@ -22,7 +22,7 @@
     "exit_confirmation_snapshots": 60
   },
   "execution": {
-    "starting_balance_usdt": "10",
+    "starting_balance_usdt": "100",
     "leverage": "1",
     "taker_fee_rate": "0.0006",
     "slippage_bps": "0",

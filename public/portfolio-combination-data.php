@@ -36,7 +36,7 @@ try {
         respond(['status' => 'error', 'message' => 'Проверьте выбранный диапазон дат.'], 400);
     }
 
-    $balance = (string) ($_GET['balance'] ?? '10');
+    $balance = (string) ($_GET['balance'] ?? '100');
     $fee = (string) ($_GET['fee'] ?? '0.06');
     if (!preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $balance) || (float) $balance <= 0 || (float) $balance > 1000000000
         || !preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $fee) || (float) $fee < 0 || (float) $fee > 5) {

@@ -117,7 +117,8 @@ if ($entrySignalMode === 'within') $defaultEntryConfig .= ':within';
 if ($entryDirectionMode === 'reverse') $defaultEntryConfig .= ':reverse';
 $entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
 $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
-$startingBalance = trim((string) ($_GET['balance'] ?? '10'));
+$balanceAutoManaged = (string) ($_GET['balance_auto'] ?? (array_key_exists('balance', $_GET) ? '0' : '1')) === '1';
+$startingBalance = trim((string) ($_GET['balance'] ?? '100'));
 $balanceAutoAdjustedFrom = null;
 $minimumOrderBudgetInfo = null;
 $feePercent = trim((string) ($_GET['fee'] ?? '0.06'));
@@ -148,13 +149,13 @@ $detailMarketAverage = is_numeric($_GET['detail_market_average'] ?? null) ? (flo
 $detailSupport = filter_var($_GET['detail_support'] ?? null, FILTER_VALIDATE_INT);
 $detailUniverseSize = filter_var($_GET['detail_universe_size'] ?? null, FILTER_VALIDATE_INT);
 $detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALIDATE_INT);
-$viewParams = ['symbol' => $symbol, 'ticker_set' => $tickerSetId, 'start_day' => $startDayInput, 'start_day_auto' => $startDayAuto ? '1' : '0', 'end_day' => $endDayInput, 'balance' => $startingBalance, 'fee' => $feePercent, 'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'slippage_bps' => $simulationCosts['slippage_bps']];
+$viewParams = ['symbol' => $symbol, 'ticker_set' => $tickerSetId, 'start_day' => $startDayInput, 'start_day_auto' => $startDayAuto ? '1' : '0', 'end_day' => $endDayInput, 'balance' => $startingBalance, 'balance_auto' => $balanceAutoManaged ? '1' : '0', 'fee' => $feePercent, 'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'slippage_bps' => $simulationCosts['slippage_bps']];
 $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
 $isCurrentDay = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
 if (!preg_match($decimalPattern, $startingBalance) || (float) $startingBalance <= 0 || (float) $startingBalance > 1000000000) {
     $error = 'Стартовый баланс должен быть больше 0 и не превышать 1 000 000 000 USDT.';
-    $startingBalance = '10';
+    $startingBalance = '100';
 }
 if (!preg_match($decimalPattern, $feePercent) || (float) $feePercent < 0 || (float) $feePercent > 5) {
     $error = 'Комиссия должна быть от 0 до 5 процентов за сторону.';
@@ -235,10 +236,11 @@ try {
                 ? (string) $latestOrderQuote['ask_price'] : (string) $latestOrderQuote['bid_price'];
             $minimumOrderBudgetInfo = rankingMinimumOrderBudget($martingaleContractRules, $referencePrice, bcdiv($feePercent, '100', 24));
             $balanceFloor = $minimumOrderBudgetInfo['minimum_balance_usdt'];
-            if (bccomp($startingBalance, $balanceFloor, 2) < 0) {
+            if ($balanceAutoManaged || bccomp($startingBalance, $balanceFloor, 2) < 0) {
                 $balanceAutoAdjustedFrom = $startingBalance;
                 $startingBalance = $balanceFloor;
                 $viewParams['balance'] = $startingBalance;
+                $viewParams['balance_auto'] = $balanceAutoManaged ? '1' : '0';
                 $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
             }
         }
@@ -1140,6 +1142,7 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 <?php if ($martingaleOrderConstraintError !== null): ?><section class="panel error"><?= h($martingaleOrderConstraintError) ?></section><?php endif; ?>
 <section class="panel"><form class="filters<?= $favoriteView ? ' favorite-readonly' : '' ?>" method="get">
 <input type="hidden" name="ticker_set" value="<?= h($tickerSetId) ?>">
+<input type="hidden" name="balance_auto" value="<?= $balanceAutoManaged ? '1' : '0' ?>">
 <input type="hidden" name="start_day_auto" value="<?= $startDayAuto ? '1' : '0' ?>">
 <input type="hidden" name="ranking_generation" id="ranking-generation" value="<?= h($rankingGeneration) ?>">
 <?php if ($combinationDetail): ?>
@@ -1171,7 +1174,7 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 </div></section>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
-<?php if ($balanceAutoAdjustedFrom !== null && is_array($minimumOrderBudgetInfo)): ?><p class="small-note">Баланс увеличен с <?= h($balanceAutoAdjustedFrom) ?> до <?= h($startingBalance) ?> USDT для выбранного тикера <?= h($symbol) ?>: минимум <?= h($minimumOrderBudgetInfo['minimum_quantity']) ?> по шагу <?= h($minimumOrderBudgetInfo['quantity_step']) ?> при цене <?= h($minimumOrderBudgetInfo['reference_price']) ?> USDT, с учётом комиссии за вход.</p><?php endif; ?>
+<?php if ($balanceAutoAdjustedFrom !== null && is_array($minimumOrderBudgetInfo)): ?><p class="small-note">Баланс <?= bccomp($startingBalance, $balanceAutoAdjustedFrom, 2) < 0 ? 'уменьшен' : 'увеличен' ?> с <?= h($balanceAutoAdjustedFrom) ?> до <?= h($startingBalance) ?> USDT для выбранного тикера <?= h($symbol) ?>: минимум <?= h($minimumOrderBudgetInfo['minimum_quantity']) ?> по шагу <?= h($minimumOrderBudgetInfo['quantity_step']) ?> при цене <?= h($minimumOrderBudgetInfo['reference_price']) ?> USDT, с учётом комиссии Bitget за вход.</p><?php endif; ?>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
 <label class="field">Проскальзывание (б.п.)<input type="number" name="slippage_bps" min="0" max="9999.9999" step="0.1" value="<?= h($simulationCosts['slippage_bps']) ?>" required></label>
 <label class="save-mode-toggle"><input type="hidden" name="include_funding" value="0"><input type="checkbox" name="include_funding" value="1" <?= $simulationCosts['include_funding'] ? 'checked' : '' ?>><span class="save-mode-detail">Учитывать funding</span></label>
@@ -1282,6 +1285,7 @@ window.addEventListener('resize',()=>{W=H*svg.clientWidth/Math.max(1,svg.clientH
 </script><?php endif; ?>
 <script>
 const filtersForm = document.querySelector('.filters');
+filtersForm.elements.namedItem('balance').addEventListener('input', () => { filtersForm.elements.namedItem('balance_auto').value = '0'; });
 const tickerSetSelect = document.querySelector('#ticker-set-select');
 tickerSetSelect?.addEventListener('change', () => {
     const params = filtersForm ? new URLSearchParams(new FormData(filtersForm)) : new URLSearchParams(location.search);

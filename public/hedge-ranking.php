@@ -84,7 +84,7 @@ try {
         hedge_ranking_respond(['status' => 'error', 'message' => 'Проверьте выбранный диапазон дат.'], 400);
     }
 
-    $balance = (string) ($_GET['balance'] ?? '10');
+    $balance = (string) ($_GET['balance'] ?? '100');
     $feePercent = (string) ($_GET['fee'] ?? '0.06');
     $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
     if (!preg_match($decimalPattern, $balance) || (float) $balance <= 0 || (float) $balance > 1000000000
