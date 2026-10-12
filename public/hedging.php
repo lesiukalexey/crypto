@@ -180,6 +180,7 @@ const localMovesPanel=document.querySelector('#local-moves-panel'),localMovesSum
 const pairRankingStatus=document.querySelector('#pair-ranking-status');
 let pairRankingRequest=0;
 let pairSelectionVersion=0;
+let rankedPairData=null;
 function updateAutoTradingDemoLink(){const link=document.querySelector('#autotrading-demo-link');if(!link||!longSymbolSelect||!shortSymbolSelect)return;const params=new URLSearchParams({mode:'demo',hedge_long:longSymbolSelect.value,hedge_short:shortSymbolSelect.value});link.href='autotrading.php?'+params.toString()}
 function syncManualPairSelection(){if(longSymbolSelect&&shortSymbolSelect){pairSelect.value=longSymbolSelect.value+'|'+shortSymbolSelect.value;updateAutoTradingDemoLink()}}
 function renderTickerRanking(select,pairs,partnerSide){
@@ -199,7 +200,16 @@ function renderTickerRanking(select,pairs,partnerSide){
     option.selected=symbol===selected;return option;
   }));
 }
-for(const select of [longSymbolSelect,shortSymbolSelect])select?.addEventListener('change',()=>{pairSelectionVersion++;syncManualPairSelection();loadData()});
+function renderCurrentTickerRankings(){
+  if(!rankedPairData){return}
+  const{symbols,pair_matrix:matrix,starting_balance:balance}=rankedPairData,index=new Map(symbols.map((symbol,i)=>[symbol,i]));
+  const longIndex=index.get(longSymbolSelect.value),shortIndex=index.get(shortSymbolSelect.value);
+  if(longIndex===undefined||shortIndex===undefined)return;
+  const makePair=(longSymbol,shortSymbol)=>{const net_pnl=matrix[index.get(longSymbol)][index.get(shortSymbol)];return{long_symbol:longSymbol,short_symbol:shortSymbol,net_pnl,return_percent:net_pnl===null?null:Number(net_pnl)/Number(balance)*100}};
+  renderTickerRanking(longSymbolSelect,symbols.filter(symbol=>symbol!==shortSymbolSelect.value).map(symbol=>makePair(symbol,shortSymbolSelect.value)),'short');
+  renderTickerRanking(shortSymbolSelect,symbols.filter(symbol=>symbol!==longSymbolSelect.value).map(symbol=>makePair(longSymbolSelect.value,symbol)),'long');
+}
+for(const select of [longSymbolSelect,shortSymbolSelect])select?.addEventListener('change',()=>{pairSelectionVersion++;syncManualPairSelection();renderCurrentTickerRankings();loadData()});
 pairSelect.addEventListener('change',()=>{pairSelectionVersion++});
 document.querySelector('#add-hedge-favorite')?.addEventListener('click',async()=>{const button=document.querySelector('#add-hedge-favorite'),status=document.querySelector('#hedge-favorite-status'),params=new URLSearchParams(new FormData(form)),[longSymbol,shortSymbol]=pairSelect.value.split('|');params.set('favorite_type','hedge');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);params.set('favorite_entry_label',`Лонг ${longSymbol} / шорт ${shortSymbol}`);params.set('favorite_exit_label','Закрытие по последнему синхронизированному снимку');params.set('favorite_name',`Лонг ${longSymbol} / шорт ${shortSymbol}`);button.disabled=true;status.textContent='Сохраняю пару…';try{const response=await fetch('favorites.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:params}),result=await response.json();if(!response.ok||result.status!=='ok')throw new Error(result.error||'Не удалось сохранить пару');button.textContent='✓ Добавлено';status.textContent='Пара добавлена в избранное.'}catch(error){status.textContent=error.message||'Не удалось сохранить пару';button.disabled=false}});
 async function loadPairRanking(selectLeader=false){
@@ -221,12 +231,12 @@ async function loadPairRanking(selectLeader=false){
     if(requestId!==pairRankingRequest)return;
     if(!response.ok||data?.status!=='ready')throw new Error(data?.message||'Не удалось рассчитать доходность пар');
     const leader=data.pairs?.find(pair=>pair.net_pnl!==null);
-    renderTickerRanking(longSymbolSelect,data.best_long_pairs,'short');
-    renderTickerRanking(shortSymbolSelect,data.best_short_pairs,'long');
-    if(leader&&selectLeader&&selectionVersion===pairSelectionVersion){longSymbolSelect.value=leader.long_symbol;shortSymbolSelect.value=leader.short_symbol;syncManualPairSelection();await loadData()}
+    rankedPairData={symbols:data.symbols,pair_matrix:data.pair_matrix,starting_balance:data.starting_balance};
+    renderCurrentTickerRankings();
+    if(leader&&selectLeader&&selectionVersion===pairSelectionVersion){longSymbolSelect.value=leader.long_symbol;shortSymbolSelect.value=leader.short_symbol;syncManualPairSelection();renderCurrentTickerRankings();await loadData()}
     else if(!leader&&selectLeader&&selectionVersion===pairSelectionVersion){statusNode.textContent='Не нашлось пары с данными для расчёта за выбранный период.'}
     const pairCount=data.ordered_pair_count??0;
-    pairRankingStatus.textContent=`Рассчитана доходность ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; тикеры отсортированы по лучшей паре. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
+    pairRankingStatus.textContent=`Рассчитана доходность ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; списки пересортировываются относительно выбранного тикера. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
   }catch(error){if(requestId===pairRankingRequest){pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message;if(selectLeader)statusNode.textContent='Не удалось рассчитать пары: '+error.message}}
 }
 function el(tag,attrs={},text=''){const node=document.createElementNS(ns,tag);for(const[key,value]of Object.entries(attrs))node.setAttribute(key,value);if(text)node.textContent=text;chart.append(node);return node}

@@ -134,6 +134,8 @@ try {
     $bestPair = null;
     $bestLongPairs = [];
     $bestShortPairs = [];
+    $symbolIndexes = array_flip($symbols);
+    $pairMatrix = array_fill(0, $symbolCount, array_fill(0, $symbolCount, null));
     $orderedPairCount = $symbolCount * ($symbolCount - 1);
     $pairIndex = 0;
     $progressInterval = max(1, (int) ceil($orderedPairCount / 100));
@@ -150,6 +152,7 @@ try {
                 'net_pnl' => $netPnl,
                 'return_percent' => $netPnl === null ? null : $netPnl / (float) $balance * 100.0,
             ];
+            $pairMatrix[$symbolIndexes[$longSymbol]][$symbolIndexes[$shortSymbol]] = $netPnl;
             if (!isset($bestLongPairs[$longSymbol]) || hedge_ranking_pair_is_better($pair, $bestLongPairs[$longSymbol])) {
                 $bestLongPairs[$longSymbol] = $pair;
             }
@@ -192,6 +195,8 @@ try {
         'starting_balance' => (float) $balance,
         'fee_percent' => (float) $feePercent,
         'ordered_pair_count' => $orderedPairCount,
+        'symbols' => $symbols,
+        'pair_matrix' => $pairMatrix,
         'pairs' => $pairs,
         'best_long_pairs' => $bestLongPairs,
         'best_short_pairs' => $bestShortPairs,
