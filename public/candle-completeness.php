@@ -43,7 +43,7 @@ try {
     }
     $enabled = $tickerSet['symbols'];
     $selected = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
-    if (!in_array($selected, $enabled, true)) {
+    if ($selected !== '' && !in_array($selected, $enabled, true)) {
         candleCompletenessRespond(['status' => 'error', 'message' => 'Пара не входит в выбранный активный список тикеров.'], 400);
     }
     if ($enabled === []) {
@@ -100,7 +100,7 @@ try {
     $incompleteSymbols = array_keys($incomplete);
     candleCompletenessRespond([
         'status' => 'ready',
-        'symbol_incomplete' => isset($incomplete[$selected]),
+        'symbol_incomplete' => $selected !== '' && isset($incomplete[$selected]),
         'all_incomplete' => $incompleteSymbols !== [],
         'incomplete_symbols' => $incompleteSymbols,
         'checked_days' => $checkedDays,

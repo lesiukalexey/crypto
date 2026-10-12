@@ -1477,14 +1477,14 @@ async function refreshCandleImportVisibility() {
     const symbol = symbolSelect.value;
     selectedSymbolImportButton.hidden = true;
     allSymbolsImportButton.hidden = true;
-    if (!start || !end || end < start || !symbol) return;
+    if (!start || !end || end < start) return;
     const tickerSet = filtersForm.querySelector('[name="ticker_set"]')?.value || '';
     const query = new URLSearchParams({start_day:start, end_day:end, symbol, ticker_set:tickerSet});
     try {
         const response = await fetch('candle-completeness.php?' + query.toString(), {headers:{Accept:'application/json'}, cache:'no-store'});
         const result = await response.json();
         if (!response.ok || result.status !== 'ready' || version !== candleCompletenessVersion) return;
-        selectedSymbolImportButton.hidden = !result.symbol_incomplete;
+        selectedSymbolImportButton.hidden = !symbol || !result.symbol_incomplete;
         allSymbolsImportButton.hidden = !result.all_incomplete;
     } catch (_) {
         // Keep import controls hidden if completeness cannot be checked.
