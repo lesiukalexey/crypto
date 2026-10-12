@@ -260,9 +260,9 @@ function render(data){
   chartTitle.textContent=netView?'Чистая доходность по хеджированию':'Хеджирование между тикерами';
   chart.setAttribute('aria-label',netView?'График чистой доходности в USDT во времени':'График доходности лонга, шорта и общего баланса');
   chartModeButtons.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartView===(netView?'net':'ticker'))));
-  chartLegend.innerHTML=series.map(item=>`<span><i class="dot" style="background:${item.color}"></i>${item.label}</span>`).join('')+(netView?'<span><i class="dot" style="background:#86a8ff"></i>Максимум за период</span><span><i class="dot" style="background:#ff7188"></i>Снижение после максимума</span><span><i class="dot" style="background:#7bdff2"></i>Локальные максимумы</span><span><i class="dot" style="background:#f3a6b3"></i>Следующие локальные минимумы</span>':'');
+  chartLegend.innerHTML=series.map(item=>`<span><i class="dot" style="background:${item.color}"></i>${item.label}</span>`).join('')+(netView?'<span><i class="dot" style="background:#86a8ff"></i>Максимум за период</span><span><i class="dot" style="background:#ff7188"></i>Снижение после максимума</span><span><i class="dot" style="background:#f2d77d"></i>Максимальное снижение на графике</span><span><i class="dot" style="background:#7bdff2"></i>Локальные максимумы</span><span><i class="dot" style="background:#f3a6b3"></i>Следующие локальные минимумы</span>':'');
   chartNote.textContent=netView
-    ? 'По вертикали — чистый результат в USDT с учётом комиссий открытия и расчётного закрытия. Синяя точка — максимум периода; цветные точки отмечают до 10 пар с крупнейшим локальным падением. Позиции открываются на первом синхронизированном снимке.'
+    ? 'По вертикали — чистый результат в USDT с учётом комиссий открытия и расчётного закрытия. Синяя точка — максимум периода, золотая линия — максимальное снижение между пиком и последующим минимумом; цветные точки отмечают локальные падения. Позиции открываются на первом синхронизированном снимке.'
     : 'Индексы начинаются около 100. Общий баланс включает комиссии открытия и предполагаемого закрытия на последнем синхронизированном снимке.';
   const points=data.points||[];
   const summary=data.summary;
@@ -284,7 +284,7 @@ function render(data){
   chart.setAttribute('preserveAspectRatio','none');
   const times=points.map(point=>Number(point.t));
   const values=points.flatMap(point=>series.map(item=>Number(point[item.key])));
-  if(netView){values.push(Number(data.summary.maximum_net_pnl),Number(data.summary.minimum_after_maximum_net_pnl));}
+  if(netView){values.push(Number(data.summary.maximum_net_pnl),Number(data.summary.minimum_after_maximum_net_pnl),Number(data.summary.maximum_drawdown_peak_net_pnl),Number(data.summary.maximum_drawdown_trough_net_pnl));}
   const xmin=Math.min(...times),xmax=Math.max(...times),ymin=Math.min(...values),ymax=Math.max(...values);
   const range=netView?Math.max(Math.abs(ymax-ymin),Math.abs(ymin),Math.abs(ymax),0.01):Math.max(1,ymax-ymin);
   const low=netView?Math.min(0,ymin-range*.12):ymin-range*.12;
@@ -320,6 +320,8 @@ function render(data){
     add('path',{d:minimumPath.join(' '),fill:'#f3a6b3',stroke:'#0b1020','stroke-width':.7,opacity:.9});
   }
   if(netView){
+    const drawdownPeakX=X(Number(summary.maximum_drawdown_peak_time_ms)),drawdownPeakY=Y(Number(summary.maximum_drawdown_peak_net_pnl));
+    const drawdownTroughX=X(Number(summary.maximum_drawdown_trough_time_ms)),drawdownTroughY=Y(Number(summary.maximum_drawdown_trough_net_pnl));
     const peakX=X(Number(summary.maximum_time_ms)),peakY=Y(Number(summary.maximum_net_pnl));
     const lowX=X(Number(summary.minimum_after_maximum_time_ms)),lowY=Y(Number(summary.minimum_after_maximum_net_pnl));
     add('line',{x1:peakX,y1:peakY,x2:lowX,y2:lowY,stroke:'#ff7188','stroke-width':2,'stroke-dasharray':'5 4'});
@@ -330,6 +332,16 @@ function render(data){
     add('circle',{cx:lowX,cy:lowY,r:5,fill:'#ff7188',stroke:'#0b1020','stroke-width':2});
     const labelX=peakX>width-pad.r-170?peakX-10:peakX+10;
     add('text',{x:labelX,y:Math.max(pad.t+14,peakY-12),'text-anchor':labelX<peakX?'end':'start',fill:'#c7d5ff','font-size':12,'font-weight':700},'Максимум '+money(summary.maximum_net_pnl));
+    add('line',{x1:drawdownPeakX,y1:drawdownPeakY,x2:drawdownTroughX,y2:drawdownTroughY,stroke:'#f2d77d','stroke-width':4,'stroke-dasharray':'8 5'});
+    const diamondPath=(x,y)=>`M${x.toFixed(1)},${(y-9).toFixed(1)}L${(x+9).toFixed(1)},${y.toFixed(1)}L${x.toFixed(1)},${(y+9).toFixed(1)}L${(x-9).toFixed(1)},${y.toFixed(1)}Z`;
+    const drawdownPeakMarker=add('path',{d:diamondPath(drawdownPeakX,drawdownPeakY),fill:'none',stroke:'#f2d77d','stroke-width':3});
+    const drawdownPeakTitle=document.createElementNS(ns,'title');
+    drawdownPeakTitle.textContent=`Пик максимального снижения ${money(summary.maximum_drawdown_peak_net_pnl)} · ${new Date(summary.maximum_drawdown_peak_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев`;
+    drawdownPeakMarker.append(drawdownPeakTitle);
+    const drawdownTroughMarker=add('path',{d:diamondPath(drawdownTroughX,drawdownTroughY),fill:'none',stroke:'#f2d77d','stroke-width':3});
+    const drawdownTroughTitle=document.createElementNS(ns,'title');
+    drawdownTroughTitle.textContent=`Минимум максимального снижения ${money(summary.maximum_drawdown_trough_net_pnl)} · ${new Date(summary.maximum_drawdown_trough_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев`;
+    drawdownTroughMarker.append(drawdownTroughTitle);
   }
   const cursor=add('line',{y1:pad.t,y2:height-pad.b,stroke:'#d5defa','stroke-dasharray':'4 5',visibility:'hidden'});
   const hit=add('rect',{x:pad.l,y:pad.t,width:width-pad.l-pad.r,height:height-pad.t-pad.b,fill:'transparent'});
