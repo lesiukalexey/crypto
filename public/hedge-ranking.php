@@ -172,58 +172,7 @@ try {
         fclose($cacheLock);
     }
     hedge_ranking_progress('В кэше рейтинга нет. В базе найдено '
-        . number_format($totalQuoteCount, 0, ',', ' ') . ' снимков котировок; готовлю загрузку всех снимков для рейтинга.');
-    $statement = $pdo->prepare(
-        'SELECT symbol, received_at_utc, bid_price, ask_price FROM quote_snapshots '
-        . 'WHERE category = ? AND symbol IN (' . implode(',', array_fill(0, count($symbols), '?')) . ') '
-        . 'AND received_at_utc >= ? AND received_at_utc < ? '
-        . 'ORDER BY symbol, received_at_utc, id'
-    );
-    $statement->execute([$config['category'], ...$symbols, $startUtc, $endUtc]);
-    $quotesBySymbol = array_fill_keys($symbols, '');
-    $quoteCounts = array_fill_keys($symbols, 0);
-    $symbolCount = count($symbols);
-    $currentSymbol = null;
-    $packedChunk = [];
-    $loadedQuotes = 0;
-    while (($row = $statement->fetch()) !== false) {
-        $symbol = (string) $row[0];
-        if ($currentSymbol !== $symbol) {
-            if ($currentSymbol !== null && $packedChunk !== []) {
-                $quotesBySymbol[$currentSymbol] .= implode('', $packedChunk);
-                $packedChunk = [];
-            }
-            $currentSymbol = $symbol;
-        }
-        if (++$quoteCounts[$symbol] > 100000) {
-            hedge_ranking_respond([
-                'status' => 'error',
-                'message' => 'Для ранжирования пар выбрано слишком много снимков. Сузьте диапазон дат и повторите расчёт.',
-            ], 400);
-        }
-        $date = new DateTimeImmutable((string) $row[1], new DateTimeZone('UTC'));
-        $packedChunk[] = pack(
-            'Pee',
-            $date->getTimestamp() * 1000 + (int) $date->format('v'),
-            (float) $row[2],
-            (float) $row[3],
-        );
-        if (count($packedChunk) >= 2048) {
-            $quotesBySymbol[$symbol] .= implode('', $packedChunk);
-            $packedChunk = [];
-        }
-        $loadedQuotes++;
-        if ($loadedQuotes % 10000 === 0) {
-            $percent = $totalQuoteCount > 0 ? min(50, max(1, (int) ceil($loadedQuotes * 50 / $totalQuoteCount))) : 50;
-            hedge_ranking_progress('Загружены снимки котировок: ' . number_format($loadedQuotes, 0, ',', ' ')
-                . ' / ' . number_format($totalQuoteCount, 0, ',', ' ') . " ({$percent}%).");
-            set_time_limit(300);
-        }
-    }
-    if ($currentSymbol !== null && $packedChunk !== []) $quotesBySymbol[$currentSymbol] .= implode('', $packedChunk);
-    $statement->closeCursor();
-    $pdo = null;
-
+        . number_format($totalQuoteCount, 0, ',', ' ') . ' снимков котировок; загружаю их по тикерам через индекс.');
     $quoteFilePath = tempnam($cacheDir, '.hedge-quotes-');
     if ($quoteFilePath === false) {
         throw new RuntimeException('Не удалось подготовить данные для Numba-расчёта.');
@@ -232,16 +181,69 @@ try {
     if ($quoteFile === false) {
         throw new RuntimeException('Не удалось открыть файл снимков для Numba-расчёта.');
     }
+    $statement = $pdo->prepare(
+        'SELECT received_at_utc, bid_price, ask_price FROM quote_snapshots '
+        . 'WHERE category = ? AND symbol = ? '
+        . 'AND received_at_utc >= ? AND received_at_utc < ? '
+        . 'ORDER BY received_at_utc, id'
+    );
+    $quoteCounts = array_fill_keys($symbols, 0);
+    $symbolCount = count($symbols);
+    $packedChunk = [];
+    $loadedQuotes = 0;
+    $quoteLimitExceeded = false;
     try {
-        foreach ($symbols as $symbol) {
-            hedge_ranking_write_all($quoteFile, $quotesBySymbol[$symbol]);
-            unset($quotesBySymbol[$symbol]);
+        foreach ($symbols as $symbolIndex => $symbol) {
+            $statement->execute([$config['category'], $symbol, $startUtc, $endUtc]);
+            while (($row = $statement->fetch()) !== false) {
+                if (++$quoteCounts[$symbol] > 100000) {
+                    $quoteLimitExceeded = true;
+                    break;
+                }
+                $date = new DateTimeImmutable((string) $row[0], new DateTimeZone('UTC'));
+                $packedChunk[] = pack(
+                    'Pee',
+                    $date->getTimestamp() * 1000 + (int) $date->format('v'),
+                    (float) $row[1],
+                    (float) $row[2],
+                );
+                if (count($packedChunk) >= 2048) {
+                    hedge_ranking_write_all($quoteFile, implode('', $packedChunk));
+                    $packedChunk = [];
+                }
+                $loadedQuotes++;
+                if ($loadedQuotes % 10000 === 0) {
+                    $percent = $totalQuoteCount > 0 ? min(50, max(1, (int) ceil($loadedQuotes * 50 / $totalQuoteCount))) : 50;
+                    hedge_ranking_progress('Загружены снимки котировок: ' . number_format($loadedQuotes, 0, ',', ' ')
+                        . ' / ' . number_format($totalQuoteCount, 0, ',', ' ') . " ({$percent}%).");
+                    set_time_limit(300);
+                }
+            }
+            set_time_limit(300);
+            $statement->closeCursor();
+            if ($packedChunk !== []) {
+                hedge_ranking_write_all($quoteFile, implode('', $packedChunk));
+                $packedChunk = [];
+            }
+            if ($quoteLimitExceeded) break;
+            $loadedPercent = $totalQuoteCount > 0 ? min(50, max(1, (int) ceil($loadedQuotes * 50 / $totalQuoteCount))) : 50;
+            hedge_ranking_progress('Загружен тикер ' . ($symbolIndex + 1) . ' / ' . $symbolCount
+                . '; снимков: ' . number_format($loadedQuotes, 0, ',', ' ') . ' / '
+                . number_format($totalQuoteCount, 0, ',', ' ') . " ({$loadedPercent}%).");
         }
     } finally {
+        $statement->closeCursor();
         fclose($quoteFile);
     }
-    unset($quotesBySymbol, $packedChunk);
-    gc_collect_cycles();
+    if ($quoteLimitExceeded) {
+        @unlink($quoteFilePath);
+        $quoteFilePath = null;
+        hedge_ranking_respond([
+            'status' => 'error',
+            'message' => 'Для ранжирования пар выбрано слишком много снимков. Сузьте диапазон дат и повторите расчёт.',
+        ], 400);
+    }
+    $pdo = null;
 
     $metadataFilePath = tempnam($cacheDir, '.hedge-meta-');
     if ($metadataFilePath === false) {
