@@ -16,7 +16,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .contracts import Position, load_strategy_release, release_digest
-from .bitget_demo import BitgetDemoAdapter, BitgetAPIError
+from .bitget_demo import BitgetDemoAdapter, BitgetAPIError, ExchangeStateMismatch
 from .bitget_production import BitgetProductionAdapter, LIVE_ORDER_ACKNOWLEDGEMENT, LIVE_SWITCH_ENV, LiveRiskSnapshot, LiveTradingDisabled
 from .exchange_portfolio import ExchangePortfolioExecutor
 from .market import BitgetPublicTickerPoller
@@ -319,12 +319,30 @@ def main() -> int:
             if source is not None: source.close()
             if target is not None: target.close()
     if args.command == "portfolio-start":
+        store = None
         try:
+            if args.mode in {"demo", "live"}:
+                store = SQLiteStateStore(args.state)
+                adapter = _make_exchange_adapter(args.mode, store, args.enable_live)
+                expected = [
+                    Position(row["symbol"], row["side"], Decimal(row["quantity"]), Decimal(row["entry_price"]))
+                    for row in store.db.execute("SELECT symbol,side,quantity,entry_price FROM positions")
+                ]
+                pending = [
+                    (row["symbol"], row["client_order_id"])
+                    for row in store.db.execute("SELECT symbol,client_order_id FROM exchange_orders WHERE status IN ('submitting','uncertain','submitted','partial')")
+                ]
+                reconciliation = adapter.reconcile(expected, pending)
+                if not reconciliation.matched:
+                    raise ExchangeStateMismatch("Exchange account does not match the local portfolio ledger: " + "; ".join(reconciliation.discrepancies))
             print(json.dumps(start_portfolio_service(args.state, args.control, args.pid_file, args.log, args.interval, mode=args.mode, enable_live=args.enable_live, risk_settings=args.risk_settings)))
             return 0
         except (ValueError, OSError, RuntimeError) as exc:
             print(f"Could not start portfolio: {exc}", file=sys.stderr)
             return 2
+        finally:
+            if store is not None:
+                store.close()
     if args.command in {"strategy-stop", "strategy-resume"}:
         store = SQLiteStateStore(args.state)
         try:

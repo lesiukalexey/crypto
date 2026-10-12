@@ -19,7 +19,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Callable, Mapping
 from urllib.parse import urlencode
 
-from .bitget_demo import API_BASE, MARGIN_COIN, PRODUCT_TYPE, BitgetAPIError, BitgetDemoAdapter, ExchangeStateMismatch, Transport, _decimal, _default_transport
+from .bitget_demo import API_BASE, MARGIN_COIN, PRODUCT_TYPE, BitgetAPIError, BitgetDemoAdapter, ExchangeStateMismatch, Transport, _decimal, _default_transport, _safe_api_message
 from .contracts import ExecutionResult, OrderRequest, Position
 
 
@@ -171,7 +171,9 @@ class BitgetProductionAdapter(BitgetDemoAdapter):
         if not isinstance(response, dict) or response.get("code") != "00000":
             self._reconciled = False
             code = response.get("code", "invalid") if isinstance(response, dict) else "invalid"
-            raise BitgetAPIError(f"Bitget production API rejected {method.upper()} {path} (code {code})")
+            detail = _safe_api_message(response)
+            suffix = f": {detail}" if detail else ""
+            raise BitgetAPIError(f"Bitget production API rejected {method.upper()} {path} (code {code}){suffix}")
         data = response.get("data")
         if not isinstance(data, (dict, list, str, type(None))):
             self._reconciled = False

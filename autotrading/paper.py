@@ -213,6 +213,8 @@ class SQLiteStateStore:
             with self.db:
                 self.db.execute("UPDATE strategy_runs SET status='stopping',stop_reason='manual' WHERE id=?", (run["id"],))
                 self.db.execute("INSERT INTO events(ts,type,payload) VALUES(?,?,?)", (now_ms, "strategy_manual_stop_requested", json.dumps({"strategy_id": strategy_id}, sort_keys=True)))
+        if not self.db.execute("SELECT 1 FROM positions WHERE strategy_id=? LIMIT 1", (strategy_id,)).fetchone():
+            self.finish_strategy_run(strategy_id, now_ms=now_ms)
 
     def resume_strategy(self, strategy_id: str) -> None:
         row = self.db.execute("SELECT enabled FROM portfolio_strategies WHERE strategy_id=?", (strategy_id,)).fetchone()

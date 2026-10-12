@@ -22,6 +22,30 @@ function signedDecimalInput(mixed $value, string $label): string {
     if (!preg_match('/^-?\d{1,12}(?:\.\d{1,24})?$/', $text) || abs((float) $text) > 1000000000) throw new RuntimeException($label . ': неверный формат.');
     return $text;
 }
+function unavailableDemoSymbols(array $config, array $symbols): array {
+    $database = is_array($config['mysql'] ?? null) ? $config['mysql'] : [];
+    $passwordName = (string) ($database['password_env'] ?? '');
+    $password = $passwordName !== '' ? (getenv($passwordName) ?: '') : '';
+    if ($password === '' || $symbols === []) return [];
+    try {
+        $pdo = new PDO(
+            sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $database['host'], $database['port'], $database['database']),
+            $database['user'], $password,
+            [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC],
+        );
+        $query = $pdo->prepare('SELECT demo_available FROM ticker_capability_checks WHERE category = ? AND symbol = ? ORDER BY demo_checked_at_utc DESC LIMIT 1');
+        $unavailable = [];
+        foreach ($symbols as $symbol) {
+            $query->execute([(string) ($config['category'] ?? 'USDT-FUTURES'), $symbol]);
+            $value = $query->fetchColumn();
+            if ($value !== false && (int) $value !== 1) $unavailable[] = $symbol;
+        }
+        return $unavailable;
+    } catch (Throwable $error) {
+        error_log('Unable to read Demo ticker availability: ' . $error->getMessage());
+        return [];
+    }
+}
 function timeMsLabel(mixed $value): string {
     if (!is_numeric($value) || (int) $value <= 0) return '—';
     return (new DateTimeImmutable('@' . (int) floor((int) $value / 1000)))->setTimezone(new DateTimeZone('Europe/Kyiv'))->format('d.m.Y H:i:s');
@@ -171,6 +195,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 : [strtoupper((string) ($favoriteParams['symbol'] ?? ''))];
             $enabled = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
             if (in_array('', $symbols, true) || count(array_unique($symbols)) !== count($symbols) || count(array_filter($symbols, static fn (string $value): bool => isset($enabled[$value]))) !== count($symbols)) throw new RuntimeException('В избранном есть тикер, который выключен или не поддерживается настройками.');
+            if ($accountMode === 'demo' && ($unavailable = unavailableDemoSymbols($config, $symbols)) !== []) throw new RuntimeException('В Bitget Demo недоступны тикеры: ' . implode(', ', $unavailable) . '. Выберите другую пару или используйте Real после отдельной проверки.');
             $starting = decimalInput($favoriteParams['balance'] ?? '10', 'Стартовый баланс', false);
             $fee = decimalInput($favoriteParams['fee'] ?? '0.06', 'Комиссия');
             $entry = $kind === 'hedge' ? 'immediate:long' : (string) ($favoriteParams['entry_config'] ?? $favoriteParams['ranking_entry_config'] ?? '');
@@ -211,6 +236,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $shortSymbol = strtoupper(trim((string) ($_POST['hedge_short'] ?? '')));
             $enabled = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
             if ($longSymbol === $shortSymbol || !isset($enabled[$longSymbol], $enabled[$shortSymbol])) throw new RuntimeException('Проверьте выбранные тикеры: лонг и шорт должны быть разными активными тикерами.');
+            if ($accountMode === 'demo' && ($unavailable = unavailableDemoSymbols($config, [$longSymbol, $shortSymbol])) !== []) throw new RuntimeException('В Bitget Demo недоступны тикеры: ' . implode(', ', $unavailable) . '. Выберите другую пару.');
             $starting = decimalInput($_POST['hedge_balance'] ?? '', 'Стартовый баланс', false);
             $fee = decimalInput($_POST['hedge_fee'] ?? '', 'Комиссия');
             foreach (($currentStatus['portfolio_strategies'] ?? []) as $existingStrategy) {
@@ -497,6 +523,10 @@ $postHidden = [
 <?php elseif ($selectedStrategyPresent): ?><section class="panel selected-summary"><h2>Выбрано в «Базовых проверках»</h2><div class="grid"><div class="stat"><span>Тикер</span><strong><?= h($symbol) ?></strong></div><div class="stat"><span>Условие входа</span><strong><?= h(entryDescription(['entry_config' => $entryConfig, 'entry_signal_mode' => $entrySignalMode, 'entry_direction_mode' => $entryDirectionMode])) ?></strong></div><div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription($exitConfig)) ?></strong></div><div class="stat"><span>Период</span><strong><?= h($startDate) ?> — <?= h($endDate) ?></strong></div></div></section>
 <?php else: ?><section class="panel"><h2>Подготовка запуска</h2><p class="empty">Выберите конфигурацию в «Базовых проверках» или пару в «Хеджировании».</p><a href="hedging.php">Открыть хеджирование</a></section><?php endif; ?>
 <?php endif; ?>
+<?php if ($autotradingView === 'deals'): ?>
+<section class="panel"><h2>Открытые позиции сейчас</h2><div class="grid"><div class="stat"><span>Открыто ног</span><strong><?= h((string) ($status['open_positions'] ?? 0)) ?></strong></div><div class="stat"><span>Общий плавающий результат</span><strong><?= h((string) ($status['unrealized_pnl_usdt'] ?? '0')) ?> USDT</strong></div></div>
+<?php if (($status['positions'] ?? []) === []): ?><p class="empty">Открытых позиций нет. Ниже отображаются только уже закрытые сделки.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Стратегия</th><th>Нога</th><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Цена входа</th><th>Плавающий PnL · USDT</th><th>Котировка · Киев</th></tr></thead><tbody><?php foreach ($status['positions'] as $position): ?><tr><td><?= h($portfolioNameById[(string) ($position['strategy_id'] ?? '')] ?? 'Старая стратегия') ?></td><td><?= h((string) ($position['leg'] ?? 'single')) ?></td><td><?= h((string) ($position['symbol'] ?? '—')) ?></td><td><?= h((string) ($position['side'] ?? '—')) ?></td><td><?= h((string) ($position['quantity'] ?? '—')) ?></td><td><?= h((string) ($position['entry_price'] ?? '—')) ?></td><td><?= h((string) ($position['unrealized_pnl_usdt'] ?? '—')) ?></td><td><?= h(timeMsLabel($position['quote_timestamp_ms'] ?? null)) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?><p class="note"><?= !empty($status['service']['running']) ? 'Данные обновляются каждые 5 секунд.' : 'Исполнитель остановлен; показано последнее локальное состояние.' ?></p></section>
+<?php endif; ?>
 <?php if ($autotradingView === 'deals' && in_array($accountMode, ['demo', 'real'], true) && $isLocal): ?>
 <section class="panel" id="autotrading-history" data-mode="<?= h($accountMode) ?>" data-symbol="<?= h($historySymbol) ?>" data-strategy-id="<?= h($historyStrategyId) ?>" data-start-date="<?= h($historyStartDate) ?>" data-end-date="<?= h($historyEndDate) ?>">
 <h2>Сделки · <?= $accountMode === 'demo' ? 'Bitget Demo и локальный Paper' : 'Bitget Real' ?></h2>
@@ -537,7 +567,7 @@ $postHidden = [
 <p class="note">Остановка сохраняет позиции и журнал. Для Demo/Real закрытие проходит биржевым ордером с последующей сверкой.</p></section>
 <section class="panel"><h2>Открытые позиции</h2><?php if (($status['positions'] ?? []) === []): ?><p class="empty">Открытых позиций нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Стратегия</th><th>Тикер</th><th>Сторона</th><th>Количество</th><th>Вход</th><th>Плавающий PnL · USDT</th><th>Последняя котировка · Киев</th></tr></thead><tbody><?php foreach ($status['positions'] as $position): ?><tr><td><?= h($portfolioNameById[(string) ($position['strategy_id'] ?? '')] ?? 'Старая стратегия') ?><?= ($position['leg'] ?? 'single') !== 'single' ? ' · ' . h((string) $position['leg']) : '' ?></td><td><?= h((string) $position['symbol']) ?></td><td><?= h((string) $position['side']) ?></td><td><?= h((string) $position['quantity']) ?></td><td><?= h((string) $position['entry_price']) ?></td><td><?= h((string) ($position['unrealized_pnl_usdt'] ?? '—')) ?></td><td><?= h(timeMsLabel($position['quote_timestamp_ms'] ?? null)) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section><?php endif; ?>
 
-<?php if ($autotradingView === 'portfolio'): ?><section class="panel"><h2>Стратегии портфеля</h2><?php if (($status['portfolio_strategies'] ?? []) === []): ?><p class="empty">Портфель пока пуст. Выберите пару или стратегию в разделе «Подготовка».</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Стратегия</th><th>Тип</th><th>Выделенный бюджет</th><th>Состояние</th><th>Тикеры</th><th>Управление</th></tr></thead><tbody><?php foreach ($status['portfolio_strategies'] as $portfolioStrategy): $strategyId = (string) ($portfolioStrategy['strategy_id'] ?? ''); $run = $activeRunByStrategy[$strategyId] ?? null; ?><tr><td><?= h((string) ($portfolioStrategy['name'] ?? $strategyId)) ?></td><td><?= ($portfolioStrategy['kind'] ?? '') === 'hedge' ? 'Хедж' : 'Стратегия' ?></td><td><?= h((string) ($run['allocation_usdt'] ?? $portfolioStrategy['allocation_usdt'] ?? '—')) ?> USDT</td><td><?= ($run['status'] ?? '') === 'stopping' ? 'Закрывает позиции и останавливается' : (!empty($portfolioStrategy['enabled']) ? 'В работе' : 'Остановлена') ?></td><td><?= h(implode(', ', array_map('strval', $portfolioStrategy['symbols'] ?? []))) ?></td><td><?php if (($run['status'] ?? '') === 'running'): ?><form class="inline" method="post" onsubmit="return confirm('Закрыть позиции и остановить только эту стратегию?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="stop-strategy"><input type="hidden" name="strategy_id" value="<?= h($strategyId) ?>"><button class="danger" <?= !$isLocal || empty($status['service']['running']) ? 'disabled' : '' ?>>Остановить</button></form><?php elseif (empty($portfolioStrategy['enabled']) && $run === null): ?><form class="inline" method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="resume-strategy"><input type="hidden" name="strategy_id" value="<?= h($strategyId) ?>"><button class="secondary" <?= !$isLocal ? 'disabled' : '' ?>>Возобновить</button></form><?php else: ?>—<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section><?php endif; ?>
+<?php if ($autotradingView === 'portfolio'): ?><section class="panel"><h2>Стратегии портфеля</h2><?php if (($status['portfolio_strategies'] ?? []) === []): ?><p class="empty">Портфель пока пуст. Выберите пару или стратегию в разделе «Подготовка».</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Стратегия</th><th>Тип</th><th>Выделенный бюджет</th><th>Состояние</th><th>Тикеры</th><th>Управление</th></tr></thead><tbody><?php foreach ($status['portfolio_strategies'] as $portfolioStrategy): $strategyId = (string) ($portfolioStrategy['strategy_id'] ?? ''); $run = $activeRunByStrategy[$strategyId] ?? null; ?><tr><td><?= h((string) ($portfolioStrategy['name'] ?? $strategyId)) ?></td><td><?= ($portfolioStrategy['kind'] ?? '') === 'hedge' ? 'Хедж' : 'Стратегия' ?></td><td><?= h((string) ($run['allocation_usdt'] ?? $portfolioStrategy['allocation_usdt'] ?? '—')) ?> USDT</td><td><?= ($run['status'] ?? '') === 'stopping' ? 'Закрывает позиции и останавливается' : (!empty($portfolioStrategy['enabled']) ? 'В работе' : 'Остановлена') ?></td><td><?= h(implode(', ', array_map('strval', $portfolioStrategy['symbols'] ?? []))) ?></td><td><?php if (($run['status'] ?? '') === 'running'): ?><form class="inline" method="post" onsubmit="return confirm('Закрыть позиции и остановить только эту стратегию?')"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="stop-strategy"><input type="hidden" name="strategy_id" value="<?= h($strategyId) ?>"><button class="danger" <?= !$isLocal || (empty($status['service']['running']) && ($status['open_positions'] ?? 0) > 0) ? 'disabled' : '' ?>>Остановить</button></form><?php elseif (empty($portfolioStrategy['enabled']) && $run === null): ?><form class="inline" method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="resume-strategy"><input type="hidden" name="strategy_id" value="<?= h($strategyId) ?>"><button class="secondary" <?= !$isLocal ? 'disabled' : '' ?>>Возобновить</button></form><?php else: ?>—<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section><?php endif; ?>
 
 <?php if ($autotradingView === 'setup'): ?>
 <?php if (is_array($published) && !$hasHedgePreview): ?><section class="panel published-summary" aria-label="Последняя добавленная стратегия"><h2>Текущая конфигурация</h2><div class="grid"><div class="stat"><span>Тикеры</span><strong><?= h(implode(', ', array_map('strval', $published['market']['symbols'] ?? [])) ?: '—') ?></strong></div><div class="stat"><span>Условие входа</span><strong><?= h(entryDescription($published['strategy'] ?? [])) ?></strong></div><div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription((string) ($published['strategy']['exit_config'] ?? ''))) ?></strong></div><div class="stat"><span>Период</span><strong><?= h((string) ($published['backtest']['start_date'] ?? '—')) ?> — <?= h((string) ($published['backtest']['end_date'] ?? '—')) ?></strong></div><div class="stat"><span>Стартовый баланс</span><strong><?= h((string) ($published['execution']['starting_balance_usdt'] ?? '—')) ?> USDT</strong></div></div></section><?php endif; ?>
@@ -583,6 +613,7 @@ $postHidden = [
 
 <?php if ($autotradingView === 'events'): ?><section class="panel"><h2>События и ошибки</h2><?php if (($status['recent_events'] ?? []) === []): ?><p class="empty">Событий пока нет.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Время · Киев</th><th>Тип</th><th>Тикер</th><th>Данные</th></tr></thead><tbody><?php foreach ($status['recent_events'] as $event): ?><tr><td><?= h(timeMsLabel($event['timestamp_ms'] ?? null)) ?></td><td><?= h((string) $event['type']) ?></td><td><?= h((string) ($event['symbol'] ?? '—')) ?></td><td><?= h(json_encode($event['payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '') ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section><?php endif; ?>
 </main>
+<?php if ($autotradingView === 'deals' && !empty($status['service']['running'])): ?><script>setTimeout(()=>location.reload(),5000);</script><?php endif; ?>
 <?php if (in_array($accountMode, ['demo', 'real'], true) && $isLocal): ?>
 <script>
 (()=>{

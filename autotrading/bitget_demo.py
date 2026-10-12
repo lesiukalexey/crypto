@@ -37,6 +37,13 @@ class ExchangeStateMismatch(RuntimeError):
     pass
 
 
+def _safe_api_message(response: object) -> str:
+    if not isinstance(response, dict) or not isinstance(response.get("msg"), str):
+        return ""
+    message = " ".join(response["msg"].split())
+    return message[:200] if message and all(ord(character) >= 32 for character in message) else ""
+
+
 @dataclass(frozen=True)
 class Reconciliation:
     matched: bool
@@ -148,7 +155,9 @@ class BitgetDemoAdapter:
         if not isinstance(response, dict) or response.get("code") != "00000":
             self._reconciled = False
             code = response.get("code", "invalid") if isinstance(response, dict) else "invalid"
-            raise BitgetAPIError(f"Bitget demo API rejected {method.upper()} {path} (code {code})")
+            detail = _safe_api_message(response)
+            suffix = f": {detail}" if detail else ""
+            raise BitgetAPIError(f"Bitget demo API rejected {method.upper()} {path} (code {code}){suffix}")
         data = response.get("data")
         if not isinstance(data, (dict, list, str, type(None))):
             self._reconciled = False

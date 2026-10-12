@@ -83,6 +83,18 @@ def initialize_schema(connection: Any) -> None:
                 KEY idx_historical_candle_coverage_range (category, symbol, interval_name, start_timestamp_ms, end_exclusive_timestamp_ms)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
         )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS ticker_capability_checks (
+                category VARCHAR(24) NOT NULL,
+                symbol VARCHAR(40) NOT NULL,
+                demo_available TINYINT(1) NOT NULL,
+                demo_reason VARCHAR(255) NOT NULL,
+                demo_checked_at_utc DATETIME(3) NOT NULL,
+                PRIMARY KEY (category, symbol, demo_checked_at_utc),
+                KEY idx_ticker_capability_latest (category, symbol, demo_checked_at_utc),
+                KEY idx_ticker_capability_demo (category, demo_available, demo_checked_at_utc)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+        )
     connection.commit()
 
 

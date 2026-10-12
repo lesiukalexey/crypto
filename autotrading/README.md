@@ -133,6 +133,16 @@ workstation, the page also checks for the protected file under
 environment variable to that machine's protected path. The CLI check is
 `python3 -m autotrading demo-reconcile --symbols BTCUSDT --state /path/to/state-demo.sqlite`.
 
+The configured ticker universe can be compared with the current Demo contract
+list and stored in MySQL with:
+
+```bash
+python3 sync_demo_availability.py --demo-env-file /protected/path/demo.env
+```
+
+Each run appends one `ticker_capability_checks` row per configured ticker. Use
+the latest `demo_checked_at_utc` value when filtering Demo-compatible symbols.
+
 ## Bitget production adapter
 
 `BitgetProductionAdapter` is separate from the Demo adapter and reads only
