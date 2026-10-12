@@ -1,16 +1,50 @@
 <?php
 declare(strict_types=1);
 
-header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store, no-cache, must-revalidate');
 require_once dirname(__DIR__) . '/hedge_simulation.php';
 require_once __DIR__ . '/ticker-settings-lib.php';
 
 function hedge_ranking_respond(array $payload, int $status = 200): never
 {
+    if ($GLOBALS['hedge_ranking_stream_started'] ?? false) {
+        echo json_encode(['type' => 'error', 'message' => $payload['message'] ?? 'Не удалось рассчитать доходность пар.'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+        @ob_flush();
+        flush();
+        exit;
+    }
+    header('Content-Type: application/json; charset=utf-8');
     http_response_code($status);
     echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
     exit;
+}
+
+function hedge_ranking_stream_start(): void
+{
+    $GLOBALS['hedge_ranking_stream_started'] = true;
+    header('Content-Type: application/x-ndjson; charset=utf-8');
+    header('X-Accel-Buffering: no');
+    while (ob_get_level() > 0) @ob_end_flush();
+    echo json_encode(['type' => 'progress', 'message' => 'Котировки для рейтинга: 0%.'], JSON_UNESCAPED_UNICODE) . "\n";
+    flush();
+}
+
+function hedge_ranking_progress(string $message): void
+{
+    echo json_encode(['type' => 'progress', 'message' => $message], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+    @ob_flush();
+    flush();
+}
+
+function hedge_ranking_result(array $payload): never
+{
+    if ($GLOBALS['hedge_ranking_stream_started'] ?? false) {
+        echo json_encode(['type' => 'result', 'data' => $payload], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+        @ob_flush();
+        flush();
+        exit;
+    }
+    hedge_ranking_respond($payload);
 }
 
 try {
@@ -68,8 +102,10 @@ try {
         . 'ORDER BY received_at_utc, id LIMIT 100001'
     );
 
+    hedge_ranking_stream_start();
     $quotesBySymbol = [];
-    foreach ($symbols as $symbol) {
+    $symbolCount = count($symbols);
+    foreach ($symbols as $symbolIndex => $symbol) {
         $statement->execute([$config['category'], $symbol, $startUtc, $endUtc]);
         $rows = [];
         while (($row = $statement->fetch()) !== false) {
@@ -87,11 +123,18 @@ try {
             ];
         }
         $quotesBySymbol[$symbol] = $rows;
+        $loaded = $symbolIndex + 1;
+        $percent = (int) floor($loaded * 50 / $symbolCount);
+        hedge_ranking_progress("Загружены котировки для тикеров: {$loaded} / {$symbolCount} ({$percent}%).");
     }
     $pdo = null;
 
     $feeRate = (float) $feePercent / 100.0;
     $pairs = [];
+    $bestPair = null;
+    $orderedPairCount = $symbolCount * ($symbolCount - 1);
+    $pairIndex = 0;
+    $progressInterval = max(1, (int) ceil($orderedPairCount / 100));
     foreach ($symbols as $longSymbol) {
         foreach ($symbols as $shortSymbol) {
             if ($longSymbol === $shortSymbol) continue;
@@ -99,14 +142,25 @@ try {
                 $quotesBySymbol[$longSymbol], $quotesBySymbol[$shortSymbol],
                 (float) $balance, $feeRate,
             );
-            $pairs[] = [
+            $pair = [
                 'long_symbol' => $longSymbol,
                 'short_symbol' => $shortSymbol,
                 'net_pnl' => $netPnl,
                 'return_percent' => $netPnl === null ? null : $netPnl / (float) $balance * 100.0,
             ];
+            if ($orderedPairCount > 2000) {
+                if ($bestPair === null || ($netPnl !== null && ($bestPair['net_pnl'] === null || $netPnl > $bestPair['net_pnl']))) $bestPair = $pair;
+            } else {
+                $pairs[] = $pair;
+            }
+            $pairIndex++;
+            if ($pairIndex % $progressInterval === 0 || $pairIndex === $orderedPairCount) {
+                $percent = 50 + (int) floor($pairIndex * 50 / $orderedPairCount);
+                hedge_ranking_progress("Рассчитаны пары: " . number_format($pairIndex, 0, ',', ' ') . ' / ' . number_format($orderedPairCount, 0, ',', ' ') . " ({$percent}%).");
+            }
         }
     }
+    if ($orderedPairCount > 2000 && $bestPair !== null) $pairs[] = $bestPair;
     usort($pairs, static function (array $left, array $right): int {
         if ($left['net_pnl'] === null || $right['net_pnl'] === null) {
             if ($left['net_pnl'] === null && $right['net_pnl'] !== null) return 1;
@@ -118,12 +172,13 @@ try {
             <=> [$right['long_symbol'], $right['short_symbol']];
     });
 
-    hedge_ranking_respond([
+    hedge_ranking_result([
         'status' => 'ready',
         'start_day' => $startValue,
         'end_day' => $endValue,
         'starting_balance' => (float) $balance,
         'fee_percent' => (float) $feePercent,
+        'ordered_pair_count' => $orderedPairCount,
         'pairs' => $pairs,
     ]);
 } catch (Throwable $error) {

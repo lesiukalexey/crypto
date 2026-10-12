@@ -28,6 +28,7 @@ $tickerSetSelection = selectedTickerSet($config, trim((string) ($_GET['ticker_se
 $tickerSetId = $tickerSetSelection['id'];
 $tickerSetOptions = $tickerSetSelection['sets'];
 $symbols = $tickerSetSelection['symbols'];
+$manualPairSelection = count($symbols) * (count($symbols) - 1) > 2000;
 $startDayAuto = (string) ($_GET['start_day_auto'] ?? '') === '1'
     || (!array_key_exists('start_day', $_GET) && !array_key_exists('day', $_GET));
 $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Kyiv'));
@@ -118,7 +119,14 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <section class="panel"><form class="filters" id="hedge-filters">
 <input type="hidden" name="ticker_set" value="<?= $h($tickerSetId) ?>">
 <input type="hidden" name="start_day_auto" value="<?= $startDayAuto ? '1' : '0' ?>">
+<?php if ($manualPairSelection): ?>
+<label class="field">Лонг<select id="hedge-long-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" <?= $symbol === $longSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select></label>
+<label class="field">Шорт<select id="hedge-short-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" <?= $symbol === $shortSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select></label>
+<input type="hidden" name="pair" id="hedge-pair" value="<?= $h($longSymbol . '|' . $shortSymbol) ?>">
+<span class="small-note" id="pair-ranking-status" role="status" aria-live="polite">После загрузки графика рассчитаю доходность всех пар: 0%.</span>
+<?php else: ?>
 <label class="field pair-field">Пара: лонг / шорт<select name="pair" id="hedge-pair" required><?php if (count($symbols) < 2): ?><option value="" selected>В списке нужны минимум два активных тикера</option><?php else: foreach ($symbols as $long): foreach ($symbols as $short): if ($long === $short) continue; $value = $long . '|' . $short; ?><option value="<?= $h($value) ?>" <?= $long === $longSymbol && $short === $shortSymbol ? 'selected' : '' ?>>Лонг <?= $h($long) ?> / шорт <?= $h($short) ?></option><?php endforeach; endforeach; endif; ?></select><span class="small-note" id="pair-ranking-status" aria-live="polite">При открытии страницы рассчитываю доходность пар…</span></label>
+<?php endif; ?>
 <?php if (!$favoriteView): ?><button type="button" id="add-hedge-favorite">☆ В избранное</button><?php endif; ?>
 <label class="field">С даты<input type="date" name="start_day" value="<?= $h($startDay) ?>" required></label>
 <label class="field">По дату<input type="date" name="end_day" value="<?= $h($endDay) ?>" required></label>
@@ -131,7 +139,7 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <section class="panel" id="local-moves-panel" hidden><div class="chart-head"><h2>Крупнейшие локальные падения</h2><label class="local-moves-scale">Длительность падения<select id="local-moves-scale" aria-label="Минимальная длительность локального падения"><option value="minimum">Минимальная (как сейчас)</option><option value="medium">Средняя длительность</option><option value="large">Большая длительность</option></select></label><span class="count" id="local-moves-summary"></span></div><p class="small-note" id="local-moves-threshold"></p><div class="table-wrap"><table class="local-moves-table"><thead><tr><th>№</th><th>Максимум · время</th><th>Максимум · USDT</th><th>Минимум · время</th><th>Минимум · USDT</th><th>Падение</th><th>Длительность</th></tr></thead><tbody id="local-moves-rows"></tbody></table></div></section>
 </main>
 <script>
-const form=document.querySelector('#hedge-filters'),pairSelect=document.querySelector('#hedge-pair'),statusNode=document.querySelector('#hedge-status'),summaryNode=document.querySelector('#hedge-summary'),chart=document.querySelector('#hedge-chart'),pointCount=document.querySelector('#hedge-point-count'),tooltip=document.querySelector('#tooltip'),ns='http://www.w3.org/2000/svg';
+const form=document.querySelector('#hedge-filters'),pairSelect=document.querySelector('#hedge-pair'),longSymbolSelect=document.querySelector('#hedge-long-symbol'),shortSymbolSelect=document.querySelector('#hedge-short-symbol'),statusNode=document.querySelector('#hedge-status'),summaryNode=document.querySelector('#hedge-summary'),chart=document.querySelector('#hedge-chart'),pointCount=document.querySelector('#hedge-point-count'),tooltip=document.querySelector('#tooltip'),ns='http://www.w3.org/2000/svg';
 const tickerSetSelect=document.querySelector('#ticker-set-select');
 tickerSetSelect?.addEventListener('change',()=>{const params=new URLSearchParams(location.search);params.set('ticker_set',tickerSetSelect.value);for(const key of ['pair','long_symbol','short_symbol','favorite_id'])params.delete(key);location.href=location.pathname+'?'+params.toString()});
 const startDayAutoInput=form.elements.namedItem('start_day_auto');
@@ -180,9 +188,44 @@ let pairRankingRequest=0;
 const pairWasRequestedOnPageLoad=<?= $pairWasRequested ? 'true' : 'false' ?>;
 let pairRankingLoaded=false;
 let pairSelectionTouched=false;
+const manualPairSelection=<?= $manualPairSelection ? 'true' : 'false' ?>;
+function syncManualPairSelection(){if(longSymbolSelect&&shortSymbolSelect)pairSelect.value=longSymbolSelect.value+'|'+shortSymbolSelect.value}
+for(const select of [longSymbolSelect,shortSymbolSelect])select?.addEventListener('change',()=>{pairSelectionTouched=true;syncManualPairSelection();loadData()});
 pairSelect.addEventListener('change',()=>{pairSelectionTouched=true});
 document.querySelector('#add-hedge-favorite')?.addEventListener('click',async()=>{const button=document.querySelector('#add-hedge-favorite'),status=document.querySelector('#hedge-favorite-status'),params=new URLSearchParams(new FormData(form)),[longSymbol,shortSymbol]=pairSelect.value.split('|');params.set('favorite_type','hedge');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);params.set('favorite_entry_label',`Лонг ${longSymbol} / шорт ${shortSymbol}`);params.set('favorite_exit_label','Закрытие по последнему синхронизированному снимку');params.set('favorite_name',`Лонг ${longSymbol} / шорт ${shortSymbol}`);button.disabled=true;status.textContent='Сохраняю пару…';try{const response=await fetch('favorites.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:params}),result=await response.json();if(!response.ok||result.status!=='ok')throw new Error(result.error||'Не удалось сохранить пару');button.textContent='✓ Добавлено';status.textContent='Пара добавлена в избранное.'}catch(error){status.textContent=error.message||'Не удалось сохранить пару';button.disabled=false}});
-async function loadPairRanking(){if(!pairSelect.value){pairRankingStatus.textContent='Для расчёта пары выберите список минимум с двумя активными тикерами.';return}const requestId=++pairRankingRequest,params=new URLSearchParams(new FormData(form));params.delete('pair');const url=new URL('hedge-ranking.php',location.href);url.search=params.toString();pairRankingStatus.textContent='Рассчитываю доходность всех пар по актуальным котировкам…';try{const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'}),data=await response.json();if(requestId!==pairRankingRequest)return;if(!response.ok||data.status!=='ready')throw new Error(data.message||'Не удалось рассчитать доходность пар');const currentPair=pairSelect.value,preserveSelection=pairRankingLoaded||pairWasRequestedOnPageLoad||pairSelectionTouched,selectedPair=preserveSelection?currentPair:(data.pairs[0]?data.pairs[0].long_symbol+'|'+data.pairs[0].short_symbol:currentPair),fragment=document.createDocumentFragment();for(const pair of data.pairs){const option=document.createElement('option'),value=pair.long_symbol+'|'+pair.short_symbol;option.value=value;option.textContent=pair.net_pnl===null?`Лонг ${pair.long_symbol} / шорт ${pair.short_symbol} · доходность нет данных`:`Лонг ${pair.long_symbol} / шорт ${pair.short_symbol} · доходность ${signed(pair.net_pnl)} USDT (${signed(pair.return_percent)}%)`;option.selected=value===selectedPair;fragment.append(option)}pairSelect.replaceChildren(fragment);if(!pairSelect.value&&pairSelect.options.length)pairSelect.selectedIndex=0;pairRankingLoaded=true;pairRankingStatus.textContent=`Отсортировано ${data.pairs.length} пар по чистой доходности за ${data.start_day} — ${data.end_day}; рейтинг пересчитывается при каждом открытии страницы.`;if(pairSelect.value!==currentPair)loadData()}catch(error){if(requestId===pairRankingRequest)pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message}}
+async function loadPairRanking(){
+  if(!pairSelect.value){pairRankingStatus.textContent='Для расчёта пары выберите список минимум с двумя активными тикерами.';return}
+  const requestId=++pairRankingRequest,params=new URLSearchParams(new FormData(form));params.delete('pair');
+  const url=new URL('hedge-ranking.php',location.href);url.search=params.toString();
+  pairRankingStatus.textContent='Загрузка котировок для рейтинга пар: 0%.';
+  try{
+    const response=await fetch(url,{headers:{Accept:'application/x-ndjson, application/json'},cache:'no-store'});
+    let data=null;
+    if(response.headers.get('content-type')?.includes('application/x-ndjson')){
+      const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
+      const consume=chunk=>{buffer+=chunk;const lines=buffer.split('\n');buffer=lines.pop();for(const line of lines){if(!line.trim())continue;const event=JSON.parse(line);if(event.type==='progress')pairRankingStatus.textContent=event.message;if(event.type==='error')throw new Error(event.message);if(event.type==='result')data=event.data}};
+      while(true){const{value,done}=await reader.read();if(done)break;consume(decoder.decode(value,{stream:true}))}
+      consume(decoder.decode());if(buffer.trim()){const event=JSON.parse(buffer);if(event.type==='error')throw new Error(event.message);if(event.type==='result')data=event.data}
+    }else{data=await response.json()}
+    if(requestId!==pairRankingRequest)return;
+    if(!response.ok||data?.status!=='ready')throw new Error(data?.message||'Не удалось рассчитать доходность пар');
+    const currentPair=pairSelect.value;
+    if(manualPairSelection){
+      const leader=data.pairs?.[0];
+      if(leader&&!pairWasRequestedOnPageLoad&&!pairSelectionTouched){longSymbolSelect.value=leader.long_symbol;shortSymbolSelect.value=leader.short_symbol;syncManualPairSelection();loadData()}
+      const pairCount=data.ordered_pair_count??0;
+      pairRankingStatus.textContent=`Рассчитана доходность ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; лучшая пара ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найдена'}.`;
+      return;
+    }
+    const preserveSelection=pairRankingLoaded||pairWasRequestedOnPageLoad||pairSelectionTouched;
+    const selectedPair=preserveSelection?currentPair:(data.pairs[0]?data.pairs[0].long_symbol+'|'+data.pairs[0].short_symbol:currentPair);
+    const fragment=document.createDocumentFragment();
+    for(const pair of data.pairs){const option=document.createElement('option'),value=pair.long_symbol+'|'+pair.short_symbol;option.value=value;option.textContent=pair.net_pnl===null?`Лонг ${pair.long_symbol} / шорт ${pair.short_symbol} · доходность нет данных`:`Лонг ${pair.long_symbol} / шорт ${pair.short_symbol} · доходность ${signed(pair.net_pnl)} USDT (${signed(pair.return_percent)}%)`;option.selected=value===selectedPair;fragment.append(option)}
+    pairSelect.replaceChildren(fragment);if(!pairSelect.value&&pairSelect.options.length)pairSelect.selectedIndex=0;
+    pairRankingLoaded=true;pairRankingStatus.textContent=`Отсортировано ${data.pairs.length} пар по чистой доходности за ${data.start_day} — ${data.end_day}; рейтинг пересчитывается при каждом открытии страницы.`;
+    if(pairSelect.value!==currentPair)loadData();
+  }catch(error){if(requestId===pairRankingRequest)pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message}
+}
 function el(tag,attrs={},text=''){const node=document.createElementNS(ns,tag);for(const[key,value]of Object.entries(attrs))node.setAttribute(key,value);if(text)node.textContent=text;chart.append(node);return node}
 function render(data){
   window.currentHedgeData=data;
@@ -300,5 +343,5 @@ function render(data){
 async function loadData(){if(!pairSelect.value){summaryNode.hidden=true;statusNode.textContent='В выбранном списке нет двух активных тикеров для хеджирования.';return}if(favoriteSymbolsDisabled){statusNode.textContent='Один из тикеров сохранённой пары не входит в список.';statusNode.classList.add('error');return}const [longSymbol,shortSymbol]=pairSelect.value.split('|'),params=new URLSearchParams(new FormData(form));if(favoriteView)for(const[key,value]of Object.entries(favoriteSavedParams))params.set(key,String(value));params.delete('pair');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);const url=new URL('hedge-data.php',location.href);url.search=params.toString();statusNode.textContent='Загружаю и сопоставляю снимки…';statusNode.classList.remove('error');chart.replaceChildren();try{const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'}),data=await response.json();if(!response.ok||data.status==='error')throw new Error(data.message||'Не удалось загрузить данные пары');if(data.status!=='ready'){render(data);return}render(data);const next=new URL(location.href);for(const[key,value]of params)next.searchParams.set(key,value);next.searchParams.set('pair',pairSelect.value);next.searchParams.set('chart_view',chartView);if(favoriteView)next.searchParams.set('favorite_id',favoriteId);history.replaceState(null,'',next);const basicParams=new URLSearchParams(location.search);for(const key of ['long_symbol','short_symbol','pair','favorite_id','chart_view'])basicParams.delete(key);for(const key of ['start_day','end_day','balance','fee'])basicParams.set(key,params.get(key));document.querySelector('.view-nav a[href^="./?"]').href='./?'+basicParams.toString()}catch(error){summaryNode.hidden=true;statusNode.textContent=error.message;statusNode.classList.add('error')}}
 function setChartView(nextView){chartView=nextView;chartModeButtons.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartView===chartView)));const next=new URL(location.href);next.searchParams.set('chart_view',chartView);history.replaceState(null,'',next);if(window.currentHedgeData)render(window.currentHedgeData)}
 chartModeButtons.forEach(button=>button.addEventListener('click',()=>setChartView(button.dataset.chartView)));
-localMovesScale.addEventListener('change',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});form.addEventListener('submit',event=>{event.preventDefault();loadPairRanking();loadData()});form.addEventListener('change',event=>{if(event.target.name==='start_day'){startDayAutoInput.value='0';const next=new URL(location.href);next.searchParams.set('start_day',event.target.value);next.searchParams.set('start_day_auto','0');history.replaceState(null,'',next)}if(event.target===pairSelect){loadData();return}loadPairRanking();loadData()});window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});if(!favoriteView)loadPairRanking();loadData();
+localMovesScale.addEventListener('change',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});form.addEventListener('submit',event=>{event.preventDefault();loadData().then(()=>loadPairRanking())});form.addEventListener('change',event=>{if(event.target.name==='start_day'){startDayAutoInput.value='0';const next=new URL(location.href);next.searchParams.set('start_day',event.target.value);next.searchParams.set('start_day_auto','0');history.replaceState(null,'',next)}if(event.target===pairSelect||event.target===longSymbolSelect||event.target===shortSymbolSelect){if(event.target===pairSelect)loadData();return}loadData().then(()=>loadPairRanking())});window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});loadData().then(()=>{if(!favoriteView)loadPairRanking()});
 </script></body></html>
