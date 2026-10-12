@@ -188,7 +188,7 @@ const manualPairSelection=<?= $manualPairSelection ? 'true' : 'false' ?>;
 function syncManualPairSelection(){if(longSymbolSelect&&shortSymbolSelect)pairSelect.value=longSymbolSelect.value+'|'+shortSymbolSelect.value}
 function renderTickerRanking(select,pairs,partnerSide){
   if(!select||!Array.isArray(pairs))return;
-  const selected=select.value,bySymbol=new Map(pairs.map(pair=>[pair[partnerSide==='short'?'long_symbol':'short_symbol',pair]));
+  const selected=select.value,bySymbol=new Map(pairs.map(pair=>[pair[partnerSide==='short'?'long_symbol':'short_symbol'],pair]));
   const options=[...select.options].map(option=>({symbol:option.value,pair:bySymbol.get(option.value)}));
   options.sort((left,right)=>{
     const leftValue=left.pair?.net_pnl,rightValue=right.pair?.net_pnl;
@@ -199,7 +199,8 @@ function renderTickerRanking(select,pairs,partnerSide){
   select.replaceChildren(...options.map(({symbol,pair})=>{
     const option=document.createElement('option');option.value=symbol;
     const partnerLabel=partnerSide==='short'?'шорт':'лонг';
-    option.textContent=pair?`${symbol} · лучший ${partnerLabel} ${partnerSide==='short'?pair.short_symbol:pair.long_symbol} · ${pair.net_pnl===null?'нет данных':signed(pair.net_pnl)+' USDT'}`:symbol;
+    const returnLabel=pair?.net_pnl===null||pair?.net_pnl===undefined?'нет данных':`${signed(pair.net_pnl)} USDT (${signed(pair.return_percent)}%)`;
+    option.textContent=pair?`${symbol} · лучший ${partnerLabel} ${partnerSide==='short'?pair.short_symbol:pair.long_symbol} · доходность ${returnLabel}`:symbol;
     option.selected=symbol===selected;return option;
   }));
 }
