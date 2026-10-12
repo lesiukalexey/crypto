@@ -22,6 +22,10 @@ function simulate_cross_hedge(
     $lastPoint = null;
     $maximumPoint = null;
     $minimumAfterMaximumPoint = null;
+    $runningPeakPoint = null;
+    $maximumDrawdownPeakPoint = null;
+    $maximumDrawdownTroughPoint = null;
+    $maximumDrawdown = 0.0;
     $alignedPoints = 0;
     $chartPointLimit = 25000;
     $chartRangeStarts = [];
@@ -101,6 +105,20 @@ function simulate_cross_hedge(
         } elseif ($point['net_pnl'] < $minimumAfterMaximumPoint['net_pnl']) {
             $minimumAfterMaximumPoint = $point;
         }
+        if ($runningPeakPoint === null || $point['net_pnl'] > $runningPeakPoint['net_pnl']) {
+            $runningPeakPoint = $point;
+            if ($maximumDrawdown === 0.0) {
+                $maximumDrawdownPeakPoint = $point;
+                $maximumDrawdownTroughPoint = $point;
+            }
+        } else {
+            $drawdown = $runningPeakPoint['net_pnl'] - $point['net_pnl'];
+            if ($drawdown > $maximumDrawdown) {
+                $maximumDrawdown = $drawdown;
+                $maximumDrawdownPeakPoint = $runningPeakPoint;
+                $maximumDrawdownTroughPoint = $point;
+            }
+        }
         $alignedPoints++;
         $bucket = $chartEndMs > $chartStartMs
             ? (int) floor(($timestampMs - $chartStartMs) * ($chartPointLimit - 1) / ($chartEndMs - $chartStartMs))
@@ -137,6 +155,13 @@ function simulate_cross_hedge(
             'decline_after_maximum' => $maximumPoint['net_pnl'] - $minimumAfterMaximumPoint['net_pnl'],
             'decline_after_maximum_percent' => ($maximumPoint['net_pnl'] - $minimumAfterMaximumPoint['net_pnl'])
                 / $startingBalance * 100.0,
+            'maximum_drawdown' => $maximumDrawdown,
+            'maximum_drawdown_percent' => $maximumDrawdown
+                / ($startingBalance + $maximumDrawdownPeakPoint['net_pnl']) * 100.0,
+            'maximum_drawdown_peak_net_pnl' => $maximumDrawdownPeakPoint['net_pnl'],
+            'maximum_drawdown_peak_time_ms' => $maximumDrawdownPeakPoint['t'],
+            'maximum_drawdown_trough_net_pnl' => $maximumDrawdownTroughPoint['net_pnl'],
+            'maximum_drawdown_trough_time_ms' => $maximumDrawdownTroughPoint['t'],
             'entry_fees' => $entry['long_entry_fee'] + $entry['short_entry_fee'],
             'estimated_exit_fees' => (
                 (float) $last['long_close'] * $entry['long_quantity']

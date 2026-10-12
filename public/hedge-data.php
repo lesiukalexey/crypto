@@ -150,7 +150,8 @@ try {
     foreach ([
         'long_notional', 'short_notional', 'long_quantity', 'short_quantity', 'long_pnl', 'short_pnl',
         'net_pnl', 'ending_balance', 'maximum_net_pnl', 'minimum_after_maximum_net_pnl',
-        'decline_after_maximum', 'decline_after_maximum_percent',
+        'decline_after_maximum', 'decline_after_maximum_percent', 'maximum_drawdown',
+        'maximum_drawdown_percent', 'maximum_drawdown_peak_net_pnl', 'maximum_drawdown_trough_net_pnl',
     ] as $field) {
         $summary[$field] = round($summary[$field], 10);
     }
