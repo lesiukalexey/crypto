@@ -157,6 +157,10 @@ if (!preg_match($decimalPattern, $startingBalance) || (float) $startingBalance <
     $error = 'Стартовый баланс должен быть больше 0 и не превышать 1 000 000 000 USDT.';
     $startingBalance = '100';
 }
+$rankingStartingBalance = trim((string) ($_GET['ranking_balance'] ?? $startingBalance));
+if (!preg_match($decimalPattern, $rankingStartingBalance) || (float) $rankingStartingBalance <= 0 || (float) $rankingStartingBalance > 1000000000) {
+    $rankingStartingBalance = $startingBalance;
+}
 if (!preg_match($decimalPattern, $feePercent) || (float) $feePercent < 0 || (float) $feePercent > 5) {
     $error = 'Комиссия должна быть от 0 до 5 процентов за сторону.';
     $feePercent = '0.06';
@@ -1143,6 +1147,7 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 <section class="panel"><form class="filters<?= $favoriteView ? ' favorite-readonly' : '' ?>" method="get">
 <input type="hidden" name="ticker_set" value="<?= h($tickerSetId) ?>">
 <input type="hidden" name="balance_auto" value="<?= $balanceAutoManaged ? '1' : '0' ?>">
+<input type="hidden" name="ranking_balance" value="<?= h($rankingStartingBalance) ?>">
 <input type="hidden" name="start_day_auto" value="<?= $startDayAuto ? '1' : '0' ?>">
 <input type="hidden" name="ranking_generation" id="ranking-generation" value="<?= h($rankingGeneration) ?>">
 <?php if ($combinationDetail): ?>
@@ -1174,6 +1179,7 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 </div></section>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
+<p class="small-note" id="common-ranking-balance-note">Общий рейтинг всех тикеров рассчитывается от единого стартового баланса <?= h($rankingStartingBalance) ?> USDT<?= bccomp($rankingStartingBalance, $startingBalance, 2) !== 0 ? '; баланс выбранного тикера для симуляции — ' . h($startingBalance) . ' USDT' : '' ?>.</p>
 <?php if ($balanceAutoAdjustedFrom !== null && is_array($minimumOrderBudgetInfo)): ?><p class="small-note">Баланс <?= bccomp($startingBalance, $balanceAutoAdjustedFrom, 2) < 0 ? 'уменьшен' : 'увеличен' ?> с <?= h($balanceAutoAdjustedFrom) ?> до <?= h($startingBalance) ?> USDT для выбранного тикера <?= h($symbol) ?>: минимум <?= h($minimumOrderBudgetInfo['minimum_quantity']) ?> по шагу <?= h($minimumOrderBudgetInfo['quantity_step']) ?> при цене <?= h($minimumOrderBudgetInfo['reference_price']) ?> USDT, с учётом комиссии Bitget за вход.</p><?php endif; ?>
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= h($feePercent) ?>" required></label>
 <label class="field">Проскальзывание (б.п.)<input type="number" name="slippage_bps" min="0" max="9999.9999" step="0.1" value="<?= h($simulationCosts['slippage_bps']) ?>" required></label>
@@ -1285,7 +1291,12 @@ window.addEventListener('resize',()=>{W=H*svg.clientWidth/Math.max(1,svg.clientH
 </script><?php endif; ?>
 <script>
 const filtersForm = document.querySelector('.filters');
-filtersForm.elements.namedItem('balance').addEventListener('input', () => { filtersForm.elements.namedItem('balance_auto').value = '0'; });
+filtersForm.elements.namedItem('balance').addEventListener('input', event => {
+    filtersForm.elements.namedItem('balance_auto').value = '0';
+    filtersForm.elements.namedItem('ranking_balance').value = event.currentTarget.value;
+    const note = document.querySelector('#common-ranking-balance-note');
+    if (note && event.currentTarget.value !== '') note.textContent = `Общий рейтинг всех тикеров рассчитывается от единого стартового баланса ${Number(event.currentTarget.value).toLocaleString('ru-RU', {minimumFractionDigits:2, maximumFractionDigits:2})} USDT.`;
+});
 const tickerSetSelect = document.querySelector('#ticker-set-select');
 tickerSetSelect?.addEventListener('change', () => {
     const params = filtersForm ? new URLSearchParams(new FormData(filtersForm)) : new URLSearchParams(location.search);
@@ -1386,6 +1397,7 @@ function renderTickerBestResults(items) {
 async function loadCachedTickerBestResults() {
     try {
         const params = new URLSearchParams(new FormData(filtersForm));
+        params.set('balance', params.get('ranking_balance') || params.get('balance') || '100');
         const response = await fetch('cached-strategy-symbols.php?' + params.toString(), {headers:{Accept:'application/json'}, cache:'no-store'});
         const result = await response.json();
         if (response.ok && result.status === 'ready' && Array.isArray(result.symbols)) {
@@ -2444,6 +2456,7 @@ async function sortSymbolsByProfit() {
     setRefreshProgress(0, 'Расчет рейтинга пар…');
     try {
         const params = new URLSearchParams(new FormData(filtersForm));
+        params.set('balance', params.get('ranking_balance') || params.get('balance') || '100');
         let ranking;
         let retryCancelled = true;
         do {
@@ -2861,6 +2874,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
     let sawPending = false;
     try {
         const params = new URLSearchParams(new FormData(filtersForm));
+        params.set('balance', params.get('ranking_balance') || params.get('balance') || '100');
         let retryCancelled = !cachedOnly;
         if (!cachedOnly && !showingSavedResult) history.replaceState(null, '', location.pathname + '?' + params.toString());
         let ranking;
