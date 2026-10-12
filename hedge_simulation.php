@@ -238,6 +238,87 @@ function cross_hedge_net_pnl(
     return $grossPnl - $entryFees - $exitFees;
 }
 
+/** Return the same final PnL as cross_hedge_net_pnl for 24-byte packed quote streams. */
+function cross_hedge_net_pnl_packed(
+    string $longRows,
+    string $shortRows,
+    float $startingBalance,
+    float $feeRate,
+    int $maxQuoteAgeSeconds = 120,
+): ?float {
+    $longCount = intdiv(strlen($longRows), 24);
+    $shortCount = intdiv(strlen($shortRows), 24);
+    if ($longCount === 0 || $shortCount === 0) return null;
+
+    $maxAgeMs = $maxQuoteAgeSeconds * 1000;
+    $longCursor = 0;
+    $shortCursor = 0;
+    $longEntry = null;
+    $shortEntry = null;
+    $longQuote = null;
+    $shortQuote = null;
+    while ($longCursor < $longCount || $shortCursor < $shortCount) {
+        $nextLong = $longCursor < $longCount ? hedge_unpack_packed_quote($longRows, $longCursor) : null;
+        $nextShort = $shortCursor < $shortCount ? hedge_unpack_packed_quote($shortRows, $shortCursor) : null;
+        $timestampMs = min($nextLong['timestamp'] ?? PHP_INT_MAX, $nextShort['timestamp'] ?? PHP_INT_MAX);
+        while ($nextLong !== null && $nextLong['timestamp'] <= $timestampMs) {
+            $longQuote = $nextLong;
+            $longCursor++;
+            $nextLong = $longCursor < $longCount ? hedge_unpack_packed_quote($longRows, $longCursor) : null;
+        }
+        while ($nextShort !== null && $nextShort['timestamp'] <= $timestampMs) {
+            $shortQuote = $nextShort;
+            $shortCursor++;
+            $nextShort = $shortCursor < $shortCount ? hedge_unpack_packed_quote($shortRows, $shortCursor) : null;
+        }
+        if ($longQuote === null || $shortQuote === null) continue;
+        if ($timestampMs - $longQuote['timestamp'] <= $maxAgeMs
+            && $timestampMs - $shortQuote['timestamp'] <= $maxAgeMs
+            && min($longQuote['bid'], $longQuote['ask'], $shortQuote['bid'], $shortQuote['ask']) > 0.0) {
+            $longEntry = $longQuote;
+            $shortEntry = $shortQuote;
+            break;
+        }
+    }
+    if ($longEntry === null || $shortEntry === null) return null;
+
+    $longIndex = $longCount - 1;
+    $shortIndex = $shortCount - 1;
+    $lastLong = hedge_unpack_packed_quote($longRows, $longIndex);
+    $lastShort = hedge_unpack_packed_quote($shortRows, $shortIndex);
+    while ($longIndex >= 0 || $shortIndex >= 0) {
+        $timestampMs = max($lastLong['timestamp'] ?? PHP_INT_MIN, $lastShort['timestamp'] ?? PHP_INT_MIN);
+        if ($lastLong !== null && $lastShort !== null
+            && $timestampMs - $lastLong['timestamp'] <= $maxAgeMs
+            && $timestampMs - $lastShort['timestamp'] <= $maxAgeMs
+            && min($lastLong['bid'], $lastLong['ask'], $lastShort['bid'], $lastShort['ask']) > 0.0) break;
+        while ($longIndex >= 0 && $lastLong['timestamp'] === $timestampMs) {
+            $lastLong = --$longIndex >= 0 ? hedge_unpack_packed_quote($longRows, $longIndex) : null;
+        }
+        while ($shortIndex >= 0 && $lastShort['timestamp'] === $timestampMs) {
+            $lastShort = --$shortIndex >= 0 ? hedge_unpack_packed_quote($shortRows, $shortIndex) : null;
+        }
+    }
+    if ($lastLong === null || $lastShort === null) return null;
+
+    $allocation = $startingBalance / 2.0;
+    $longNotional = $allocation / (1.0 + $feeRate);
+    $shortNotional = $allocation / (1.0 + $feeRate);
+    $longQuantity = $longNotional / $longEntry['ask'];
+    $shortQuantity = $shortNotional / $shortEntry['bid'];
+    $entryFees = ($longNotional + $shortNotional) * $feeRate;
+    $grossPnl = ($lastLong['bid'] - $longEntry['ask']) * $longQuantity
+        + ($shortEntry['bid'] - $lastShort['ask']) * $shortQuantity;
+    $exitFees = ($lastLong['bid'] * $longQuantity + $lastShort['ask'] * $shortQuantity) * $feeRate;
+    return $grossPnl - $entryFees - $exitFees;
+}
+
+function hedge_unpack_packed_quote(string $rows, int $index): array
+{
+    $values = unpack('Jtimestamp/Ebid/Eask', $rows, $index * 24);
+    return ['timestamp' => (int) $values['timestamp'], 'bid' => (float) $values['bid'], 'ask' => (float) $values['ask']];
+}
+
 function hedge_timestamp_ms(array $row): int
 {
     if (isset($row['_timestamp_ms'])) return (int) $row['_timestamp_ms'];

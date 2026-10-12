@@ -60,6 +60,8 @@ function hedge_ranking_result(array $payload): never
 }
 
 try {
+    // Large ticker sets can contain several million quote snapshots.
+    set_time_limit(300);
     $root = dirname(__DIR__);
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $tickerSetId = trim((string) ($_GET['ticker_set'] ?? ''));
@@ -104,6 +106,7 @@ try {
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_NUM,
             PDO::ATTR_EMULATE_PREPARES => false,
+            PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => false,
         ]
     );
     $startUtc = $startDay->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
@@ -115,14 +118,16 @@ try {
     }
     hedge_ranking_stream_start();
     $revisionStatement = $pdo->prepare(
-        'SELECT symbol, MAX(id) AS max_id FROM quote_snapshots '
+        'SELECT symbol, MAX(id) AS max_id, COUNT(*) AS quote_count FROM quote_snapshots '
         . 'WHERE category = ? AND symbol IN (' . implode(',', array_fill(0, count($symbols), '?')) . ') '
         . 'AND received_at_utc >= ? AND received_at_utc < ? GROUP BY symbol ORDER BY symbol'
     );
     $revisionStatement->execute([$config['category'], ...$symbols, $startUtc, $endUtc]);
     $quoteRevision = [];
+    $totalQuoteCount = 0;
     foreach ($revisionStatement->fetchAll(PDO::FETCH_ASSOC) as $row) {
         $quoteRevision[(string) $row['symbol']] = (int) $row['max_id'];
+        $totalQuoteCount += (int) $row['quote_count'];
     }
     $cacheKey = hash('sha256', json_encode([
         'hedge-ranking-v1', $config['category'], $symbols, $startValue, $endValue,
@@ -150,35 +155,54 @@ try {
     }
     hedge_ranking_progress('Рейтинг в кэше не найден. Загружаю котировки: 0%.');
     $statement = $pdo->prepare(
-        'SELECT received_at_utc, bid_price, ask_price FROM quote_snapshots '
-        . 'WHERE category = ? AND symbol = ? AND received_at_utc >= ? AND received_at_utc < ? '
-        . 'ORDER BY received_at_utc, id LIMIT 100001'
+        'SELECT symbol, received_at_utc, bid_price, ask_price FROM quote_snapshots '
+        . 'WHERE category = ? AND symbol IN (' . implode(',', array_fill(0, count($symbols), '?')) . ') '
+        . 'AND received_at_utc >= ? AND received_at_utc < ? '
+        . 'ORDER BY symbol, received_at_utc, id'
     );
-
-    $quotesBySymbol = [];
+    $statement->execute([$config['category'], ...$symbols, $startUtc, $endUtc]);
+    $quotesBySymbol = array_fill_keys($symbols, '');
+    $quoteCounts = array_fill_keys($symbols, 0);
     $symbolCount = count($symbols);
-    foreach ($symbols as $symbolIndex => $symbol) {
-        $statement->execute([$config['category'], $symbol, $startUtc, $endUtc]);
-        $rows = [];
-        while (($row = $statement->fetch()) !== false) {
-            if (count($rows) === 100000) {
-                hedge_ranking_respond([
-                    'status' => 'error',
-                    'message' => 'Для ранжирования пар выбрано слишком много снимков. Сузьте диапазон дат и повторите расчёт.',
-                ], 400);
+    $currentSymbol = null;
+    $packedChunk = [];
+    $loadedQuotes = 0;
+    while (($row = $statement->fetch()) !== false) {
+        $symbol = (string) $row[0];
+        if ($currentSymbol !== $symbol) {
+            if ($currentSymbol !== null && $packedChunk !== []) {
+                $quotesBySymbol[$currentSymbol] .= implode('', $packedChunk);
+                $packedChunk = [];
             }
-            $date = new DateTimeImmutable((string) $row[0], new DateTimeZone('UTC'));
-            $rows[] = [
-                $date->getTimestamp() * 1000 + (int) $date->format('v'),
-                (float) $row[1],
-                (float) $row[2],
-            ];
+            $currentSymbol = $symbol;
         }
-        $quotesBySymbol[$symbol] = $rows;
-        $loaded = $symbolIndex + 1;
-        $percent = (int) floor($loaded * 50 / $symbolCount);
-        hedge_ranking_progress("Загружены котировки для тикеров: {$loaded} / {$symbolCount} ({$percent}%).");
+        if (++$quoteCounts[$symbol] > 100000) {
+            hedge_ranking_respond([
+                'status' => 'error',
+                'message' => 'Для ранжирования пар выбрано слишком много снимков. Сузьте диапазон дат и повторите расчёт.',
+            ], 400);
+        }
+        $date = new DateTimeImmutable((string) $row[1], new DateTimeZone('UTC'));
+        $packedChunk[] = pack(
+            'JEE',
+            $date->getTimestamp() * 1000 + (int) $date->format('v'),
+            (float) $row[2],
+            (float) $row[3],
+        );
+        if (count($packedChunk) >= 2048) {
+            $quotesBySymbol[$symbol] .= implode('', $packedChunk);
+            $packedChunk = [];
+        }
+        $loadedQuotes++;
+        if ($loadedQuotes % 100000 === 0) {
+            $percent = $totalQuoteCount > 0 ? min(50, (int) floor($loadedQuotes * 50 / $totalQuoteCount)) : 50;
+            hedge_ranking_progress('Загружены снимки котировок: ' . number_format($loadedQuotes, 0, ',', ' ')
+                . ' / ' . number_format($totalQuoteCount, 0, ',', ' ') . " ({$percent}%).");
+            set_time_limit(300);
+        }
     }
+    if ($currentSymbol !== null && $packedChunk !== []) $quotesBySymbol[$currentSymbol] .= implode('', $packedChunk);
+    $statement->closeCursor();
     $pdo = null;
 
     $feeRate = (float) $feePercent / 100.0;
@@ -194,7 +218,7 @@ try {
     foreach ($symbols as $longSymbol) {
         foreach ($symbols as $shortSymbol) {
             if ($longSymbol === $shortSymbol) continue;
-            $netPnl = cross_hedge_net_pnl(
+            $netPnl = cross_hedge_net_pnl_packed(
                 $quotesBySymbol[$longSymbol], $quotesBySymbol[$shortSymbol],
                 (float) $balance, $feeRate,
             );
