@@ -164,6 +164,9 @@ def main() -> int:
     portfolio_add.add_argument("--release", required=True)
     portfolio_add.add_argument("--kind", choices=("strategy", "hedge"), default="strategy")
     portfolio_add.add_argument("--name", default="")
+    portfolio_remove = commands.add_parser("portfolio-remove", help="remove a flat strategy and release its portfolio allocation")
+    portfolio_remove.add_argument("--state", required=True)
+    portfolio_remove.add_argument("--strategy-id", required=True)
     portfolio_copy = commands.add_parser("portfolio-copy", help="copy missing strategy releases from another mode's portfolio")
     portfolio_copy.add_argument("--state", required=True, help="target mode SQLite state")
     portfolio_copy.add_argument("--source-state", required=True, help="source portfolio SQLite state")
@@ -294,6 +297,17 @@ def main() -> int:
         finally:
             store.close()
         return 0
+    if args.command == "portfolio-remove":
+        store = SQLiteStateStore(args.state)
+        try:
+            store.remove_portfolio_strategy(args.strategy_id)
+            print(json.dumps({"removed": True, "strategy_id": args.strategy_id}))
+            return 0
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        finally:
+            store.close()
     if args.command == "portfolio-copy":
         source = target = None
         try:
@@ -301,7 +315,8 @@ def main() -> int:
             target = SQLiteStateStore(args.state)
             source_rows = source.db.execute("SELECT strategy_id,kind,payload,name FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
             existing = {row[0] for row in target.db.execute("SELECT strategy_id FROM portfolio_strategies WHERE enabled=1")}
-            missing = [row for row in source_rows if row["strategy_id"] not in existing]
+            removed = {row[0] for row in target.db.execute("SELECT strategy_id FROM portfolio_removed")}
+            missing = [row for row in source_rows if row["strategy_id"] not in existing and row["strategy_id"] not in removed]
             if missing and target.health()["open_positions"]:
                 raise ValueError("Close the selected mode's open positions before syncing newly added portfolio strategies")
             for row in missing:

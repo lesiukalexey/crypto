@@ -221,6 +221,10 @@ class ExchangePortfolioExecutor:
         return result.matched
 
     def _new_order(self, strategy_id: str, payload: dict[str, Any], symbol: str, leg: str, intent: str, side: str, quantity: Decimal, reason: str, quote: Quote) -> bool:
+        def release_rejected_entry() -> None:
+            if intent == "open":
+                self.store.reject_initial_strategy_entry(strategy_id)
+
         if hasattr(self.adapter, "normalize_quantity"):
             try:
                 normalized = self.adapter.normalize_quantity(symbol, quantity)
@@ -230,6 +234,7 @@ class ExchangePortfolioExecutor:
             except Exception as exc:
                 error = self._order_error_payload(exc, phase="contract_validation", strategy_id=strategy_id, leg=leg, intent=intent, side=side, quantity=quantity, quote=quote, submitted=False)
                 self.store.event_error("exchange_order_preflight_failed", error, symbol, quote.timestamp_ms)
+                release_rejected_entry()
                 return False
         now = int(time.time() * 1000)
         seed = f"{self.mode}:{strategy_id}:{symbol}:{leg}:{intent}:{quote.timestamp_ms}:{quantity}"
@@ -247,6 +252,7 @@ class ExchangePortfolioExecutor:
                 order_request_sent = isinstance(exc, BitgetAPIError) and exc.method == "POST" and exc.endpoint == "/api/v2/mix/order/place-order"
                 error = self._order_error_payload(exc, phase="exchange_submit", strategy_id=strategy_id, leg=leg, intent=intent, side=side, quantity=quantity, quote=quote, submitted=order_request_sent)
                 self.store.event_error("exchange_order_rejected" if order_request_sent else "exchange_order_preflight_failed", error, symbol, quote.timestamp_ms)
+                release_rejected_entry()
             else:
                 self.store.db.execute("UPDATE exchange_orders SET status='uncertain',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()
                 error = self._order_error_payload(exc, phase="exchange_submit", strategy_id=strategy_id, leg=leg, intent=intent, side=side, quantity=quantity, quote=quote, submitted=True)
@@ -255,6 +261,7 @@ class ExchangePortfolioExecutor:
         if not result.accepted:
             self.store.db.execute("UPDATE exchange_orders SET status='rejected',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()
             self.store.event_error("exchange_order_rejected", {"mode": self.mode, "phase": "exchange_submit", "category": "adapter_rejection", "message": result.message[:300], "retryable": False, "order_submitted": True, "strategy_id": strategy_id, "leg": leg, "intent": intent, "side": side, "requested_quantity": str(quantity)}, symbol, quote.timestamp_ms)
+            release_rejected_entry()
             return False
         if not result.order_id:
             self.store.db.execute("UPDATE exchange_orders SET status='uncertain',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()
@@ -404,21 +411,27 @@ class ExchangePortfolioExecutor:
                     continue
                 allocation = self._notional(strategy_id, payload) / 2
                 price = long_quote.ask
-                if not self._entry_allowed(strategy_id, payload, long_symbol, "buy", price, allocation, long_quote.timestamp_ms): return
+                if not self._entry_allowed(strategy_id, payload, long_symbol, "buy", price, allocation, long_quote.timestamp_ms):
+                    self.store.reject_initial_strategy_entry(strategy_id)
+                    return
                 self._new_order(strategy_id, payload, long_symbol, "long", "open", "buy", allocation / price, "hedge_entry", long_quote)
                 return
             if have_long and not have_short:
                 quote = fresh.get(short_symbol)
                 if quote is not None:
                     notional = self._notional(strategy_id, payload) / 2
-                    if not self._entry_allowed(strategy_id, payload, short_symbol, "sell", quote.bid, notional, quote.timestamp_ms): return
+                    if not self._entry_allowed(strategy_id, payload, short_symbol, "sell", quote.bid, notional, quote.timestamp_ms):
+                        self.store.reject_initial_strategy_entry(strategy_id)
+                        return
                     self._new_order(strategy_id, payload, short_symbol, "short", "open", "sell", notional / quote.bid, "hedge_entry", quote)
                     return
             if have_short and not have_long:
                 quote = fresh.get(long_symbol)
                 if quote is not None:
                     notional = self._notional(strategy_id, payload) / 2
-                    if not self._entry_allowed(strategy_id, payload, long_symbol, "buy", quote.ask, notional, quote.timestamp_ms): return
+                    if not self._entry_allowed(strategy_id, payload, long_symbol, "buy", quote.ask, notional, quote.timestamp_ms):
+                        self.store.reject_initial_strategy_entry(strategy_id)
+                        return
                     self._new_order(strategy_id, payload, long_symbol, "long", "open", "buy", notional / quote.ask, "hedge_entry", quote)
                     return
         for strategy_id, payload in self.strategies.items():
@@ -436,6 +449,7 @@ class ExchangePortfolioExecutor:
             notional = self._notional(strategy_id, payload)
             order_side = "buy" if side == "long" else "sell"
             if not self._entry_allowed(strategy_id, payload, symbol, order_side, price, notional, quote.timestamp_ms):
+                self.store.reject_initial_strategy_entry(strategy_id)
                 return
             self._new_order(strategy_id, payload, symbol, "single", "open", order_side, notional / price, "strategy_entry", quote)
             return
