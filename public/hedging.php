@@ -28,7 +28,7 @@ $tickerSetSelection = selectedTickerSet($config, trim((string) ($_GET['ticker_se
 $tickerSetId = $tickerSetSelection['id'];
 $tickerSetOptions = $tickerSetSelection['sets'];
 $symbols = $tickerSetSelection['symbols'];
-$manualPairSelection = count($symbols) * (count($symbols) - 1) > 2000;
+$manualPairSelection = true;
 $startDayAuto = (string) ($_GET['start_day_auto'] ?? '') === '1'
     || (!array_key_exists('start_day', $_GET) && !array_key_exists('day', $_GET));
 $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Kyiv'));
@@ -119,14 +119,10 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <section class="panel"><form class="filters" id="hedge-filters">
 <input type="hidden" name="ticker_set" value="<?= $h($tickerSetId) ?>">
 <input type="hidden" name="start_day_auto" value="<?= $startDayAuto ? '1' : '0' ?>">
-<?php if ($manualPairSelection): ?>
 <label class="field">Лонг<select id="hedge-long-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" <?= $symbol === $longSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select></label>
 <label class="field">Шорт<select id="hedge-short-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" <?= $symbol === $shortSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select></label>
 <input type="hidden" name="pair" id="hedge-pair" value="<?= $h($longSymbol . '|' . $shortSymbol) ?>">
 <span class="small-note" id="pair-ranking-status" role="status" aria-live="polite">После загрузки графика рассчитаю доходность всех пар: 0%.</span>
-<?php else: ?>
-<label class="field pair-field">Пара: лонг / шорт<select name="pair" id="hedge-pair" required><?php if (count($symbols) < 2): ?><option value="" selected>В списке нужны минимум два активных тикера</option><?php else: foreach ($symbols as $long): foreach ($symbols as $short): if ($long === $short) continue; $value = $long . '|' . $short; ?><option value="<?= $h($value) ?>" <?= $long === $longSymbol && $short === $shortSymbol ? 'selected' : '' ?>>Лонг <?= $h($long) ?> / шорт <?= $h($short) ?></option><?php endforeach; endforeach; endif; ?></select><span class="small-note" id="pair-ranking-status" aria-live="polite">При открытии страницы рассчитываю доходность пар…</span></label>
-<?php endif; ?>
 <?php if (!$favoriteView): ?><button type="button" id="add-hedge-favorite">☆ В избранное</button><?php endif; ?>
 <label class="field">С даты<input type="date" name="start_day" value="<?= $h($startDay) ?>" required></label>
 <label class="field">По дату<input type="date" name="end_day" value="<?= $h($endDay) ?>" required></label>
