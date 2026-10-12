@@ -344,16 +344,32 @@ function render(data){
     drawdownTroughMarker.append(drawdownTroughTitle);
   }
   const cursor=add('line',{y1:pad.t,y2:height-pad.b,stroke:'#d5defa','stroke-dasharray':'4 5',visibility:'hidden'});
+  const horizontalCursor=add('line',{x1:pad.l,x2:width-pad.r,stroke:'#d5defa','stroke-dasharray':'4 5',visibility:'hidden'});
+  const cursorValueBackground=add('rect',{x:2,y:pad.t-10,width:pad.l-6,height:20,rx:4,fill:'#293657',stroke:'#d5defa','stroke-width':.7,visibility:'hidden'});
+  const cursorValueLabel=add('text',{x:pad.l-9,y:pad.t+4,'text-anchor':'end',fill:'#fff','font-size':12,'font-weight':700,visibility:'hidden'});
+  const cursorDateBackground=add('rect',{x:pad.l,y:height-30,width:132,height:20,rx:4,fill:'#293657',stroke:'#d5defa','stroke-width':.7,visibility:'hidden'});
+  const cursorDateLabel=add('text',{x:pad.l+66,y:height-16,'text-anchor':'middle',fill:'#fff','font-size':11,'font-weight':700,visibility:'hidden'});
   const hit=add('rect',{x:pad.l,y:pad.t,width:width-pad.l-pad.r,height:height-pad.t-pad.b,fill:'transparent'});
   hit.addEventListener('pointermove',event=>{
     const rect=chart.getBoundingClientRect(),ratio=(event.clientX-rect.left)/rect.width;
     const chartX=ratio*width,plotRatio=Math.max(0,Math.min(1,(chartX-pad.l)/(width-pad.l-pad.r)));
+    const chartY=(event.clientY-rect.top)/rect.height*height;
+    const y=Math.max(pad.t,Math.min(height-pad.b,chartY));
     const targetTime=xmin+plotRatio*(xmax-xmin);
     let lowIndex=0,highIndex=points.length-1;
     while(lowIndex<highIndex){const middle=Math.floor((lowIndex+highIndex)/2);if(Number(points[middle].t)<targetTime)lowIndex=middle+1;else highIndex=middle;}
     if(lowIndex>0&&Math.abs(Number(points[lowIndex-1].t)-targetTime)<Math.abs(Number(points[lowIndex].t)-targetTime))lowIndex--;
     const point=points[lowIndex],x=X(Number(point.t));
     cursor.setAttribute('x1',x);cursor.setAttribute('x2',x);cursor.setAttribute('visibility','visible');
+    horizontalCursor.setAttribute('y1',y);horizontalCursor.setAttribute('y2',y);horizontalCursor.setAttribute('visibility','visible');
+    const valueAtPointer=high-(y-pad.t)/(height-pad.t-pad.b)*(high-low),valueLabelY=Math.max(pad.t+10,Math.min(height-pad.b-2,y+4));
+    cursorValueBackground.setAttribute('y',Math.max(pad.t,valueLabelY-14));
+    cursorValueLabel.setAttribute('y',valueLabelY);cursorValueLabel.textContent=netView?signed(valueAtPointer,2)+' USDT':fmt(valueAtPointer,2);
+    cursorValueBackground.setAttribute('visibility','visible');cursorValueLabel.setAttribute('visibility','visible');
+    const dateLabelX=Math.max(pad.l+66,Math.min(width-pad.r-66,x));
+    cursorDateBackground.setAttribute('x',dateLabelX-66);cursorDateLabel.setAttribute('x',dateLabelX);
+    cursorDateLabel.textContent=new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+    cursorDateBackground.setAttribute('visibility','visible');cursorDateLabel.setAttribute('visibility','visible');
     const localPeak=localMoveByPeak.get(lowIndex),localMinimum=localMoveByMinimum.get(lowIndex);
     const localDetails=localPeak?`<br>Локальный максимум → следующий минимум: ${money(localPeak.peakValue)} → ${money(localPeak.minimumValue)}<br>Падение: ${money(localPeak.decline)} · ${durationLabel(localPeak.minimumTime-localPeak.peakTime)}`:localMinimum?`<br>Локальный минимум после ${money(localMinimum.peakValue)}<br>Падение от максимума: ${money(localMinimum.decline)} · ${durationLabel(localMinimum.minimumTime-localMinimum.peakTime)}`:'';
     tooltip.innerHTML=netView
@@ -363,7 +379,7 @@ function render(data){
     tooltip.style.left=`${Math.min(event.clientX-rect.left+12,rect.width-tooltip.offsetWidth-4)}px`;
     tooltip.style.top=`${Math.max(2,event.clientY-rect.top-tooltip.offsetHeight-10)}px`;
   });
-  hit.addEventListener('pointerleave',()=>{cursor.setAttribute('visibility','hidden');tooltip.style.display='none'});
+  hit.addEventListener('pointerleave',()=>{cursor.setAttribute('visibility','hidden');horizontalCursor.setAttribute('visibility','hidden');cursorValueBackground.setAttribute('visibility','hidden');cursorValueLabel.setAttribute('visibility','hidden');cursorDateBackground.setAttribute('visibility','hidden');cursorDateLabel.setAttribute('visibility','hidden');tooltip.style.display='none'});
   const stat=(label,value,cls='')=>`<div class="stat"><span>${label}</span><strong class="${cls}">${value}</strong></div>`;
   const startingBalance=Number(data.starting_balance);
   const percentFromStart=value=>{const percent=Number(value)/startingBalance*100;return `${percent>0?'+':''}${fmt(percent,2)}% от стартового баланса`};
