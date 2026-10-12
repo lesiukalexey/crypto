@@ -150,10 +150,13 @@ try {
     foreach ([
         'long_notional', 'short_notional', 'long_quantity', 'short_quantity', 'long_pnl', 'short_pnl',
         'net_pnl', 'ending_balance', 'maximum_net_pnl', 'minimum_after_maximum_net_pnl',
-        'decline_after_maximum', 'decline_after_maximum_percent', 'maximum_drawdown',
-        'maximum_drawdown_percent', 'maximum_drawdown_peak_net_pnl', 'maximum_drawdown_trough_net_pnl',
+        'decline_after_maximum', 'maximum_drawdown',
+        'maximum_drawdown_peak_net_pnl', 'maximum_drawdown_trough_net_pnl',
     ] as $field) {
         $summary[$field] = round($summary[$field], 10);
+    }
+    foreach (['decline_after_maximum_percent', 'maximum_drawdown_percent'] as $field) {
+        $summary[$field] = $summary[$field] === null ? null : round($summary[$field], 10);
     }
     $points = $simulation['points'];
     hedge_respond([
