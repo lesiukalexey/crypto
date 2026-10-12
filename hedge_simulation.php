@@ -315,7 +315,7 @@ function cross_hedge_net_pnl_packed(
 
 function hedge_unpack_packed_quote(string $rows, int $index): array
 {
-    $values = unpack('Jtimestamp/Ebid/Eask', $rows, $index * 24);
+    $values = unpack('Ptimestamp/ebid/eask', $rows, $index * 24);
     return ['timestamp' => (int) $values['timestamp'], 'bid' => (float) $values['bid'], 'ask' => (float) $values['ask']];
 }
 

@@ -48,6 +48,19 @@ function hedge_ranking_progress(string $message): void
     flush();
 }
 
+function hedge_ranking_write_all($stream, string $data): void
+{
+    $offset = 0;
+    $length = strlen($data);
+    while ($offset < $length) {
+        $written = fwrite($stream, substr($data, $offset, 8 * 1024 * 1024));
+        if ($written === false || $written === 0) {
+            throw new RuntimeException('Не удалось передать снимки котировок Numba-воркеру.');
+        }
+        $offset += $written;
+    }
+}
+
 function hedge_ranking_result(array $payload): never
 {
     if ($GLOBALS['hedge_ranking_stream_started'] ?? false) {
@@ -59,6 +72,11 @@ function hedge_ranking_result(array $payload): never
     hedge_ranking_respond($payload);
 }
 
+$quoteFilePath = null;
+$metadataFilePath = null;
+$workerLogPath = null;
+$workerProcess = null;
+$workerPipes = [];
 try {
     // Large ticker sets can contain several million quote snapshots.
     set_time_limit(300);
@@ -130,7 +148,7 @@ try {
         $totalQuoteCount += (int) $row['quote_count'];
     }
     $cacheKey = hash('sha256', json_encode([
-        'hedge-ranking-v1', $config['category'], $symbols, $startValue, $endValue,
+        'hedge-ranking-numba-v2', $config['category'], $symbols, $startValue, $endValue,
         (float) $balance, (float) $feePercent, $quoteRevision,
     ], JSON_THROW_ON_ERROR));
     $cachePath = $cacheDir . '/hedge-' . $cacheKey . '.json';
@@ -154,7 +172,7 @@ try {
         fclose($cacheLock);
     }
     hedge_ranking_progress('В кэше рейтинга нет. В базе найдено '
-        . number_format($totalQuoteCount, 0, ',', ' ') . ' снимков котировок; готовлю их загрузку.');
+        . number_format($totalQuoteCount, 0, ',', ' ') . ' снимков котировок; готовлю загрузку всех снимков для рейтинга.');
     $statement = $pdo->prepare(
         'SELECT symbol, received_at_utc, bid_price, ask_price FROM quote_snapshots '
         . 'WHERE category = ? AND symbol IN (' . implode(',', array_fill(0, count($symbols), '?')) . ') '
@@ -185,7 +203,7 @@ try {
         }
         $date = new DateTimeImmutable((string) $row[1], new DateTimeZone('UTC'));
         $packedChunk[] = pack(
-            'JEE',
+            'Pee',
             $date->getTimestamp() * 1000 + (int) $date->format('v'),
             (float) $row[2],
             (float) $row[3],
@@ -206,30 +224,101 @@ try {
     $statement->closeCursor();
     $pdo = null;
 
-    $feeRate = (float) $feePercent / 100.0;
+    $quoteFilePath = tempnam($cacheDir, '.hedge-quotes-');
+    if ($quoteFilePath === false) {
+        throw new RuntimeException('Не удалось подготовить данные для Numba-расчёта.');
+    }
+    $quoteFile = fopen($quoteFilePath, 'wb');
+    if ($quoteFile === false) {
+        throw new RuntimeException('Не удалось открыть файл снимков для Numba-расчёта.');
+    }
+    try {
+        foreach ($symbols as $symbol) {
+            hedge_ranking_write_all($quoteFile, $quotesBySymbol[$symbol]);
+            unset($quotesBySymbol[$symbol]);
+        }
+    } finally {
+        fclose($quoteFile);
+    }
+    unset($quotesBySymbol, $packedChunk);
+    gc_collect_cycles();
+
+    $metadataFilePath = tempnam($cacheDir, '.hedge-meta-');
+    if ($metadataFilePath === false) {
+        throw new RuntimeException('Не удалось подготовить список котировок для Numba-расчёта.');
+    }
+    $metadata = [
+        'symbols' => $symbols,
+        'counts' => array_values(array_map(static fn(string $symbol): int => $quoteCounts[$symbol], $symbols)),
+        'balance' => (float) $balance,
+        'fee_rate' => (float) $feePercent / 100.0,
+    ];
+    if (file_put_contents($metadataFilePath, json_encode($metadata, JSON_THROW_ON_ERROR)) === false) {
+        throw new RuntimeException('Не удалось записать параметры Numba-расчёта.');
+    }
+    $workerLogPath = tempnam($cacheDir, '.hedge-worker-');
+    if ($workerLogPath === false) {
+        throw new RuntimeException('Не удалось подготовить журнал Numba-расчёта.');
+    }
+
     $pairs = [];
     $bestPair = null;
     $bestLongPairs = [];
     $bestShortPairs = [];
-    $symbolIndexes = array_flip($symbols);
     $pairMatrix = array_fill(0, $symbolCount, array_fill(0, $symbolCount, null));
     $orderedPairCount = $symbolCount * ($symbolCount - 1);
     $pairIndex = 0;
     $progressInterval = max(1, (int) ceil($orderedPairCount / 100));
-    foreach ($symbols as $longSymbol) {
-        foreach ($symbols as $shortSymbol) {
-            if ($longSymbol === $shortSymbol) continue;
-            $netPnl = cross_hedge_net_pnl_packed(
-                $quotesBySymbol[$longSymbol], $quotesBySymbol[$shortSymbol],
-                (float) $balance, $feeRate,
-            );
+    $python = is_executable($root . '/.venv/bin/python') ? $root . '/.venv/bin/python' : '/usr/bin/python3';
+    $launcher = $root . '/launch-ranking-worker.py';
+    $worker = $root . '/hedge_pair_ranking.py';
+    $numbaCacheDir = $cacheDir . '/numba-cache';
+    $command = [$python, $launcher, $python, $worker, $quoteFilePath, $metadataFilePath, $numbaCacheDir];
+    $workerProcess = proc_open(
+        $command,
+        [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $workerLogPath, 'a']],
+        $workerPipes,
+        $root,
+    );
+    if (!is_resource($workerProcess)) {
+        throw new RuntimeException('Не удалось запустить Numba-расчёт пар.');
+    }
+    fclose($workerPipes[0]);
+    unset($workerPipes[0]);
+    $workerDone = false;
+    while (($line = fgets($workerPipes[1])) !== false) {
+        $message = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        if (($message['type'] ?? '') === 'progress') {
+            hedge_ranking_progress((string) ($message['message'] ?? 'Numba рассчитывает доходность пар…'));
+            continue;
+        }
+        if (($message['type'] ?? '') === 'done') {
+            $workerDone = (int) ($message['ordered_pair_count'] ?? -1) === $orderedPairCount;
+            continue;
+        }
+        if (($message['type'] ?? '') !== 'chunk') {
+            throw new RuntimeException('Numba-расчёт вернул неизвестный тип сообщения.');
+        }
+        $longIndex = (int) ($message['long_index'] ?? -1);
+        $shortStart = (int) ($message['short_start'] ?? -1);
+        $values = $message['values'] ?? null;
+        if ($longIndex < 0 || $longIndex >= $symbolCount || $shortStart < 0
+            || !is_array($values) || count($values) > $symbolCount - $shortStart) {
+            throw new RuntimeException('Numba-расчёт вернул некорректный блок пар.');
+        }
+        $longSymbol = $symbols[$longIndex];
+        foreach ($values as $offset => $value) {
+            $shortIndex = $shortStart + $offset;
+            if (!isset($symbols[$shortIndex]) || $longIndex === $shortIndex) continue;
+            $shortSymbol = $symbols[$shortIndex];
+            $netPnl = $value === null ? null : (float) $value;
             $pair = [
                 'long_symbol' => $longSymbol,
                 'short_symbol' => $shortSymbol,
                 'net_pnl' => $netPnl,
                 'return_percent' => $netPnl === null ? null : $netPnl / (float) $balance * 100.0,
             ];
-            $pairMatrix[$symbolIndexes[$longSymbol]][$symbolIndexes[$shortSymbol]] = $netPnl;
+            $pairMatrix[$longIndex][$shortIndex] = $netPnl;
             if (!isset($bestLongPairs[$longSymbol]) || hedge_ranking_pair_is_better($pair, $bestLongPairs[$longSymbol])) {
                 $bestLongPairs[$longSymbol] = $pair;
             }
@@ -245,9 +334,22 @@ try {
             if ($pairIndex % $progressInterval === 0 || $pairIndex === $orderedPairCount) {
                 $percent = 50 + (int) floor($pairIndex * 50 / $orderedPairCount);
                 hedge_ranking_progress("Рассчитаны пары: " . number_format($pairIndex, 0, ',', ' ') . ' / ' . number_format($orderedPairCount, 0, ',', ' ') . " ({$percent}%).");
+                set_time_limit(300);
             }
         }
     }
+    fclose($workerPipes[1]);
+    $workerPipes = [];
+    $workerExitCode = proc_close($workerProcess);
+    $workerProcess = null;
+    if ($workerExitCode !== 0 || !$workerDone || $pairIndex !== $orderedPairCount) {
+        $diagnostic = is_file($workerLogPath) ? trim((string) file_get_contents($workerLogPath)) : '';
+        throw new RuntimeException('Numba-расчёт не завершился корректно.' . ($diagnostic === '' ? '' : ' ' . $diagnostic));
+    }
+    @unlink($quoteFilePath);
+    @unlink($metadataFilePath);
+    @unlink($workerLogPath);
+    $quoteFilePath = $metadataFilePath = $workerLogPath = null;
     if ($orderedPairCount > 2000 && $bestPair !== null) $pairs[] = $bestPair;
     $sortPairs = static function (array $left, array $right): int {
         if ($left['net_pnl'] === null || $right['net_pnl'] === null) {
@@ -294,6 +396,18 @@ try {
     }
     hedge_ranking_result($result);
 } catch (Throwable $error) {
+    if (is_resource($workerProcess)) @proc_terminate($workerProcess);
+    foreach ($workerPipes as $pipe) {
+        if (is_resource($pipe)) @fclose($pipe);
+    }
+    if (is_resource($workerProcess)) @proc_close($workerProcess);
+    $diagnostic = is_string($workerLogPath) && is_file($workerLogPath)
+        ? trim((string) file_get_contents($workerLogPath))
+        : '';
+    if ($diagnostic !== '') error_log('Hedge Numba worker: ' . $diagnostic);
+    foreach ([$quoteFilePath, $metadataFilePath, $workerLogPath] as $temporaryPath) {
+        if (is_string($temporaryPath)) @unlink($temporaryPath);
+    }
     error_log('Hedge pair ranking failed: ' . $error->getMessage());
     hedge_ranking_respond(['status' => 'error', 'message' => 'Не удалось рассчитать доходность пар.'], 503);
 }
