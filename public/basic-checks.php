@@ -1132,7 +1132,7 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
 <input type="hidden" name="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>">
 <input type="hidden" name="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>">
-<div class="symbol-select-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><select name="symbol" id="symbol-select" required><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" class="<?= isset($demoAvailableSymbols[$option]) ? 'demo-available-ticker' : '' ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option . (isset($demoAvailableSymbols[$option]) ? ' · Demo' : '')) ?></option><?php endforeach; ?></select></div></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
+<div class="symbol-select-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><select name="symbol" id="symbol-select" required><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" class="<?= isset($demoAvailableSymbols[$option]) ? 'demo-available-ticker' : '' ?>" <?= $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></div></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
 <label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label>
 <div class="date-refresh-row"><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><div class="history-import-actions"><button class="history-import-button" type="button" id="import-selected-symbol" data-import-scope="symbol" title="Скачать минутные свечи выбранной пары из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>↻ <?= h($symbol) ?></button><button class="history-import-button" type="button" id="import-all-active-symbols" data-import-scope="all" title="Скачать минутные свечи всех активных пар из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>↻ Все активные пары</button></div><p class="history-import-status" id="history-import-status" data-status="" role="status" aria-live="polite"></p></div>
 
@@ -1327,14 +1327,13 @@ const saveModeValue = document.querySelector('#save-mode-value');
 const symbolSortMode = document.querySelector('#symbol-sort-mode');
 const symbolSelect = document.querySelector('#symbol-select');
 const demoAvailableTickerSymbols = new Set(<?= json_encode(array_keys($demoAvailableSymbols), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>);
-function demoTickerOptionLabel(symbol, label = symbol) { return demoAvailableTickerSymbols.has(symbol) ? `${label} · Demo` : label; }
 const knownTickerBestResults = new Map();
 function renderTickerBestResults(items) {
     knownTickerBestResults.clear();
     const currentSymbol = symbolSelect.value;
     const options = new Map([...symbolSelect.options].map(option => [option.value, option]));
     for (const [symbol, option] of options) {
-        option.textContent = demoTickerOptionLabel(symbol);
+        option.textContent = symbol;
         option.classList.toggle('demo-available-ticker', demoAvailableTickerSymbols.has(symbol));
         option.removeAttribute('title');
     }
@@ -1350,7 +1349,7 @@ function renderTickerBestResults(items) {
     const ordered = [];
     for (const [symbol, result] of ranked) {
         const option = options.get(symbol);
-        option.textContent = demoTickerOptionLabel(symbol, symbol + ' · ' + pnlText(result.pnl));
+        option.textContent = symbol + ' · ' + pnlText(result.pnl);
         option.title = result.title;
         ordered.push(option);
     }
@@ -2447,12 +2446,12 @@ async function sortSymbolsByProfit() {
             const option = options.get(item.symbol);
             if (!option) continue;
             if (item.best_pnl === null || item.best_pnl === undefined) {
-                option.textContent = demoTickerOptionLabel(item.symbol, `${item.symbol} · нет надежного рейтинга`);
+                option.textContent = `${item.symbol} · нет надежного рейтинга`;
                 option.title = params.get('save_mode') === '0' ? 'Нет варианта выхода хотя бы с одной сделкой' : 'Ни один вариант не дал минимум три сделки';
             } else {
                 rankedCount++;
                 const pnl = Number(item.best_pnl);
-                option.textContent = demoTickerOptionLabel(item.symbol, `${item.symbol} · ${pnl > 0 ? '+' : ''}${new Intl.NumberFormat('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:4}).format(pnl)} USDT`);
+                option.textContent = `${item.symbol} · ${pnl > 0 ? '+' : ''}${new Intl.NumberFormat('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:4}).format(pnl)} USDT`;
                 option.title = `Лучший результат входа с ${item.best_exit || 'вариантом TakeProfit & StopLoss'}`;
             }
             sortedOptions.push(option);

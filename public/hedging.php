@@ -118,8 +118,8 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <section class="panel"><form class="filters" id="hedge-filters">
 <input type="hidden" name="ticker_set" value="<?= $h($tickerSetId) ?>">
 <input type="hidden" name="start_day_auto" value="<?= $startDayAuto ? '1' : '0' ?>">
-<label class="field">Лонг<select id="hedge-long-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" class="<?= isset($demoAvailableSymbols[$symbol]) ? 'demo-available-ticker' : '' ?>" <?= $symbol === $longSymbol ? 'selected' : '' ?>><?= $h($symbol . (isset($demoAvailableSymbols[$symbol]) ? ' · Demo' : '')) ?></option><?php endforeach; ?></select></label>
-<label class="field">Шорт<select id="hedge-short-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" class="<?= isset($demoAvailableSymbols[$symbol]) ? 'demo-available-ticker' : '' ?>" <?= $symbol === $shortSymbol ? 'selected' : '' ?>><?= $h($symbol . (isset($demoAvailableSymbols[$symbol]) ? ' · Demo' : '')) ?></option><?php endforeach; ?></select></label>
+<label class="field">Лонг<select id="hedge-long-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" class="<?= isset($demoAvailableSymbols[$symbol]) ? 'demo-available-ticker' : '' ?>" <?= $symbol === $longSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select></label>
+<label class="field">Шорт<select id="hedge-short-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" class="<?= isset($demoAvailableSymbols[$symbol]) ? 'demo-available-ticker' : '' ?>" <?= $symbol === $shortSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select></label>
 <span class="small-note">Жёлтым отмечены тикеры, доступные в Bitget Demo.</span>
 <input type="hidden" name="pair" id="hedge-pair" value="<?= $h($longSymbol . '|' . $shortSymbol) ?>">
 <span class="small-note" id="pair-ranking-status" role="status" aria-live="polite">После загрузки графика рассчитаю доходность всех пар: 0%.</span>
@@ -142,7 +142,6 @@ tickerSetSelect?.addEventListener('change',()=>{const params=new URLSearchParams
 const startDayAutoInput=form.elements.namedItem('start_day_auto');
 const favoriteView=<?= $favoriteView ? 'true' : 'false' ?>,favoriteSymbolsDisabled=<?= $favoriteSymbolsDisabled ? 'true' : 'false' ?>,favoriteId=<?= json_encode($favoriteId, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>,favoriteSavedParams=<?= json_encode($favorite['params'] ?? new stdClass(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
 const demoAvailableTickerSymbols=new Set(<?= json_encode(array_keys($demoAvailableSymbols), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>);
-function demoTickerOptionLabel(symbol,label=symbol){return demoAvailableTickerSymbols.has(symbol)?`${label} · Demo`:label}
 if(favoriteView)form.querySelectorAll('select,input,button').forEach(control=>control.disabled=true);
 const palette={long_index:'#42d6a4',short_index:'#ff7188',equity_index:'#86a8ff'};
 const chartModeButtons=[...document.querySelectorAll('[data-chart-view]')],chartTitle=document.querySelector('#hedge-chart-title'),chartLegend=document.querySelector('#hedge-legend'),chartNote=document.querySelector('#hedge-chart-note');
@@ -202,7 +201,7 @@ function renderTickerRanking(select,pairs,partnerSide){
     const option=document.createElement('option');option.value=symbol;
     const returnLabel=pair?.net_pnl===null||pair?.net_pnl===undefined?'нет данных':`${signed(pair.net_pnl)} USDT (${signed(pair.return_percent)}%)`;
     option.classList.toggle('demo-available-ticker',demoAvailableTickerSymbols.has(symbol));
-    option.textContent=demoTickerOptionLabel(symbol,pair?`${symbol} · доходность ${returnLabel}`:symbol);
+    option.textContent=pair?`${symbol} · доходность ${returnLabel}`:symbol;
     option.selected=symbol===selected;return option;
   }));
 }
