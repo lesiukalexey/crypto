@@ -25,8 +25,20 @@ function hedge_ranking_stream_start(): void
     header('Content-Type: application/x-ndjson; charset=utf-8');
     header('X-Accel-Buffering: no');
     while (ob_get_level() > 0) @ob_end_flush();
-    echo json_encode(['type' => 'progress', 'message' => 'Котировки для рейтинга: 0%.'], JSON_UNESCAPED_UNICODE) . "\n";
+    echo json_encode(['type' => 'progress', 'message' => 'Проверяю кэш рейтинга пар…'], JSON_UNESCAPED_UNICODE) . "\n";
     flush();
+}
+
+function hedge_ranking_write_cache(string $path, array $payload): void
+{
+    $directory = dirname($path);
+    $temporaryPath = tempnam($directory, '.hedge-ranking-');
+    if ($temporaryPath === false
+        || file_put_contents($temporaryPath, json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX) === false
+        || !rename($temporaryPath, $path)) {
+        if (is_string($temporaryPath)) @unlink($temporaryPath);
+        throw new RuntimeException('Не удалось сохранить рейтинг пар в кэш.');
+    }
 }
 
 function hedge_ranking_progress(string $message): void
@@ -96,13 +108,53 @@ try {
     );
     $startUtc = $startDay->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
     $endUtc = $endDay->modify('+1 day')->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
+    $home = getenv('HOME') ?: '/home/alex';
+    $cacheDir = $home . '/.ai/home/.local/bitget-hedge-ranking-cache';
+    if (!is_dir($cacheDir) && !mkdir($cacheDir, 0700, true) && !is_dir($cacheDir)) {
+        hedge_ranking_respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга пар.'], 500);
+    }
+    hedge_ranking_stream_start();
+    $revisionStatement = $pdo->prepare(
+        'SELECT symbol, MAX(id) AS max_id FROM quote_snapshots '
+        . 'WHERE category = ? AND symbol IN (' . implode(',', array_fill(0, count($symbols), '?')) . ') '
+        . 'AND received_at_utc >= ? AND received_at_utc < ? GROUP BY symbol ORDER BY symbol'
+    );
+    $revisionStatement->execute([$config['category'], ...$symbols, $startUtc, $endUtc]);
+    $quoteRevision = [];
+    foreach ($revisionStatement->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $quoteRevision[(string) $row['symbol']] = (int) $row['max_id'];
+    }
+    $cacheKey = hash('sha256', json_encode([
+        'hedge-ranking-v1', $config['category'], $symbols, $startValue, $endValue,
+        (float) $balance, (float) $feePercent, $quoteRevision,
+    ], JSON_THROW_ON_ERROR));
+    $cachePath = $cacheDir . '/hedge-' . $cacheKey . '.json';
+    $cacheLock = fopen($cachePath . '.lock', 'c');
+    if ($cacheLock === false || !flock($cacheLock, LOCK_EX)) {
+        if (is_resource($cacheLock)) fclose($cacheLock);
+        hedge_ranking_respond(['status' => 'error', 'message' => 'Не удалось проверить кэш рейтинга пар.'], 503);
+    }
+    try {
+        if (is_file($cachePath)) {
+            $cached = json_decode((string) file_get_contents($cachePath), true);
+            if (is_array($cached) && ($cached['status'] ?? '') === 'ready') {
+                $cached['cache_hit'] = true;
+                $cached['cached_at'] = gmdate(DATE_ATOM, (int) filemtime($cachePath));
+                hedge_ranking_progress('Рейтинг найден в кэше.');
+                hedge_ranking_result($cached);
+            }
+        }
+    } finally {
+        flock($cacheLock, LOCK_UN);
+        fclose($cacheLock);
+    }
+    hedge_ranking_progress('Рейтинг в кэше не найден. Загружаю котировки: 0%.');
     $statement = $pdo->prepare(
         'SELECT received_at_utc, bid_price, ask_price FROM quote_snapshots '
         . 'WHERE category = ? AND symbol = ? AND received_at_utc >= ? AND received_at_utc < ? '
         . 'ORDER BY received_at_utc, id LIMIT 100001'
     );
 
-    hedge_ranking_stream_start();
     $quotesBySymbol = [];
     $symbolCount = count($symbols);
     foreach ($symbols as $symbolIndex => $symbol) {
@@ -188,7 +240,7 @@ try {
     usort($bestLongPairs, $sortPairs);
     usort($bestShortPairs, $sortPairs);
 
-    hedge_ranking_result([
+    $result = [
         'status' => 'ready',
         'start_day' => $startValue,
         'end_day' => $endValue,
@@ -200,7 +252,22 @@ try {
         'pairs' => $pairs,
         'best_long_pairs' => $bestLongPairs,
         'best_short_pairs' => $bestShortPairs,
-    ]);
+        'cache_hit' => false,
+    ];
+    $writeLock = fopen($cachePath . '.lock', 'c');
+    if ($writeLock !== false && flock($writeLock, LOCK_EX)) {
+        try {
+            hedge_ranking_write_cache($cachePath, $result);
+        } catch (Throwable $cacheError) {
+            error_log('Unable to cache hedge pair ranking: ' . $cacheError->getMessage());
+        } finally {
+            flock($writeLock, LOCK_UN);
+            fclose($writeLock);
+        }
+    } elseif (is_resource($writeLock)) {
+        fclose($writeLock);
+    }
+    hedge_ranking_result($result);
 } catch (Throwable $error) {
     error_log('Hedge pair ranking failed: ' . $error->getMessage());
     hedge_ranking_respond(['status' => 'error', 'message' => 'Не удалось рассчитать доходность пар.'], 503);

@@ -219,7 +219,7 @@ async function loadPairRanking(selectLeader=false){
   const requestId=++pairRankingRequest,params=new URLSearchParams(new FormData(form));params.delete('pair');
   const url=new URL('hedge-ranking.php',location.href);url.search=params.toString();
   if(selectLeader){summaryNode.hidden=true;localMovesPanel.hidden=true;chart.replaceChildren();pointCount.textContent='';setChartLoading(true);statusNode.classList.remove('error');statusNode.textContent='Сначала рассчитываю доходность всех пар; затем загружу график лучшей пары…'}
-  pairRankingStatus.textContent='Загрузка котировок для рейтинга пар: 0%.';
+  pairRankingStatus.textContent='Проверяю кэш рейтинга пар…';
   try{
     const response=await fetch(url,{headers:{Accept:'application/x-ndjson, application/json'},cache:'no-store'});
     let data=null;
@@ -237,7 +237,7 @@ async function loadPairRanking(selectLeader=false){
     if(leader&&selectLeader&&selectionVersion===pairSelectionVersion){longSymbolSelect.value=leader.long_symbol;shortSymbolSelect.value=leader.short_symbol;syncManualPairSelection();renderCurrentTickerRankings();await loadData()}
     else if(!leader&&selectLeader&&selectionVersion===pairSelectionVersion){setChartLoading(false);statusNode.textContent='Не нашлось пары с данными для расчёта за выбранный период.'}
     const pairCount=data.ordered_pair_count??0;
-    pairRankingStatus.textContent=`Рассчитана доходность ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; списки пересортировываются относительно выбранного тикера. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
+    pairRankingStatus.textContent=`${data.cache_hit?'Загружен сохранённый рейтинг':'Рассчитана доходность'} ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; списки пересортировываются относительно выбранного тикера. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
   }catch(error){if(requestId===pairRankingRequest){setChartLoading(false);pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message;if(selectLeader)statusNode.textContent='Не удалось рассчитать пары: '+error.message}}
 }
 function el(tag,attrs={},text=''){const node=document.createElementNS(ns,tag);for(const[key,value]of Object.entries(attrs))node.setAttribute(key,value);if(text)node.textContent=text;chart.append(node);return node}
