@@ -186,6 +186,23 @@ let pairRankingLoaded=false;
 let pairSelectionTouched=false;
 const manualPairSelection=<?= $manualPairSelection ? 'true' : 'false' ?>;
 function syncManualPairSelection(){if(longSymbolSelect&&shortSymbolSelect)pairSelect.value=longSymbolSelect.value+'|'+shortSymbolSelect.value}
+function renderTickerRanking(select,pairs,partnerSide){
+  if(!select||!Array.isArray(pairs))return;
+  const selected=select.value,bySymbol=new Map(pairs.map(pair=>[pair[partnerSide==='short'?'long_symbol':'short_symbol',pair]));
+  const options=[...select.options].map(option=>({symbol:option.value,pair:bySymbol.get(option.value)}));
+  options.sort((left,right)=>{
+    const leftValue=left.pair?.net_pnl,rightValue=right.pair?.net_pnl;
+    if(leftValue===null||leftValue===undefined)return rightValue===null||rightValue===undefined?left.symbol.localeCompare(right.symbol):1;
+    if(rightValue===null||rightValue===undefined)return -1;
+    return Number(rightValue)-Number(leftValue)||left.symbol.localeCompare(right.symbol);
+  });
+  select.replaceChildren(...options.map(({symbol,pair})=>{
+    const option=document.createElement('option');option.value=symbol;
+    const partnerLabel=partnerSide==='short'?'шорт':'лонг';
+    option.textContent=pair?`${symbol} · лучший ${partnerLabel} ${partnerSide==='short'?pair.short_symbol:pair.long_symbol} · ${pair.net_pnl===null?'нет данных':signed(pair.net_pnl)+' USDT'}`:symbol;
+    option.selected=symbol===selected;return option;
+  }));
+}
 for(const select of [longSymbolSelect,shortSymbolSelect])select?.addEventListener('change',()=>{pairSelectionTouched=true;syncManualPairSelection();loadData()});
 pairSelect.addEventListener('change',()=>{pairSelectionTouched=true});
 document.querySelector('#add-hedge-favorite')?.addEventListener('click',async()=>{const button=document.querySelector('#add-hedge-favorite'),status=document.querySelector('#hedge-favorite-status'),params=new URLSearchParams(new FormData(form)),[longSymbol,shortSymbol]=pairSelect.value.split('|');params.set('favorite_type','hedge');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);params.set('favorite_entry_label',`Лонг ${longSymbol} / шорт ${shortSymbol}`);params.set('favorite_exit_label','Закрытие по последнему синхронизированному снимку');params.set('favorite_name',`Лонг ${longSymbol} / шорт ${shortSymbol}`);button.disabled=true;status.textContent='Сохраняю пару…';try{const response=await fetch('favorites.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:params}),result=await response.json();if(!response.ok||result.status!=='ok')throw new Error(result.error||'Не удалось сохранить пару');button.textContent='✓ Добавлено';status.textContent='Пара добавлена в избранное.'}catch(error){status.textContent=error.message||'Не удалось сохранить пару';button.disabled=false}});
@@ -208,9 +225,11 @@ async function loadPairRanking(){
     const currentPair=pairSelect.value;
     if(manualPairSelection){
       const leader=data.pairs?.[0];
+      renderTickerRanking(longSymbolSelect,data.best_long_pairs,'short');
+      renderTickerRanking(shortSymbolSelect,data.best_short_pairs,'long');
       if(leader&&!pairWasRequestedOnPageLoad&&!pairSelectionTouched){longSymbolSelect.value=leader.long_symbol;shortSymbolSelect.value=leader.short_symbol;syncManualPairSelection();loadData()}
       const pairCount=data.ordered_pair_count??0;
-      pairRankingStatus.textContent=`Рассчитана доходность ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; лучшая пара ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найдена'}.`;
+      pairRankingStatus.textContent=`Рассчитана доходность ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; тикеры отсортированы по лучшей паре. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
       return;
     }
     const preserveSelection=pairRankingLoaded||pairWasRequestedOnPageLoad||pairSelectionTouched;

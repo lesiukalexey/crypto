@@ -132,6 +132,8 @@ try {
     $feeRate = (float) $feePercent / 100.0;
     $pairs = [];
     $bestPair = null;
+    $bestLongPairs = [];
+    $bestShortPairs = [];
     $orderedPairCount = $symbolCount * ($symbolCount - 1);
     $pairIndex = 0;
     $progressInterval = max(1, (int) ceil($orderedPairCount / 100));
@@ -148,6 +150,12 @@ try {
                 'net_pnl' => $netPnl,
                 'return_percent' => $netPnl === null ? null : $netPnl / (float) $balance * 100.0,
             ];
+            if (!isset($bestLongPairs[$longSymbol]) || hedge_ranking_pair_is_better($pair, $bestLongPairs[$longSymbol])) {
+                $bestLongPairs[$longSymbol] = $pair;
+            }
+            if (!isset($bestShortPairs[$shortSymbol]) || hedge_ranking_pair_is_better($pair, $bestShortPairs[$shortSymbol])) {
+                $bestShortPairs[$shortSymbol] = $pair;
+            }
             if ($orderedPairCount > 2000) {
                 if ($bestPair === null || ($netPnl !== null && ($bestPair['net_pnl'] === null || $netPnl > $bestPair['net_pnl']))) $bestPair = $pair;
             } else {
@@ -161,7 +169,7 @@ try {
         }
     }
     if ($orderedPairCount > 2000 && $bestPair !== null) $pairs[] = $bestPair;
-    usort($pairs, static function (array $left, array $right): int {
+    $sortPairs = static function (array $left, array $right): int {
         if ($left['net_pnl'] === null || $right['net_pnl'] === null) {
             if ($left['net_pnl'] === null && $right['net_pnl'] !== null) return 1;
             if ($left['net_pnl'] !== null && $right['net_pnl'] === null) return -1;
@@ -170,7 +178,12 @@ try {
         }
         return [$left['long_symbol'], $left['short_symbol']]
             <=> [$right['long_symbol'], $right['short_symbol']];
-    });
+    };
+    usort($pairs, $sortPairs);
+    $bestLongPairs = array_values($bestLongPairs);
+    $bestShortPairs = array_values($bestShortPairs);
+    usort($bestLongPairs, $sortPairs);
+    usort($bestShortPairs, $sortPairs);
 
     hedge_ranking_result([
         'status' => 'ready',
@@ -180,8 +193,19 @@ try {
         'fee_percent' => (float) $feePercent,
         'ordered_pair_count' => $orderedPairCount,
         'pairs' => $pairs,
+        'best_long_pairs' => $bestLongPairs,
+        'best_short_pairs' => $bestShortPairs,
     ]);
 } catch (Throwable $error) {
     error_log('Hedge pair ranking failed: ' . $error->getMessage());
     hedge_ranking_respond(['status' => 'error', 'message' => 'Не удалось рассчитать доходность пар.'], 503);
+}
+
+function hedge_ranking_pair_is_better(array $candidate, array $current): bool
+{
+    if ($candidate['net_pnl'] === null) return false;
+    if ($current['net_pnl'] === null) return true;
+    if ($candidate['net_pnl'] !== $current['net_pnl']) return $candidate['net_pnl'] > $current['net_pnl'];
+    return [$candidate['long_symbol'], $candidate['short_symbol']]
+        < [$current['long_symbol'], $current['short_symbol']];
 }
