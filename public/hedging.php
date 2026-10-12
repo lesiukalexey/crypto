@@ -224,6 +224,8 @@ async function loadPairRanking(selectLeader=false){
   const selectionVersion=pairSelectionVersion;
   const requestId=++pairRankingRequest,params=new URLSearchParams(new FormData(form));params.delete('pair');
   const url=new URL('hedge-ranking.php',location.href);url.search=params.toString();
+  let lastRankingProgress=Date.now(),lastRankingMessage='Проверяю кэш рейтинга пар…';
+  const progressTimer=setInterval(()=>{if(requestId!==pairRankingRequest)return;const waitingSeconds=Math.floor((Date.now()-lastRankingProgress)/1000);if(waitingSeconds>=10)pairRankingStatus.textContent=lastRankingMessage+' — жду следующий ответ сервера: '+waitingSeconds+' сек.'},5000);
   if(selectLeader){summaryNode.hidden=true;localMovesPanel.hidden=true;chart.replaceChildren();pointCount.textContent='';setChartLoading(true);statusNode.classList.remove('error');statusNode.textContent='Сначала рассчитываю доходность всех пар; затем загружу график лучшей пары…'}
   pairRankingStatus.textContent='Проверяю кэш рейтинга пар…';
   try{
@@ -231,7 +233,7 @@ async function loadPairRanking(selectLeader=false){
     let data=null;
     if(response.headers.get('content-type')?.includes('application/x-ndjson')){
       const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
-      const consume=chunk=>{buffer+=chunk;const lines=buffer.split('\n');buffer=lines.pop();for(const line of lines){if(!line.trim())continue;const event=JSON.parse(line);if(event.type==='progress')pairRankingStatus.textContent=event.message;if(event.type==='error')throw new Error(event.message);if(event.type==='result')data=event.data}};
+      const consume=chunk=>{buffer+=chunk;const lines=buffer.split('\n');buffer=lines.pop();for(const line of lines){if(!line.trim())continue;const event=JSON.parse(line);if(event.type==='progress'){lastRankingProgress=Date.now();lastRankingMessage=event.message;pairRankingStatus.textContent=event.message}if(event.type==='error')throw new Error(event.message);if(event.type==='result')data=event.data}};
       while(true){const{value,done}=await reader.read();if(done)break;consume(decoder.decode(value,{stream:true}))}
       consume(decoder.decode());if(buffer.trim()){const event=JSON.parse(buffer);if(event.type==='error')throw new Error(event.message);if(event.type==='result')data=event.data}
     }else{data=await response.json()}
@@ -244,7 +246,7 @@ async function loadPairRanking(selectLeader=false){
     else if(!leader&&selectLeader&&selectionVersion===pairSelectionVersion){setChartLoading(false);statusNode.textContent='Не нашлось пары с данными для расчёта за выбранный период.'}
     const pairCount=data.ordered_pair_count??0;
     pairRankingStatus.textContent=`${data.cache_hit?'Загружен сохранённый рейтинг':'Рассчитана доходность'} ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; списки пересортировываются относительно выбранного тикера. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
-  }catch(error){if(requestId===pairRankingRequest){setChartLoading(false);pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message;if(selectLeader)statusNode.textContent='Не удалось рассчитать пары: '+error.message}}
+  }catch(error){if(requestId===pairRankingRequest){setChartLoading(false);pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message;if(selectLeader)statusNode.textContent='Не удалось рассчитать пары: '+error.message}}finally{clearInterval(progressTimer)}
 }
 function el(tag,attrs={},text=''){const node=document.createElementNS(ns,tag);for(const[key,value]of Object.entries(attrs))node.setAttribute(key,value);if(text)node.textContent=text;chart.append(node);return node}
 function render(data){

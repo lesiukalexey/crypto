@@ -153,7 +153,8 @@ try {
         flock($cacheLock, LOCK_UN);
         fclose($cacheLock);
     }
-    hedge_ranking_progress('Рейтинг в кэше не найден. Загружаю котировки: 0%.');
+    hedge_ranking_progress('В кэше рейтинга нет. В базе найдено '
+        . number_format($totalQuoteCount, 0, ',', ' ') . ' снимков котировок; готовлю их загрузку.');
     $statement = $pdo->prepare(
         'SELECT symbol, received_at_utc, bid_price, ask_price FROM quote_snapshots '
         . 'WHERE category = ? AND symbol IN (' . implode(',', array_fill(0, count($symbols), '?')) . ') '
@@ -194,8 +195,8 @@ try {
             $packedChunk = [];
         }
         $loadedQuotes++;
-        if ($loadedQuotes % 100000 === 0) {
-            $percent = $totalQuoteCount > 0 ? min(50, (int) floor($loadedQuotes * 50 / $totalQuoteCount)) : 50;
+        if ($loadedQuotes % 10000 === 0) {
+            $percent = $totalQuoteCount > 0 ? min(50, max(1, (int) ceil($loadedQuotes * 50 / $totalQuoteCount))) : 50;
             hedge_ranking_progress('Загружены снимки котировок: ' . number_format($loadedQuotes, 0, ',', ' ')
                 . ' / ' . number_format($totalQuoteCount, 0, ',', ' ') . " ({$percent}%).");
             set_time_limit(300);
