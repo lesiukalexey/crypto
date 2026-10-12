@@ -60,6 +60,13 @@ function assertDemoSymbolsAvailable(array $config, array $symbols): void {
     $unavailable = array_values(array_unique(array_filter(array_map('strtoupper', $symbols), static fn (string $symbol): bool => $symbol !== '' && !isset($available[$symbol]))));
     if ($unavailable !== []) throw new RuntimeException('Запуск Bitget Demo запрещён: тикеры недоступны или не проверены — ' . implode(', ', $unavailable) . '.');
 }
+function executablePortfolioStrategies(array $strategies, array $strategyRuns): array {
+    $stopping = [];
+    foreach ($strategyRuns as $run) {
+        if (($run['status'] ?? '') === 'stopping') $stopping[(string) ($run['strategy_id'] ?? '')] = true;
+    }
+    return array_values(array_filter($strategies, static fn (array $strategy): bool => !empty($strategy['enabled']) || isset($stopping[(string) ($strategy['strategy_id'] ?? '')])));
+}
 function timeMsLabel(mixed $value): string {
     if (!is_numeric($value) || (int) $value <= 0) return '—';
     return (new DateTimeImmutable('@' . (int) floor((int) $value / 1000)))->setTimezone(new DateTimeZone('Europe/Kyiv'))->format('d.m.Y H:i:s');
@@ -383,11 +390,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($accountMode === 'demo') {
                 $demoPortfolioSymbols = [];
-                foreach (($portfolioState['portfolio_strategies'] ?? []) as $portfolioStrategy) {
+                $executableStrategies = executablePortfolioStrategies($portfolioState['portfolio_strategies'] ?? [], $portfolioState['strategy_runs'] ?? []);
+                foreach ($executableStrategies as $portfolioStrategy) {
                     foreach (($portfolioStrategy['symbols'] ?? []) as $portfolioSymbol) $demoPortfolioSymbols[] = strtoupper((string) $portfolioSymbol);
                 }
-                if ($demoPortfolioSymbols === [] && is_array($published)) $demoPortfolioSymbols = array_map('strtoupper', array_map('strval', $published['market']['symbols'] ?? []));
-                if ($demoPortfolioSymbols === []) throw new RuntimeException('Запуск Bitget Demo запрещён: не удалось определить тикеры портфеля.');
+                if ($demoPortfolioSymbols === [] && empty($portfolioState['portfolio_strategies']) && is_array($published)) $demoPortfolioSymbols = array_map('strtoupper', array_map('strval', $published['market']['symbols'] ?? []));
+                if ($demoPortfolioSymbols === []) throw new RuntimeException('Запуск Bitget Demo невозможен: в портфеле нет включённых стратегий. Добавьте или возобновите стратегию.');
                 assertDemoSymbolsAvailable($config, $demoPortfolioSymbols);
             }
             $startArgs = ['portfolio-start', '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--risk-settings', $riskSettingsPath, '--interval', '5', '--mode', $accountMode];
@@ -451,8 +459,9 @@ if ($statusCode === 0 && is_array($decoded = json_decode($statusOut, true))) $st
 $demoTickerSnapshot = $accountMode === 'demo' ? demoTickerCapabilitySnapshot($config) : null;
 $demoStartBlockedSymbols = [];
 if ($accountMode === 'demo') {
-    foreach (($status['portfolio_strategies'] ?? []) as $portfolioStrategy) foreach (($portfolioStrategy['symbols'] ?? []) as $portfolioSymbol) $demoStartBlockedSymbols[] = strtoupper((string) $portfolioSymbol);
-    if ($demoStartBlockedSymbols === [] && is_array($published)) $demoStartBlockedSymbols = array_map('strtoupper', array_map('strval', $published['market']['symbols'] ?? []));
+    $executableStrategies = executablePortfolioStrategies($status['portfolio_strategies'] ?? [], $status['strategy_runs'] ?? []);
+    foreach ($executableStrategies as $portfolioStrategy) foreach (($portfolioStrategy['symbols'] ?? []) as $portfolioSymbol) $demoStartBlockedSymbols[] = strtoupper((string) $portfolioSymbol);
+    if ($demoStartBlockedSymbols === [] && empty($status['portfolio_strategies']) && is_array($published)) $demoStartBlockedSymbols = array_map('strtoupper', array_map('strval', $published['market']['symbols'] ?? []));
     if (is_array($demoTickerSnapshot)) {
         $demoAvailableLookup = array_fill_keys($demoTickerSnapshot['available'], true);
         $demoStartBlockedSymbols = array_values(array_unique(array_filter($demoStartBlockedSymbols, static fn (string $ticker): bool => !isset($demoAvailableLookup[$ticker]))));
