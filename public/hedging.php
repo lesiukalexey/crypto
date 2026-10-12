@@ -28,7 +28,6 @@ $tickerSetSelection = selectedTickerSet($config, trim((string) ($_GET['ticker_se
 $tickerSetId = $tickerSetSelection['id'];
 $tickerSetOptions = $tickerSetSelection['sets'];
 $symbols = $tickerSetSelection['symbols'];
-$manualPairSelection = true;
 $startDayAuto = (string) ($_GET['start_day_auto'] ?? '') === '1'
     || (!array_key_exists('start_day', $_GET) && !array_key_exists('day', $_GET));
 $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Kyiv'));
@@ -71,7 +70,6 @@ $favoriteSymbolsDisabled = $favoriteView && (
     !in_array(strtoupper((string) ($favorite['params']['long_symbol'] ?? '')), $symbols, true)
     || !in_array(strtoupper((string) ($favorite['params']['short_symbol'] ?? '')), $symbols, true)
 );
-$pairWasRequested = isset($_GET['pair']) || isset($_GET['long_symbol']) || isset($_GET['short_symbol']);
 if (!in_array($longSymbol, $symbols, true)) $longSymbol = $symbols[0] ?? '';
 if (!in_array($shortSymbol, $symbols, true) || $shortSymbol === $longSymbol) {
     $shortSymbol = current(array_values(array_filter($symbols, static fn (string $symbol): bool => $symbol !== $longSymbol))) ?: '';
@@ -181,10 +179,7 @@ function samplePointsAtInterval(points,intervalMs){
 const localMovesPanel=document.querySelector('#local-moves-panel'),localMovesSummary=document.querySelector('#local-moves-summary'),localMovesRows=document.querySelector('#local-moves-rows'),localMovesScale=document.querySelector('#local-moves-scale'),localMovesThreshold=document.querySelector('#local-moves-threshold');
 const pairRankingStatus=document.querySelector('#pair-ranking-status');
 let pairRankingRequest=0;
-const pairWasRequestedOnPageLoad=<?= $pairWasRequested ? 'true' : 'false' ?>;
-let pairRankingLoaded=false;
-let pairSelectionTouched=false;
-const manualPairSelection=<?= $manualPairSelection ? 'true' : 'false' ?>;
+let pairSelectionVersion=0;
 function syncManualPairSelection(){if(longSymbolSelect&&shortSymbolSelect)pairSelect.value=longSymbolSelect.value+'|'+shortSymbolSelect.value}
 function renderTickerRanking(select,pairs,partnerSide){
   if(!select||!Array.isArray(pairs))return;
@@ -198,19 +193,20 @@ function renderTickerRanking(select,pairs,partnerSide){
   });
   select.replaceChildren(...options.map(({symbol,pair})=>{
     const option=document.createElement('option');option.value=symbol;
-    const partnerLabel=partnerSide==='short'?'шорт':'лонг';
     const returnLabel=pair?.net_pnl===null||pair?.net_pnl===undefined?'нет данных':`${signed(pair.net_pnl)} USDT (${signed(pair.return_percent)}%)`;
-    option.textContent=pair?`${symbol} · лучший ${partnerLabel} ${partnerSide==='short'?pair.short_symbol:pair.long_symbol} · доходность ${returnLabel}`:symbol;
+    option.textContent=pair?`${symbol} · доходность ${returnLabel}`:symbol;
     option.selected=symbol===selected;return option;
   }));
 }
-for(const select of [longSymbolSelect,shortSymbolSelect])select?.addEventListener('change',()=>{pairSelectionTouched=true;syncManualPairSelection();loadData()});
-pairSelect.addEventListener('change',()=>{pairSelectionTouched=true});
+for(const select of [longSymbolSelect,shortSymbolSelect])select?.addEventListener('change',()=>{pairSelectionVersion++;syncManualPairSelection();loadData()});
+pairSelect.addEventListener('change',()=>{pairSelectionVersion++});
 document.querySelector('#add-hedge-favorite')?.addEventListener('click',async()=>{const button=document.querySelector('#add-hedge-favorite'),status=document.querySelector('#hedge-favorite-status'),params=new URLSearchParams(new FormData(form)),[longSymbol,shortSymbol]=pairSelect.value.split('|');params.set('favorite_type','hedge');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);params.set('favorite_entry_label',`Лонг ${longSymbol} / шорт ${shortSymbol}`);params.set('favorite_exit_label','Закрытие по последнему синхронизированному снимку');params.set('favorite_name',`Лонг ${longSymbol} / шорт ${shortSymbol}`);button.disabled=true;status.textContent='Сохраняю пару…';try{const response=await fetch('favorites.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:params}),result=await response.json();if(!response.ok||result.status!=='ok')throw new Error(result.error||'Не удалось сохранить пару');button.textContent='✓ Добавлено';status.textContent='Пара добавлена в избранное.'}catch(error){status.textContent=error.message||'Не удалось сохранить пару';button.disabled=false}});
-async function loadPairRanking(){
-  if(!pairSelect.value){pairRankingStatus.textContent='Для расчёта пары выберите список минимум с двумя активными тикерами.';return}
+async function loadPairRanking(selectLeader=false){
+  if(!pairSelect.value){pairRankingStatus.textContent='Для расчёта пары выберите список минимум с двумя активными тикерами.';if(selectLeader)statusNode.textContent='Для хеджирования нужны минимум два активных тикера.';return}
+  const selectionVersion=pairSelectionVersion;
   const requestId=++pairRankingRequest,params=new URLSearchParams(new FormData(form));params.delete('pair');
   const url=new URL('hedge-ranking.php',location.href);url.search=params.toString();
+  if(selectLeader){summaryNode.hidden=true;localMovesPanel.hidden=true;chart.replaceChildren();pointCount.textContent='';statusNode.classList.remove('error');statusNode.textContent='Сначала рассчитываю доходность всех пар; затем загружу график лучшей пары…'}
   pairRankingStatus.textContent='Загрузка котировок для рейтинга пар: 0%.';
   try{
     const response=await fetch(url,{headers:{Accept:'application/x-ndjson, application/json'},cache:'no-store'});
@@ -223,24 +219,14 @@ async function loadPairRanking(){
     }else{data=await response.json()}
     if(requestId!==pairRankingRequest)return;
     if(!response.ok||data?.status!=='ready')throw new Error(data?.message||'Не удалось рассчитать доходность пар');
-    const currentPair=pairSelect.value;
-    if(manualPairSelection){
-      const leader=data.pairs?.[0];
-      renderTickerRanking(longSymbolSelect,data.best_long_pairs,'short');
-      renderTickerRanking(shortSymbolSelect,data.best_short_pairs,'long');
-      if(leader&&!pairWasRequestedOnPageLoad&&!pairSelectionTouched){longSymbolSelect.value=leader.long_symbol;shortSymbolSelect.value=leader.short_symbol;syncManualPairSelection();loadData()}
-      const pairCount=data.ordered_pair_count??0;
-      pairRankingStatus.textContent=`Рассчитана доходность ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; тикеры отсортированы по лучшей паре. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
-      return;
-    }
-    const preserveSelection=pairRankingLoaded||pairWasRequestedOnPageLoad||pairSelectionTouched;
-    const selectedPair=preserveSelection?currentPair:(data.pairs[0]?data.pairs[0].long_symbol+'|'+data.pairs[0].short_symbol:currentPair);
-    const fragment=document.createDocumentFragment();
-    for(const pair of data.pairs){const option=document.createElement('option'),value=pair.long_symbol+'|'+pair.short_symbol;option.value=value;option.textContent=pair.net_pnl===null?`Лонг ${pair.long_symbol} / шорт ${pair.short_symbol} · доходность нет данных`:`Лонг ${pair.long_symbol} / шорт ${pair.short_symbol} · доходность ${signed(pair.net_pnl)} USDT (${signed(pair.return_percent)}%)`;option.selected=value===selectedPair;fragment.append(option)}
-    pairSelect.replaceChildren(fragment);if(!pairSelect.value&&pairSelect.options.length)pairSelect.selectedIndex=0;
-    pairRankingLoaded=true;pairRankingStatus.textContent=`Отсортировано ${data.pairs.length} пар по чистой доходности за ${data.start_day} — ${data.end_day}; рейтинг пересчитывается при каждом открытии страницы.`;
-    if(pairSelect.value!==currentPair)loadData();
-  }catch(error){if(requestId===pairRankingRequest)pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message}
+    const leader=data.pairs?.find(pair=>pair.net_pnl!==null);
+    renderTickerRanking(longSymbolSelect,data.best_long_pairs,'short');
+    renderTickerRanking(shortSymbolSelect,data.best_short_pairs,'long');
+    if(leader&&selectLeader&&selectionVersion===pairSelectionVersion){longSymbolSelect.value=leader.long_symbol;shortSymbolSelect.value=leader.short_symbol;syncManualPairSelection();await loadData()}
+    else if(!leader&&selectLeader&&selectionVersion===pairSelectionVersion){statusNode.textContent='Не нашлось пары с данными для расчёта за выбранный период.'}
+    const pairCount=data.ordered_pair_count??0;
+    pairRankingStatus.textContent=`Рассчитана доходность ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; тикеры отсортированы по лучшей паре. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
+  }catch(error){if(requestId===pairRankingRequest){pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message;if(selectLeader)statusNode.textContent='Не удалось рассчитать пары: '+error.message}}
 }
 function el(tag,attrs={},text=''){const node=document.createElementNS(ns,tag);for(const[key,value]of Object.entries(attrs))node.setAttribute(key,value);if(text)node.textContent=text;chart.append(node);return node}
 function render(data){
@@ -359,5 +345,5 @@ function render(data){
 async function loadData(){if(!pairSelect.value){summaryNode.hidden=true;statusNode.textContent='В выбранном списке нет двух активных тикеров для хеджирования.';return}if(favoriteSymbolsDisabled){statusNode.textContent='Один из тикеров сохранённой пары не входит в список.';statusNode.classList.add('error');return}const [longSymbol,shortSymbol]=pairSelect.value.split('|'),params=new URLSearchParams(new FormData(form));if(favoriteView)for(const[key,value]of Object.entries(favoriteSavedParams))params.set(key,String(value));params.delete('pair');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);const url=new URL('hedge-data.php',location.href);url.search=params.toString();statusNode.textContent='Загружаю и сопоставляю снимки…';statusNode.classList.remove('error');chart.replaceChildren();try{const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'}),data=await response.json();if(!response.ok||data.status==='error')throw new Error(data.message||'Не удалось загрузить данные пары');if(data.status!=='ready'){render(data);return}render(data);const next=new URL(location.href);for(const[key,value]of params)next.searchParams.set(key,value);next.searchParams.set('pair',pairSelect.value);next.searchParams.set('chart_view',chartView);if(favoriteView)next.searchParams.set('favorite_id',favoriteId);history.replaceState(null,'',next);const basicParams=new URLSearchParams(location.search);for(const key of ['long_symbol','short_symbol','pair','favorite_id','chart_view'])basicParams.delete(key);for(const key of ['start_day','end_day','balance','fee'])basicParams.set(key,params.get(key));document.querySelector('.view-nav a[href^="./?"]').href='./?'+basicParams.toString()}catch(error){summaryNode.hidden=true;statusNode.textContent=error.message;statusNode.classList.add('error')}}
 function setChartView(nextView){chartView=nextView;chartModeButtons.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartView===chartView)));const next=new URL(location.href);next.searchParams.set('chart_view',chartView);history.replaceState(null,'',next);if(window.currentHedgeData)render(window.currentHedgeData)}
 chartModeButtons.forEach(button=>button.addEventListener('click',()=>setChartView(button.dataset.chartView)));
-localMovesScale.addEventListener('change',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});form.addEventListener('submit',event=>{event.preventDefault();loadData().then(()=>loadPairRanking())});form.addEventListener('change',event=>{if(event.target.name==='start_day'){startDayAutoInput.value='0';const next=new URL(location.href);next.searchParams.set('start_day',event.target.value);next.searchParams.set('start_day_auto','0');history.replaceState(null,'',next)}if(event.target===pairSelect||event.target===longSymbolSelect||event.target===shortSymbolSelect){if(event.target===pairSelect)loadData();return}loadData().then(()=>loadPairRanking())});window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});loadData().then(()=>{if(!favoriteView)loadPairRanking()});
+localMovesScale.addEventListener('change',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});form.addEventListener('submit',event=>{event.preventDefault();loadPairRanking(true)});form.addEventListener('change',event=>{if(event.target.name==='start_day'){startDayAutoInput.value='0';const next=new URL(location.href);next.searchParams.set('start_day',event.target.value);next.searchParams.set('start_day_auto','0');history.replaceState(null,'',next)}if(event.target===pairSelect||event.target===longSymbolSelect||event.target===shortSymbolSelect){if(event.target===pairSelect)loadData();return}loadPairRanking(true)});window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});if(favoriteView)loadData();else loadPairRanking(true);
 </script></body></html>
