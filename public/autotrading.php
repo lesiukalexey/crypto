@@ -22,15 +22,6 @@ function signedDecimalInput(mixed $value, string $label): string {
     if (!preg_match('/^-?\d{1,12}(?:\.\d{1,24})?$/', $text) || abs((float) $text) > 1000000000) throw new RuntimeException($label . ': неверный формат.');
     return $text;
 }
-function calendarDateInput(mixed $value, string $label): string {
-    $text = trim((string) $value);
-    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $text, new DateTimeZone('Europe/Kyiv'));
-    $errors = DateTimeImmutable::getLastErrors();
-    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $text) || $date === false || ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0)) || $date->format('Y-m-d') !== $text) {
-        throw new RuntimeException($label . ': проверьте дату.');
-    }
-    return $text;
-}
 function timeMsLabel(mixed $value): string {
     if (!is_numeric($value) || (int) $value <= 0) return '—';
     return (new DateTimeImmutable('@' . (int) floor((int) $value / 1000)))->setTimezone(new DateTimeZone('Europe/Kyiv'))->format('d.m.Y H:i:s');
@@ -222,15 +213,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($longSymbol === $shortSymbol || !isset($enabled[$longSymbol], $enabled[$shortSymbol])) throw new RuntimeException('Проверьте выбранные тикеры: лонг и шорт должны быть разными активными тикерами.');
             $starting = decimalInput($_POST['hedge_balance'] ?? '', 'Стартовый баланс', false);
             $fee = decimalInput($_POST['hedge_fee'] ?? '', 'Комиссия');
-            $startDay = calendarDateInput($_POST['hedge_start_day'] ?? '', 'Начало периода');
-            $endDay = calendarDateInput($_POST['hedge_end_day'] ?? '', 'Конец периода');
-            if ($endDay < $startDay) throw new RuntimeException('Конец периода не может быть раньше его начала.');
             foreach (($currentStatus['portfolio_strategies'] ?? []) as $existingStrategy) {
                 if (($existingStrategy['kind'] ?? '') === 'hedge' && array_values($existingStrategy['symbols'] ?? []) === [$longSymbol, $shortSymbol]) {
                     throw new RuntimeException('Эта хедж-пара уже добавлена в портфель. Откройте пункт «Портфель».');
                 }
             }
             $releaseId = 'hedge-' . gmdate('Ymd-His') . '-' . bin2hex(random_bytes(3));
+            $metadataDay = date('Y-m-d');
             $release = [
                 'schema_version' => 1, 'release_id' => $releaseId, 'created_at_utc' => gmdate('Y-m-d\\TH:i:s\\Z'),
                 'market' => ['category' => 'USDT-FUTURES', 'symbols' => [$longSymbol, $shortSymbol], 'margin_coin' => 'USDT'],
@@ -241,7 +230,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ],
                 'execution' => ['starting_balance_usdt' => $starting, 'leverage' => '1', 'taker_fee_rate' => bcdiv($fee, '100', 24), 'slippage_bps' => '0', 'include_funding' => false],
                 'risk' => ['max_order_notional_usdt' => $starting, 'max_total_exposure_usdt' => $starting, 'max_daily_loss_usdt' => decimalInput((string) max(0.01, (float) $starting * 0.1), 'Дневной лимит', false), 'max_open_positions' => 1],
-                'backtest' => ['start_date' => $startDay, 'end_date' => $endDay, 'result_key' => hash('sha256', $longSymbol . '|' . $shortSymbol . '|' . $startDay . '|' . $endDay), 'net_result_usdt' => '0', 'trade_count' => 0],
+                'backtest' => ['start_date' => $metadataDay, 'end_date' => $metadataDay, 'result_key' => hash('sha256', $longSymbol . '|' . $shortSymbol), 'net_result_usdt' => '0', 'trade_count' => 0],
             ];
             if (!is_dir($releaseDir) && !mkdir($releaseDir, 0700, true) && !is_dir($releaseDir)) throw new RuntimeException('Не удалось создать каталог стратегий.');
             if (is_link($releaseDir) || fileowner($releaseDir) !== $uid) throw new RuntimeException('Каталог стратегий имеет неподходящего владельца.');
@@ -463,12 +452,7 @@ $autotradingViewUrl = static fn (string $view): string => 'autotrading.php?' . h
 $autotradingModeViewUrl = static fn (string $mode): string => 'autotrading.php?' . http_build_query(array_merge(['mode' => $mode, 'view' => 'setup'], $autotradingContextQuery));
 $selectedStrategyPresent = isset($_GET['symbol']);
 $paperStrategySupported = $category === 'USDT-FUTURES' && !$includeFunding && $martingaleMode === 'none';
-$hedgePreviewDatesValid = preg_match('/^\d{4}-\d{2}-\d{2}$/', $hedgePreviewStartDay) === 1
-    && preg_match('/^\d{4}-\d{2}-\d{2}$/', $hedgePreviewEndDay) === 1
-    && checkdate((int) substr($hedgePreviewStartDay, 5, 2), (int) substr($hedgePreviewStartDay, 8, 2), (int) substr($hedgePreviewStartDay, 0, 4))
-    && checkdate((int) substr($hedgePreviewEndDay, 5, 2), (int) substr($hedgePreviewEndDay, 8, 2), (int) substr($hedgePreviewEndDay, 0, 4))
-    && $hedgePreviewEndDay >= $hedgePreviewStartDay;
-$hedgePreviewCanAdd = $hasHedgePreview && $hedgePreviewDatesValid
+$hedgePreviewCanAdd = $hasHedgePreview
     && preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $hedgePreviewBalance) === 1 && (float) $hedgePreviewBalance > 0 && (float) $hedgePreviewBalance <= 1000000000
     && preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $hedgePreviewFee) === 1 && (float) $hedgePreviewFee >= 0 && (float) $hedgePreviewFee <= 5;
 $selectedHedgeInPortfolio = false;
@@ -506,10 +490,9 @@ $postHidden = [
 <?php if ($autotradingView === 'setup'): ?>
 <?php if ($hasHedgePreview): ?><section class="panel selected-summary" aria-label="Параметры выбранной хедж-пары"><h2>Параметры из хеджирования</h2><div class="grid">
 <div class="stat"><span>Лонг</span><strong><?= h($hedgePreviewLong) ?></strong></div><div class="stat"><span>Шорт</span><strong><?= h($hedgePreviewShort) ?></strong></div>
-<div class="stat"><span>Период</span><strong><?= h($hedgePreviewStartDay ?: '—') ?> — <?= h($hedgePreviewEndDay ?: '—') ?></strong></div>
 <div class="stat"><span>Стартовый баланс</span><strong><?= h($hedgePreviewBalance ?: '—') ?> USDT</strong></div><div class="stat"><span>Комиссия за сторону</span><strong><?= h($hedgePreviewFee ?: '—') ?>%</strong></div>
 </div>
-<?php if (!$selectedHedgeInPortfolio): ?><p class="note">После запуска откроется лонг <?= h($hedgePreviewLong) ?> и шорт <?= h($hedgePreviewShort) ?>. Сначала добавьте пару в портфель; запуск — отдельным действием.</p><?php if (!$hedgePreviewCanAdd): ?><p class="status warning">Проверьте даты, баланс и комиссию на странице хеджирования.</p><?php endif; ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_hedge"><input type="hidden" name="mode" value="<?= h($accountMode) ?>"><input type="hidden" name="hedge_long" value="<?= h($hedgePreviewLong) ?>"><input type="hidden" name="hedge_short" value="<?= h($hedgePreviewShort) ?>"><input type="hidden" name="hedge_start_day" value="<?= h($hedgePreviewStartDay) ?>"><input type="hidden" name="hedge_end_day" value="<?= h($hedgePreviewEndDay) ?>"><input type="hidden" name="hedge_balance" value="<?= h($hedgePreviewBalance) ?>"><input type="hidden" name="hedge_fee" value="<?= h($hedgePreviewFee) ?>"><button <?= !$isLocal || !$hedgePreviewCanAdd || !empty($status['service']['running']) ? 'disabled' : '' ?>>Добавить выбранную пару в портфель</button></form>
+<?php if (!$selectedHedgeInPortfolio): ?><p class="note">После запуска откроется лонг <?= h($hedgePreviewLong) ?> и шорт <?= h($hedgePreviewShort) ?>. Сначала добавьте пару в портфель; запуск — отдельным действием.</p><?php if (!$hedgePreviewCanAdd): ?><p class="status warning">Проверьте баланс и комиссию на странице хеджирования.</p><?php endif; ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_hedge"><input type="hidden" name="mode" value="<?= h($accountMode) ?>"><input type="hidden" name="hedge_long" value="<?= h($hedgePreviewLong) ?>"><input type="hidden" name="hedge_short" value="<?= h($hedgePreviewShort) ?>"><input type="hidden" name="hedge_balance" value="<?= h($hedgePreviewBalance) ?>"><input type="hidden" name="hedge_fee" value="<?= h($hedgePreviewFee) ?>"><button <?= !$isLocal || !$hedgePreviewCanAdd || !empty($status['service']['running']) ? 'disabled' : '' ?>>Добавить выбранную пару в портфель</button></form>
 <?php else: ?><p class="status success">Эта пара уже добавлена в портфель <?= $accountMode === 'demo' ? 'Bitget Demo' : 'Bitget Real' ?>. При запуске откроется лонг <?= h($hedgePreviewLong) ?> и шорт <?= h($hedgePreviewShort) ?>.</p><?php endif; ?></section>
 <?php elseif ($selectedStrategyPresent): ?><section class="panel selected-summary"><h2>Выбрано в «Базовых проверках»</h2><div class="grid"><div class="stat"><span>Тикер</span><strong><?= h($symbol) ?></strong></div><div class="stat"><span>Условие входа</span><strong><?= h(entryDescription(['entry_config' => $entryConfig, 'entry_signal_mode' => $entrySignalMode, 'entry_direction_mode' => $entryDirectionMode])) ?></strong></div><div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription($exitConfig)) ?></strong></div><div class="stat"><span>Период</span><strong><?= h($startDate) ?> — <?= h($endDate) ?></strong></div></div></section>
 <?php else: ?><section class="panel"><h2>Подготовка запуска</h2><p class="empty">Выберите конфигурацию в «Базовых проверках» или пару в «Хеджировании».</p><a href="hedging.php">Открыть хеджирование</a></section><?php endif; ?>
