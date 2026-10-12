@@ -2674,6 +2674,27 @@ function portfolioRankingDiagnosticsText(ranking) {
         const remainder = total % 60;
         return hours ? `${hours} ч ${minutes} мин` : `${minutes} мин ${remainder} с`;
     };
+    const estimatedFinish = () => {
+        if (ranking.status !== 'pending') return '';
+        if (ranking.queued) return 'Ожидаемое окончание: после запуска расчёта из очереди.';
+        const elapsedSeconds = Number(ranking.elapsed_seconds);
+        const completedCandidates = Number(ranking.completed_candidates);
+        const totalCandidates = Number(ranking.total_candidates);
+        const completedRatio = totalCandidates > 0 && completedCandidates > 0
+            ? completedCandidates / totalCandidates
+            : Number(ranking.progress || 0) / 100;
+        if (!Number.isFinite(elapsedSeconds) || elapsedSeconds <= 0 || completedRatio <= 0) {
+            return 'Ожидаемое окончание: оценка появится после первых завершённых порогов.';
+        }
+        const ratio = Math.min(0.999, completedRatio);
+        const remainingSeconds = elapsedSeconds * (1 - ratio) / ratio;
+        const finish = new Date(Date.now() + remainingSeconds * 1000);
+        const formatted = new Intl.DateTimeFormat('ru-RU', {
+            timeZone: 'Europe/Kyiv', day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+        }).format(finish);
+        return `Ожидаемое окончание: ${formatted} (оценка).`;
+    };
     const lines = [];
     if (ranking.result_cache_hit) {
         const cachedAt = ranking.result_cached_at ? new Date(ranking.result_cached_at).toLocaleString('ru-RU', {timeZone:'Europe/Kyiv'}) : null;
@@ -2710,6 +2731,7 @@ function portfolioRankingDiagnosticsText(ranking) {
     } else if (ranking.status === 'pending' && !ranking.queued) lines.push('Счетчики попаданий/промахов кэша появятся в новых расчетах; этот уже запущенный процесс их не записывает.');
     if (ranking.queued) lines.push('Задача пока ждет свободного обработчика; статистика появится после запуска.');
     else if (ranking.elapsed_seconds !== undefined) lines.push(`Прошло: ${duration(ranking.elapsed_seconds)}.`);
+    if (ranking.status === 'pending') lines.push(estimatedFinish());
     if (checkpointDates.length || checkpointCount) lines.push('Контрольные точки хранят состояние на конец дня. Если последняя подходящая точка раньше конца периода, хвост котировок пересчитывается; если точки на нужный день нет или проверка версии котировок не прошла, расчет идет с более ранней точки.');
     if (checkpointCount > 0 && checkpointDates.length === 0) lines.push('Этот расчет запущен до добавления отчета с датами контрольных точек; новые запуски покажут даты, которые действительно загрузили.');
     if (ranking.min_trades !== undefined) lines.push(`SAVE MODE = минимум ${ranking.min_trades} сделки: он отсекает неподходящие результаты после расчета и сам по себе не уменьшает число проверяемых TP/SL.`);
