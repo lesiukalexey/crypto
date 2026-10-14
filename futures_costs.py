@@ -40,6 +40,8 @@ def load_historical_funding_rates(
     end_timestamp: float,
     *,
     force_refresh: bool = False,
+    contract_open_timestamp: float | None = None,
+    funding_interval_hours: float | None = None,
 ) -> list[tuple[float, float]]:
     """Return (UTC epoch seconds, rate) rows covering [start, end].
 
@@ -50,6 +52,23 @@ def load_historical_funding_rates(
     """
     if not symbol or start_timestamp > end_timestamp:
         raise ValueError("Invalid symbol or funding-history interval")
+
+    def covers_start(first_rate_timestamp: float) -> bool:
+        if first_rate_timestamp <= start_timestamp:
+            return True
+        if (
+            contract_open_timestamp is None
+            or funding_interval_hours is None
+            or not (start_timestamp < first_rate_timestamp and contract_open_timestamp <= first_rate_timestamp)
+            or funding_interval_hours <= 0
+        ):
+            return False
+        # A newly listed contract has no funding settlement before its first
+        # scheduled event. Accept that initial interval only when the
+        # exchange's listing time and funding cadence prove the first event
+        # follows listing within one funding interval.
+        return first_rate_timestamp - contract_open_timestamp <= funding_interval_hours * 3600
+
     path = funding_cache_path(product_type, symbol)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with path.with_suffix(".lock").open("a", encoding="utf-8") as lock:
@@ -59,7 +78,7 @@ def load_historical_funding_rates(
             not force_refresh
             and cached is not None
             and int(cached.get("fetched_at", 0)) >= int(time.time()) - CACHE_TTL_SECONDS
-            and float(cached.get("first_timestamp", float("inf"))) <= start_timestamp
+            and covers_start(float(cached.get("first_timestamp", float("inf"))))
             and (float(cached.get("last_timestamp", float("-inf"))) >= end_timestamp or float(cached.get("latest_request_time", 0)) >= end_timestamp)
         ):
             return [(float(ts), float(rate)) for ts, rate in cached["rates"] if start_timestamp <= float(ts) <= end_timestamp]
@@ -112,7 +131,7 @@ def load_historical_funding_rates(
         else:
             raise RuntimeError(f"Bitget funding history pagination exceeded 100 pages for {symbol}")
 
-        if not rows or first_timestamp > start_timestamp or (last_timestamp < end_timestamp and latest_request_time < end_timestamp):
+        if not rows or not covers_start(first_timestamp) or (last_timestamp < end_timestamp and latest_request_time < end_timestamp):
             raise RuntimeError(
                 f"Bitget funding history for {symbol} does not cover the requested interval "
                 f"({datetime.fromtimestamp(first_timestamp, timezone.utc).isoformat() if rows else 'empty'} — "

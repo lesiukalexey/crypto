@@ -11,7 +11,7 @@ Environment=PYTHONPATH=/home/admin/.local/lib/bitget-autotrading
 Environment=BITGET_LIVE_TRADING_ENABLED=0
 EnvironmentFile=-/home/admin/.config/bitget-autotrading/executor.env
 ExecStartPre=/usr/bin/test -r /home/admin/.config/bitget-autotrading/active-release.json
-ExecStart=/usr/bin/python3 -m autotrading paper-run /home/admin/.config/bitget-autotrading/active-release.json --state /home/admin/.local/state/bitget-autotrading/state.sqlite --control /home/admin/.local/state/bitget-autotrading/control.json --interval 5 --stale-seconds 30
+ExecStart=/usr/bin/python3 -m autotrading paper-run /home/admin/.config/bitget-autotrading/active-release.json --state /home/admin/.local/state/bitget-autotrading/state.sqlite --control /home/admin/.local/state/bitget-autotrading/control.json --interval 30 --stale-seconds 90
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

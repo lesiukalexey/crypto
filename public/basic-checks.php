@@ -138,8 +138,9 @@ if (!in_array($martingaleTiming, ['immediate', 'rules'], true)) $martingaleTimin
 if ($martingaleAttempts === false || $martingaleAttempts < 2 || $martingaleAttempts > 10) $martingaleAttempts = 3;
 $defaultFixedValue = (int) ($rankingRanges['fixed_tp']['values_basis_points'][0] ?? 10);
 $defaultExitConfig = 'fixed:' . $defaultFixedValue . ':' . $defaultFixedValue;
-$exitConfig = (string) ($_GET['exit_config'] ?? $defaultExitConfig);
-$selectTopRankedResult = (string) ($_GET['select_top_ranked_result'] ?? (!array_key_exists('entry_config', $_GET) ? '1' : '0')) === '1';
+$exitConfig = $exitConfirmationMode === 'none' ? 'none' : (string) ($_GET['exit_config'] ?? $defaultExitConfig);
+$selectTopRankedResult = $exitConfirmationMode !== 'none'
+    && (string) ($_GET['select_top_ranked_result'] ?? (!array_key_exists('entry_config', $_GET) ? '1' : '0')) === '1';
 $martingaleTargetPolicy = 'scaled';
 if (preg_match('/:(scaled|fixed)$/', $exitConfig, $policyMatch)) {
     $martingaleTargetPolicy = $policyMatch[1];
@@ -186,7 +187,12 @@ $entryFamilyPrefix = $entryDirection === 'both' ? '±' : ($entryDirection === 'l
 $entryLoadingLabel = 'Загружаю рейтинг порогов входа…';
 $profitTarget = bcdiv($startingBalance, '1000', 24);
 $lossThreshold = bcsub('0', $profitTarget, 24);
-if (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
+$noExitSelected = $exitConfirmationMode === 'none';
+if ($noExitSelected) {
+    $profitTarget = null;
+    $lossThreshold = null;
+    $martingaleMode = 'none';
+} elseif (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
     && rankingHasValue((int) $matches[1], $rankingRanges['fixed_tp'])
     && rankingHasValue((int) $matches[2], $rankingRanges['fixed_sl'])) {
     $profitTarget = bcdiv(bcmul($startingBalance, $matches[1], 24), '10000', 24);
@@ -207,6 +213,46 @@ $formatTargetPercent = static function (?string $amount, string $startingBalance
     return rtrim(rtrim(number_format((float) bcmul(bcdiv($amount, $startingBalance, 24), '100', 12), 4, '.', ''), '0'), '.') . '%';
 };
 $selectedExitConfig = $exitConfig . ($martingaleMode !== 'none' ? ':' . $martingaleTargetPolicy : '');
+$entrySelectorSeeds = [];
+foreach ($entryProfiles as $family => $profile) {
+    foreach ($profile['windows'] as $window) {
+        foreach ($profile['thresholds_tenths_percent'] as $threshold) {
+            $prefix = $family === 'both' ? 'entry' : 'entry:' . $family;
+            $id = $prefix . ':' . $window . ':' . $threshold;
+            if ($entrySignalMode === 'within') $id .= ':within';
+            if ($entryDirectionMode === 'reverse') $id .= ':reverse';
+            $familyLabel = $family === 'both' ? '±' : ($family === 'long' ? '+' : '−');
+            $entrySelectorSeeds[] = [
+                'id' => $id,
+                'label' => $familyLabel . number_format($threshold / 10, 1, ',', ' ') . '% от баланса за ' . $window . ' снимков',
+                'best_pnl' => null,
+            ];
+        }
+    }
+}
+foreach ($rankingParameters['worker']['immediate_directions'] as $direction) {
+    $entrySelectorSeeds[] = [
+        'id' => 'immediate:' . $direction,
+        'label' => 'Сразу · 1 заявка на ' . ($direction === 'short' ? 'продажу' : 'покупку'),
+        'best_pnl' => null,
+    ];
+}
+$exitSelectorSeeds = [];
+$exitSelectorSeeds[] = ['id' => 'none', 'label' => 'Без выхода · удерживать до конца периода', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
+$exitPolicySuffix = $martingaleMode !== 'none' ? ':' . $martingaleTargetPolicy : '';
+foreach (rankingValues($rankingRanges['fixed_tp']) as $take) {
+    foreach (rankingValues($rankingRanges['fixed_sl']) as $stop) {
+        $takeLabel = number_format($take / 100, 2, ',', ' ');
+        $stopLabel = number_format($stop / 100, 2, ',', ' ');
+        $exitSelectorSeeds[] = ['id' => 'fixed:' . $take . ':' . $stop . $exitPolicySuffix, 'label' => 'TP ' . $takeLabel . '% / SL ' . $stopLabel . '%', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
+    }
+}
+foreach (rankingValues($rankingRanges['profit']) as $take) {
+    $exitSelectorSeeds[] = ['id' => 'profit:' . $take . $exitPolicySuffix, 'label' => 'TP ' . number_format($take / 10, 1, ',', ' ') . '% · без SL', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
+}
+foreach (rankingValues($rankingRanges['loss']) as $stop) {
+    $exitSelectorSeeds[] = ['id' => 'loss:' . $stop . $exitPolicySuffix, 'label' => 'SL ' . number_format($stop / 10, 1, ',', ' ') . '% · без TP', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
+}
 $favoriteEntryLabel = $favoriteView ? trim((string) ($favorite['entry_label'] ?? $entryConfig)) : '';
 $favoriteExitLabel = $favoriteView ? trim((string) ($favorite['exit_label'] ?? $selectedExitConfig)) : '';
 $favoriteSymbolDisabled = $favoriteView && !in_array(strtoupper((string) ($favorite['params']['symbol'] ?? '')), $enabledSymbols, true);
@@ -307,7 +353,7 @@ $ledgerLastQuotes = [];
 $ledgerSourceDay = null;
 if ($martingaleMode === 'none' && $rows !== [] && $error === null) {
     $closedTradeLedgerKey = hash('sha256', json_encode([
-        'closed-trade-ledger-v5-market-order-sizing', $config['category'], $symbol, $startingBalance,
+        'closed-trade-ledger-v6-range-reset-at-start', $config['category'], $symbol, $startDayInput, $startingBalance,
         $feePercent, $entryConfig, $selectedExitConfig, $exitConfirmationMode, $exitConfirmationSnapshots,
         ...rankingSimulationCostsIdentity($simulationCosts), $martingaleContractRules,
     ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
@@ -502,6 +548,13 @@ $balance = $startingBalance;
 $trades = [];
 $tradeEntryIndex = 0;
 $rowCount = count($rows);
+$rangeStartInstant = new DateTimeImmutable($startUtc, new DateTimeZone('UTC'));
+while ($tradeEntryIndex < $rowCount) {
+    $quoteInstant = new DateTimeImmutable($rows[$tradeEntryIndex]['received_at_utc'], new DateTimeZone('UTC'));
+    if ($quoteInstant >= $rangeStartInstant) break;
+    $tradeEntryIndex++;
+}
+$rangeStartQuoteIndex = $tradeEntryIndex;
 $executionRows = $rows;
 $slippageFraction = (float) $simulationCosts['slippage_bps'] / 10000;
 if ($slippageFraction > 0) {
@@ -632,7 +685,7 @@ if ($error !== null) {
     $dailyRealizedByDay = [];
     while (bccomp($balance, '0', 24) > 0 && $chainAttempt < 100000 && $martingaleOrderConstraintError === null) {
         $signal = $isImmediateEntry
-            ? ($chainAttempt === 0 && $rowCount > 1 ? [0, $immediateDirection === 'short'] : null)
+            ? ($chainAttempt === 0 && $rangeStartQuoteIndex < $rowCount - 1 ? [$rangeStartQuoteIndex, $immediateDirection === 'short'] : null)
             : $findMomentumEntry($tradeEntryIndex);
         if ($signal === null) break;
         [$tradeEntryIndex, $tradeIsShort] = $signal;
@@ -904,7 +957,8 @@ if ($error !== null) {
 $ordinaryOrderConstraintError = null;
 while (bccomp($balance, '0', 24) > 0) {
     if ($isImmediateEntry) {
-        $signal = $tradeEntryIndex === 0 && $rowCount > 1 ? [0, $immediateDirection === 'short'] : null;
+        $signal = $tradeEntryIndex === $rangeStartQuoteIndex && $rangeStartQuoteIndex < $rowCount - 1
+            ? [$rangeStartQuoteIndex, $immediateDirection === 'short'] : null;
     } else {
         $signal = $findMomentumEntry($tradeEntryIndex);
     }
@@ -1061,10 +1115,13 @@ if ($martingaleMode === 'none' && $cachedStandardTradeEvents === null
 if ($martingaleMode === 'none') {
     $rangeTrades = [];
     $rangeBalance = $startingBalance;
+    $rangeStartAt = new DateTimeImmutable($startUtc, new DateTimeZone('UTC'));
+    $rangeEndAt = new DateTimeImmutable($endUtc, new DateTimeZone('UTC'));
     foreach ($trades as $trade) {
+        $openedAt = new DateTimeImmutable($trade['entry']['received_at_utc'], new DateTimeZone('UTC'));
         $closedAt = new DateTimeImmutable($trade['exit']['received_at_utc'], new DateTimeZone('UTC'));
-        if ($closedAt < new DateTimeImmutable($startUtc, new DateTimeZone('UTC'))
-            || $closedAt >= new DateTimeImmutable($endUtc, new DateTimeZone('UTC'))) {
+        if ($openedAt < $rangeStartAt || $openedAt >= $rangeEndAt
+            || $closedAt < $rangeStartAt || $closedAt >= $rangeEndAt) {
             continue;
         }
         $rangeBalance = bcadd($rangeBalance, $trade['net'], 24);
@@ -1101,23 +1158,23 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 :root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1200px;margin:0 auto;padding:42px 24px}.eyebrow{color:#8ea5ff;text-transform:uppercase;letter-spacing:.13em;font-size:12px;font-weight:700}h1{font-size:clamp(26px,4vw,40px);margin:5px 0 16px;letter-spacing:-.04em}.collector-status{display:inline-flex;align-items:center;gap:9px;margin:0 0 22px;padding:7px 11px;border:1px solid #34415e;border-radius:999px;background:#0c1222;color:#b7c1d5;font-size:13px}.collector-status:before{content:"";width:9px;height:9px;border-radius:50%;background:#8995ad;box-shadow:0 0 0 3px #8995ad22}.collector-status[data-status="active"]{color:#a8f0cf;border-color:#28654f}.collector-status[data-status="active"]:before{background:#42d6a4;box-shadow:0 0 0 3px #42d6a422}.collector-status[data-status="delayed"]{color:#ffe0a1;border-color:#705b2e}.collector-status[data-status="delayed"]:before{background:#f4c15f;box-shadow:0 0 0 3px #f4c15f22}.collector-status[data-status="fresh-yellow"],.collector-status[data-status="delayed"]{color:#ffe0a1;border-color:#705b2e}.collector-status[data-status="fresh-yellow"]:before{background:#f4c15f;box-shadow:0 0 0 3px #f4c15f22}.collector-status[data-status="stale-green"]{color:#a8f0cf;border-color:#28654f}.collector-status[data-status="stale-green"]:before{background:#42d6a4;box-shadow:0 0 0 3px #42d6a422}.collector-status[data-status="stale-red"]{color:#ffb3bf;border-color:#733b49}.collector-status[data-status="stale-red"]:before{background:#ff7188;box-shadow:0 0 0 3px #ff718822}.collector-status[data-status="stopped"],.collector-status[data-status="unknown"]{color:#ffb3bf;border-color:#733b49}.collector-status[data-status="stopped"]:before,.collector-status[data-status="unknown"]:before{background:#ff7188;box-shadow:0 0 0 3px #ff718822}.panel{background:color-mix(in srgb,var(--panel) 95%,transparent);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px;box-shadow:0 18px 50px #0003}.filters{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.field{display:grid;gap:7px;color:var(--muted);font-size:13px;font-weight:600}select,input,button{font:inherit;color:var(--text);background:#0c1222;border:1px solid #34415e;border-radius:10px;padding:11px 13px;min-width:190px}select option.demo-available-ticker{color:#f2d77d;background:#292716}button{background:#607df4;border:0;font-weight:700;cursor:pointer;min-width:130px}button:hover{background:#7890ff}.hint{color:var(--muted);margin:15px 0 0;font-size:13px}.chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}.chart-head h2{font-size:17px;margin:0}.count{color:var(--muted);font-size:13px}.legend{display:flex;gap:18px;color:#b7c1d5;font-size:13px;margin:14px 0}.legend span{display:inline-flex;gap:7px;align-items:center}.dot{width:9px;height:9px;border-radius:50%}#chart{width:100%;height:clamp(180px,34vh,300px);display:block;overflow:visible}.chart-wrap{position:relative}.chart-panel-sticky{position:sticky;top:10px;z-index:5;background:#131a2d;box-shadow:0 12px 32px #0009}#tooltip{position:absolute;z-index:2;display:none;min-width:180px;padding:10px 12px;border:1px solid #394765;border-radius:10px;background:#0b1020f2;box-shadow:0 10px 30px #0008;pointer-events:none;font-size:12px;white-space:nowrap}#tooltip .tip-time{color:#dce5ff;font-weight:700;margin-bottom:5px}#tooltip .tip-row{display:flex;justify-content:space-between;gap:18px;font-variant-numeric:tabular-nums}#tooltip b{font-weight:700}.empty{display:grid;place-items:center;min-height:230px;color:var(--muted);text-align:center}.error{border-color:#733b49;color:#ffb3bf}.footer{color:var(--muted);font-size:12px;margin:0 4px}#results{padding-bottom:12px}#results .footer{margin:7px 4px 0}@media(max-width:600px){.wrap{padding:25px 14px}.panel{padding:16px}select,input{width:100%}.field{width:100%}button{width:100%}#chart{height:clamp(150px,27vh,220px)}.chart-panel-sticky{top:4px}.chart-head{align-items:flex-start;flex-direction:column}}
 .filters .field select,.filters .field input{min-width:150px}.strategy-link{color:#a9b9ff;text-decoration:none}.strategy-link:hover{text-decoration:underline}.summary{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 16px}.stat{flex:1;min-width:150px;background:#0c1222;border:1px solid var(--line);border-radius:12px;padding:13px 15px}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums}.table-wrap{overflow:auto;border-radius:10px}table{width:100%;min-width:1000px;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}th,td{text-align:right;padding:11px 10px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:#aab5cb;font-size:11px;text-transform:uppercase;letter-spacing:.04em;background:#0d1425;position:sticky;top:0}th:first-child,td:first-child,td.reason{text-align:left}.trade-positive td{background:#123126;color:#b9f2dc}.trade-negative td{background:#351e2a;color:#ffd0d5}.trade-open-positive td{background:#06291d;color:#83e8b8}.trade-open-negative td{background:#290810;color:#ff929d}.trade-flat td{background:#222b3d}.trade-positive td:first-child,.trade-open-positive td:first-child{box-shadow:inset 3px 0 #48d6a4}.trade-negative td:first-child,.trade-open-negative td:first-child{box-shadow:inset 3px 0 #ff7788}.trade-row{cursor:crosshair}.trade-row:hover td,.trade-row:focus td{filter:brightness(1.22)}.small-note{font-size:12px;color:var(--muted);margin:12px 0 0}.loss{color:#ff7788}.gain{color:#48d6a4}
 .refresh-symbols{display:grid;place-items:center;flex:0 0 42px;width:42px;height:42px;min-width:42px;padding:4px;font-size:20px;line-height:1}.refresh-symbols.is-loading{cursor:progress;background:#273653}.refresh-progress{position:relative;display:grid;place-items:center;width:34px;height:34px;font-size:9px;font-weight:700;font-variant-numeric:tabular-nums}.refresh-progress:before{position:absolute;inset:1px;border:2px solid #52617d;border-top-color:#a9b9ff;border-radius:50%;content:"";animation:ranking-spin .8s linear infinite}.refresh-progress-value{position:relative;z-index:1}@keyframes ranking-spin{to{transform:rotate(360deg)}}
-.history-import-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.history-import-button{min-width:0;min-height:42px;padding:9px 12px;white-space:nowrap;font-size:13px}.history-import-button[hidden]{display:none}.history-import-button:disabled{cursor:progress;opacity:.65}.history-import-status{flex-basis:100%;min-height:0;margin:0;color:var(--muted);font-size:12px;white-space:pre-line}.history-import-status:empty{display:none}.history-import-status[data-status="error"]{color:#ff9eaa}.history-import-status[data-status="ready"]{color:#a8f0cf}
-.date-range-row{display:flex;align-items:end;gap:14px;flex:0 0 auto}.date-range-row>.field{flex:0 0 190px;width:auto}.filters>.history-import-status{flex:0 0 100%;width:100%}@media(max-width:600px){.date-range-row{gap:8px}.date-range-row>.field{flex:1 1 50%;min-width:0}.filters .date-range-row input{min-width:0;padding-left:8px;padding-right:8px}}
+.history-import-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:0 0 100%;width:100%;min-width:0}.history-import-button{min-width:0;min-height:42px;padding:9px 12px;white-space:nowrap;font-size:13px}.history-import-button[hidden]{display:none}.history-import-button:disabled{cursor:progress;opacity:.65}.history-import-progress{display:flex;flex-direction:column;align-items:flex-start;gap:8px;flex:0 0 100%;width:100%;min-width:0;margin-top:8px}.history-import-status{width:100%;min-width:0;min-height:0;margin:0;color:var(--muted);font-size:12px;white-space:pre-line;overflow-wrap:anywhere}.history-import-status:empty{display:none}.history-import-status[data-status="error"]{color:#ff9eaa}.history-import-status[data-status="ready"]{color:#a8f0cf}
+.filters>.history-import-status{flex:0 0 100%;width:100%}
 .refresh-today-snapshot[hidden]{display:none}.refresh-today-snapshot:disabled{cursor:progress;opacity:.65}
 .page-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.page-heading .eyebrow{white-space:nowrap}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}.collector-status{margin:0;min-width:0;padding:7px 11px;border:1px solid #34415e;background:#0c1222;font-weight:400;white-space:nowrap;cursor:pointer}.collector-status:hover{background:#0c1222;filter:brightness(1.2)}.collector-status:disabled{cursor:progress;opacity:.7}.save-mode-toggle{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.save-mode-toggle input{position:absolute;opacity:0;width:1px;height:1px;min-width:0}.save-mode-switch{position:relative;width:38px;height:22px;border:1px solid #52617d;border-radius:999px;background:#263149;transition:.2s}.save-mode-switch:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#b7c1d5;transition:.2s}.save-mode-toggle input:checked+.save-mode-switch{background:#176647;border-color:#42d6a4}.save-mode-toggle input:checked+.save-mode-switch:after{transform:translateX(16px);background:#42d6a4}.save-mode-toggle input:focus-visible+.save-mode-switch{outline:2px solid #8ea5ff;outline-offset:2px}.save-mode-detail{color:var(--muted);font-weight:400}@media(max-width:700px){.page-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.header-actions{justify-content:flex-start}}
 .wrap{max-width:none;padding-left:20px;padding-right:20px;padding-bottom:12px}.chart-wrap{container-type:inline-size}#chart{height:clamp(400px,27vw,440px)}.chart-head.chart-info-line{justify-content:flex-start;align-items:center;gap:18px;min-width:0;overflow-x:auto;white-space:nowrap;scrollbar-width:thin}.chart-info-line h2,.chart-info-line .count,.chart-info-item{flex:0 0 auto;white-space:nowrap}.chart-info-line h2{font-size:16px}.chart-info-item{display:inline-flex;align-items:center;gap:7px;color:#b7c1d5;font-size:13px}.chart-info-item .dot{flex:0 0 9px}.chart-info-item .session-marker{width:9px;height:9px;border:1px solid #48536c;border-radius:2px;background:#080d19;flex:0 0 9px}@media(max-width:600px){#chart{height:clamp(320px,58vw,360px)}.wrap{padding-bottom:10px}.chart-head.chart-info-line{align-items:center;flex-direction:row;gap:14px}}
 .entry-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.entry-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.entry-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.entry-strategy-fields>.field{flex:1 1 190px;min-width:150px}.entry-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.entry-strategy-fields>.field{flex-basis:100%;width:100%}}
-.exit-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.exit-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.exit-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.exit-strategy-fields>.field:first-child{flex:1 1 260px}.exit-strategy-fields>.field:nth-child(2){flex:2 1 420px}.exit-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.exit-strategy-fields>.field{flex-basis:100%;width:100%}}
-.ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}.ranking-history{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:10px;background:#0c1222}.ranking-history-header{display:flex;align-items:center;justify-content:space-between;gap:10px}.ranking-history-title{margin:0 0 8px;font-size:14px}.ranking-history-delete{padding:6px 10px;color:#ffd0d0;border-color:#7c4149}.ranking-history-delete:disabled{cursor:progress;opacity:.65}.ranking-history-status{margin:0;color:var(--muted);font-size:13px}.ranking-history-list{display:grid;gap:8px;max-height:380px;overflow:auto;margin:8px 0 0;padding:0;list-style:none}.ranking-history-item{display:grid;grid-template-columns:minmax(180px,1fr) auto;align-items:start;gap:10px;padding:10px;border:1px solid #34415e;border-radius:9px;background:#10182a}.ranking-history-item strong{font-variant-numeric:tabular-nums}.ranking-history-item p{margin:4px 0;color:var(--muted);font-size:12px}.ranking-history-item details{grid-column:1/-1;color:var(--muted);font-size:12px}.ranking-history-item pre{max-height:220px;overflow:auto;margin:6px 0 0;padding:9px;border-radius:7px;background:#080d19;color:#d6def1;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.45 ui-monospace,monospace}.ranking-history-actions{display:flex;grid-column:2;grid-row:1;gap:8px}.ranking-history-item .ranking-history-actions button{min-width:100px;padding:7px 10px}.ranking-history-item .ranking-history-delete-one{color:#ffd0d0;border-color:#7c4149}.ranking-history-item button:disabled{cursor:progress;opacity:.65}.ranking-history-legacy{color:#e6c98b!important}@media(max-width:600px){.ranking-history-item{grid-template-columns:1fr}.ranking-history-actions{grid-column:1;grid-row:auto;justify-self:start;flex-wrap:wrap}}
+.exit-strategy-group{flex-basis:100%;min-width:0;padding:13px 14px;border:1px solid #34415e;border-radius:12px;background:#10182a}.exit-strategy-heading{margin:0 0 10px;color:var(--text);font-size:14px;font-weight:700}.exit-strategy-fields{display:flex;align-items:end;gap:14px;flex-wrap:wrap}.exit-strategy-fields>.field:first-child{flex:1 1 260px}.exit-strategy-fields>.field:nth-child(2){flex:1 1 220px}.exit-strategy-fields>.field:nth-child(3),.exit-strategy-fields>.field:nth-child(4){flex:1 1 220px}.exit-strategy-fields .small-note{flex-basis:100%;margin:0}@media(max-width:600px){.exit-strategy-fields>.field{flex-basis:100%;width:100%}}
+.ranking-table{min-width:760px}.ranking-table td,.ranking-table th{text-align:left}.ranking-table td.numeric,.ranking-table th.numeric{text-align:right}.ranking-subheading{margin:22px 0 8px}.ranking-status{margin:0 0 12px;color:var(--muted)}.ranking-history{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:10px;background:#0c1222}.ranking-history-header{display:flex;align-items:center;justify-content:space-between;gap:10px}.ranking-history-title{margin:0 0 8px;font-size:14px}.ranking-history-delete{padding:6px 10px;color:#ffd0d0;border-color:#7c4149}.ranking-history-delete:disabled{cursor:progress;opacity:.65}.ranking-history-status{margin:0;color:var(--muted);font-size:13px}.ranking-history-list{display:grid;gap:8px;max-height:380px;overflow:auto;margin:8px 0 0;padding:0;list-style:none}.ranking-history-item{display:grid;grid-template-columns:minmax(180px,1fr) auto;align-items:start;gap:10px;padding:10px;border:1px solid #34415e;border-radius:9px;background:#10182a}.ranking-history-item strong{font-variant-numeric:tabular-nums}.ranking-history-item p{margin:4px 0;color:var(--muted);font-size:12px}.ranking-history-item details{grid-column:1/-1;color:var(--muted);font-size:12px}.ranking-history-item pre{max-height:220px;overflow:auto;margin:6px 0 0;padding:9px;border-radius:7px;background:#080d19;color:#d6def1;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.45 ui-monospace,monospace}.ranking-history-actions{display:flex;grid-column:2;grid-row:1;gap:8px}.ranking-history-item .ranking-history-actions button{min-width:100px;padding:7px 10px}.ranking-history-item .ranking-history-delete-one{color:#ffd0d0;border-color:#7c4149}.ranking-history-item button:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.ranking-history-item{grid-template-columns:1fr}.ranking-history-actions{grid-column:1;grid-row:auto;justify-self:start;flex-wrap:wrap}}
 .chart-display{display:flex;align-items:stretch;gap:12px}.chart-wrap{flex:1 1 auto;min-width:0}.chart-day-controls{display:flex;flex:0 0 104px;flex-direction:column;gap:7px;max-height:clamp(400px,27vw,440px);overflow-y:auto;padding:2px 3px 2px 0;scrollbar-width:thin}.chart-day-button{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;min-width:0;padding:8px 5px;border:1px solid #34415e;border-radius:8px;background:#0c1222;color:#b7c1d5;font-size:12px;line-height:1.25;font-variant-numeric:tabular-nums;white-space:nowrap}.chart-day-swatch{flex:0 0 7px;width:7px;height:7px;border:1px solid #ffffff55;border-radius:50%}.chart-day-button:hover{background:#202d4b;color:#fff}.chart-day-button[aria-pressed="true"]{background:#263b78;color:#fff;box-shadow:inset 0 0 0 1px #8ea5ff}.chart-day-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:2px}@media(max-width:600px){.chart-display{gap:7px}.chart-day-controls{flex-basis:68px;max-height:clamp(320px,58vw,360px);gap:5px}.chart-day-button{padding:7px 2px;font-size:10px}}
 .combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
-.calculation-queue-heading{display:flex;align-items:flex-start;gap:12px}.calculation-queue{flex:1;min-width:0}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}.reset-calculation-queue{flex:0 0 38px;width:38px;height:38px;min-width:38px;padding:0;background:transparent;color:var(--muted);font-size:20px;line-height:1}.reset-calculation-queue:hover{background:#273653;color:var(--text)}.reset-calculation-queue:disabled{cursor:progress;opacity:.65}.stop-history-import{flex:0 0 auto;width:auto;min-width:0;padding:8px 12px;background:#7c4149;color:#ffd0d0;font-size:13px}.stop-history-import:hover{background:#96535b}.stop-history-import[hidden]{display:none}.stop-history-import:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}.calculation-queue-heading>.stop-history-import{width:auto}}
+.calculation-queue-heading{display:flex;align-items:flex-start;gap:12px}.calculation-queue{flex:1;min-width:0}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}.reset-calculation-queue{flex:0 0 38px;width:38px;height:38px;min-width:38px;padding:0;background:transparent;color:var(--muted);font-size:20px;line-height:1}.reset-calculation-queue:hover{background:#273653;color:var(--text)}.reset-calculation-queue:disabled{cursor:progress;opacity:.65}.stop-history-import{flex:0 0 auto;width:auto;min-width:0;padding:8px 12px;background:#7c4149;color:#ffd0d0;font-size:13px}.stop-history-import:hover{background:#96535b}.stop-history-import[hidden]{display:none}.stop-history-import:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}.history-import-progress>.stop-history-import{width:auto;flex:0 0 auto}}
 .ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}.ranking-favorite-button{width:34px;min-width:34px;padding:6px 4px;background:#263968;color:#fff}.ranking-favorite-button:hover{background:#405bad}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head .ranking-title-toggle{display:flex;align-items:center;gap:9px;flex:1;min-width:0;padding:0;border:0;border-radius:0;background:transparent;color:var(--text);font-size:17px;font-weight:700;text-align:left;cursor:pointer}.portfolio-ranking-head .ranking-title-toggle:hover{background:transparent;color:#b9c7ff}.ranking-disclosure-arrow{display:inline-block;flex:0 0 auto;font-size:13px;line-height:1;transform:rotate(90deg);transition:transform .16s ease}.ranking-title-toggle[aria-expanded="false"] .ranking-disclosure-arrow{transform:rotate(0deg)}.portfolio-ranking-head .refresh-symbols{margin-left:0}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
 .portfolio-ranking-diagnostics{margin:0 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#0c1222;color:var(--muted);font-size:13px;white-space:pre-line;font-variant-numeric:tabular-nums}
-.symbol-select-row{display:flex;align-items:end;gap:8px}.symbol-select-row .field{flex:1;min-width:0}.symbol-select-row .field select{width:100%}.symbol-select-block{display:grid;gap:6px}.symbol-select-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.symbol-select-heading label{color:var(--muted);font-size:13px}.symbol-select-heading button{padding:5px 10px;font-size:12px;white-space:nowrap}@media(max-width:600px){.symbol-select-row{width:100%}.symbol-select-row .field{width:auto}}
+.symbol-date-row{display:flex;align-items:end;gap:14px;flex:0 0 100%;width:100%;min-width:0}.symbol-date-row .symbol-select-block{flex:1 1 360px;min-width:220px}.symbol-date-row>.date-field{flex:0 0 190px;width:190px}.symbol-date-row>.history-import-button{flex:0 1 auto}.symbol-date-row .field select,.symbol-date-row .field input{width:100%}.symbol-select-block{display:grid;gap:6px}.symbol-select-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.symbol-select-heading label{color:var(--muted);font-size:13px}.symbol-select-heading button{padding:5px 10px;font-size:12px;white-space:nowrap}@media(max-width:700px){.symbol-date-row{flex-wrap:wrap;gap:8px}.symbol-date-row .symbol-select-block{flex:0 0 100%;width:100%}.symbol-date-row>.date-field{flex:1 1 calc(50% - 4px);width:auto;min-width:0}.symbol-date-row>.date-field input{min-width:0;padding-left:8px;padding-right:8px}.symbol-date-row>.history-import-button{flex:1 1 auto}}
 .ranking-parameters{position:relative;--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{padding-right:44px;cursor:pointer;color:var(--text);font-weight:700}.reset-ranking-parameters{position:absolute;top:7px;right:12px;flex:0 0 36px;width:36px;height:36px;min-width:36px;padding:0;background:transparent;color:var(--muted);font-size:21px;line-height:1}.reset-ranking-parameters:hover{background:#273653;color:var(--text)}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-segment-editor{margin:10px 0}.ranking-segment-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px)) 36px;justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-segment-row>span{padding-bottom:11px;color:#b7c1d5;font-size:12px}.ranking-segment-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-segment-row input{width:100%;min-width:0}.ranking-segment-row button,.add-range-segment{min-width:36px;width:36px;padding:7px;background:#263653;color:#dce5ff}.ranking-segment-row button:disabled{opacity:.45;cursor:not-allowed}.add-range-segment{width:auto;min-width:0;margin:2px 0 10px}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}.ranking-segment-row{grid-template-columns:repeat(3,minmax(0,120px)) 36px}.ranking-segment-row>span{grid-column:1/-1;padding:0}.ranking-segment-row input{padding:9px 6px}}
 .martingale-block{flex-basis:100%;min-width:0;margin:4px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px}.martingale-block>summary{color:var(--text);font-weight:700;cursor:pointer}.martingale-controls{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin-top:12px}.martingale-block .field select{min-width:190px}.martingale-block #apply-martingale-settings{align-self:end;margin-bottom:1px}@media(max-width:600px){.martingale-block,.martingale-block .field{width:100%}.martingale-controls,.martingale-block .field{width:100%}.martingale-block .field select{width:100%}}
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
@@ -1125,6 +1182,16 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
 .view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings,.favorite-readonly .collector-status{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
 .ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}
+
+.strategy-return-actions,.strategy-return-selectors{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin:10px 0}.strategy-return-actions button{padding:9px 13px}.strategy-return-selectors .field{min-width:180px}.strategy-return-selectors select{width:100%}.strategy-return-chart-wrap{width:100%;height:340px;overflow:hidden}.strategy-return-chart-wrap svg{display:block;width:100%;height:100%;background:#0c1222;border:1px solid var(--line);border-radius:10px}.return-chart-placeholder{display:grid;place-items:center;width:100%;min-height:200px;padding:20px;border:1px dashed var(--line);border-radius:10px;color:var(--muted);text-align:center}.return-chart-placeholder[hidden]{display:none}.strategy-return-panel[hidden]{display:none}.chart-mode-switch{display:flex;gap:4px;padding:3px;background:#0c1222;border:1px solid var(--line);border-radius:9px}.chart-mode-switch button{padding:7px 11px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:inherit;cursor:pointer}.chart-mode-switch button[aria-pressed="true"]{background:#263968;color:#fff}.chart-panel-sticky .chart-mode-switch{position:sticky}.return-point-provisional td{background:#3a2d18;color:#ffe0a3}.return-point-positive td:last-child{color:#48d6a4}.return-point-negative td:last-child{color:#ff7788}
+#exit-config-field[hidden]{display:grid!important;visibility:hidden}
+.portfolio-ranking-head{flex-wrap:wrap}.calculate-return-history{padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#17233a;color:var(--text);font:inherit;cursor:pointer}.calculate-return-history:disabled{opacity:.65;cursor:wait}
+.portfolio-ranking-head .refresh-symbols{flex:0 0 auto;width:auto;min-width:0;height:42px;padding:8px 13px;font-size:14px;line-height:1}
+.portfolio-ranking-head .refresh-symbols[hidden]{display:none}
+.compare-portfolio-rankings{min-width:0;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#17233a;color:var(--text);font:inherit;cursor:pointer}.compare-portfolio-rankings[hidden]{display:none}.ranking-comparison[hidden]{display:none}.ranking-comparison{margin:16px 0;padding:14px;border:1px solid var(--line);border-radius:12px;background:#0c1222}.ranking-comparison h3{margin:0 0 6px}.ranking-comparison-note{margin:0 0 10px;color:var(--muted);font-size:13px}.ranking-comparison-table{width:max-content;min-width:100%;border-collapse:collapse;font-size:12px}.ranking-comparison-table th:first-child,.ranking-comparison-table td:first-child{position:sticky;left:0;z-index:1;background:#111a2c;text-align:left}.ranking-comparison-table th{vertical-align:top;white-space:normal;min-width:220px;max-width:280px}.ranking-comparison-table td{vertical-align:top;white-space:normal;min-width:220px;max-width:280px}.ranking-comparison-value{font-weight:700;font-variant-numeric:tabular-nums}.ranking-comparison-detail{display:block;margin-top:4px;color:var(--muted);font-size:11px;line-height:1.35}
+.symbol-select-control{position:relative;width:100%}.ticker-sort-indicator[hidden]{display:none}.ticker-sort-indicator{position:absolute;top:50%;right:38px;transform:translateY(-50%);display:flex;align-items:center;gap:1px;padding:3px 6px;border-radius:6px;background:#0c1222;color:#a9b9ff;font-size:11px;font-weight:600;line-height:1.2;pointer-events:none}.ticker-sort-indicator .ticker-sort-dot{animation:ticker-sort-pulse 1.1s infinite;opacity:.25}.ticker-sort-indicator .ticker-sort-dot:nth-child(3){animation-delay:.18s}.ticker-sort-indicator .ticker-sort-dot:nth-child(4){animation-delay:.36s}@keyframes ticker-sort-pulse{0%,60%,100%{opacity:.25}30%{opacity:1}}@media(prefers-reduced-motion:reduce){.ticker-sort-indicator .ticker-sort-dot{animation:none;opacity:1}}
+.ranked-select-control{position:relative;width:100%}.ranked-select-control select{width:100%}.ranked-select-indicator[hidden]{display:none}.ranked-select-indicator{position:absolute;top:50%;right:38px;transform:translateY(-50%);display:flex;align-items:center;gap:1px;padding:3px 6px;border-radius:6px;background:#0c1222;color:#a9b9ff;font-size:11px;font-weight:600;line-height:1.2;pointer-events:none}.ranked-select-indicator .ticker-sort-dot{animation:ticker-sort-pulse 1.1s infinite;opacity:.25}.ranked-select-indicator .ticker-sort-dot:nth-child(3){animation-delay:.18s}.ranked-select-indicator .ticker-sort-dot:nth-child(4){animation-delay:.36s}@media(prefers-reduced-motion:reduce){.ranked-select-indicator .ticker-sort-dot{animation:none;opacity:1}}
+.ranked-select-heading{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin-bottom:5px}.ranked-select-heading>label{color:var(--muted);font-size:13px}.selector-order-lock{display:inline-flex;align-items:flex-start;gap:7px;max-width:100%;padding:4px 7px;border:1px solid #34415e;border-radius:6px;background:#0c1222;color:#c8d2e8;font-size:11px;line-height:1.35;text-align:left;white-space:normal}.selector-sort-dot{flex:0 0 7px;width:7px;height:7px;margin-top:4px;border-radius:50%;background:#3bd286}.selector-order-lock[aria-pressed="false"] .selector-sort-dot{background:#f36c78}.selector-order-lock:focus-visible{outline:2px solid #8ea5ff;outline-offset:2px}
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><button class="collector-status" id="collector-status" type="button" data-status="unknown" aria-label="Загрузить последние данные для активных тикеров выбранного списка" title="Нажмите, чтобы загрузить минутные данные активных тикеров выбранного списка от последних сохранённых котировок до последней доступной минуты">Загружаю последнюю котировку…</button></div></header>
@@ -1165,20 +1232,20 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 <input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
 <input type="hidden" name="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>">
 <input type="hidden" name="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>">
-<div class="symbol-select-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><select name="symbol" id="symbol-select"><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php else: ?><option value="" <?= !$symbolWasSubmitted ? 'selected' : '' ?>>Выберите торговую пару</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" class="<?= isset($demoAvailableSymbols[$option]) ? 'demo-available-ticker' : '' ?>" <?= $symbolWasSubmitted && $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select></div></div><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
-<div class="date-range-row"><label class="field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label><label class="field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><div class="history-import-actions"><button class="history-import-button" type="button" id="import-selected-symbol" data-import-scope="symbol" title="Скачать минутные свечи выбранной пары из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>↻ <?= h($symbol) ?></button><button class="history-import-button" type="button" id="import-all-active-symbols" data-import-scope="all" title="Скачать минутные свечи всех активных пар из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>↻ Все активные пары</button></div></div><p class="history-import-status" id="history-import-status" data-status="" role="status" aria-live="polite"></p>
+<div class="symbol-date-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><div class="symbol-select-control"><select name="symbol" id="symbol-select"><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php else: ?><option value="" <?= !$symbolWasSubmitted ? 'selected' : '' ?>>Выберите торговую пару</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" class="<?= isset($demoAvailableSymbols[$option]) ? 'demo-available-ticker' : '' ?>" <?= $symbolWasSubmitted && $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select><span class="ticker-sort-indicator" id="ticker-sort-indicator" role="status" aria-label="Сортирую торговые пары по доходности" aria-live="polite" title="Сортирую торговые пары по доходности" hidden>Сортирую<span id="ticker-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div><label class="field date-field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label><label class="field date-field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="history-import-button" type="button" id="import-selected-symbol" data-import-scope="symbol" title="Скачать минутные свечи выбранной пары из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>Выгрузить сырые данные по <?= h($symbol) ?></button><button class="history-import-button" type="button" id="import-all-active-symbols" data-import-scope="all" data-symbol-count="<?= count($enabledSymbols) ?>" title="Скачать минутные свечи всех активных пар из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>Выгрузить сырые данные по выбранному списку тикеров</button></div><p class="small-note" id="ticker-return-sort-status" aria-live="polite"></p><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
+<div class="history-import-actions"><div class="history-import-progress"><p class="history-import-status" id="history-import-status" data-status="" role="status" aria-live="polite"></p><button class="stop-history-import" type="button" id="stop-history-import" hidden>■ Остановить загрузку</button></div></div>
 
 <section class="entry-strategy-group" aria-labelledby="entry-strategy-heading"><h2 class="entry-strategy-heading" id="entry-strategy-heading">Стратегия входа</h2><div class="entry-strategy-fields">
 <label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
 <label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
-<label class="field">Порог входа<select name="entry_config" id="entry-config" <?= !$symbolWasSubmitted ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $entryConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару для загрузки рейтинга' : ($favoriteView ? $favoriteEntryLabel : $entryLoadingLabel)) ?></option></select></label>
+<div class="field"><div class="ranked-select-heading"><label for="entry-config">Порог входа</label><button class="selector-order-lock" id="entry-order-lock" type="button" aria-pressed="true"><span class="selector-sort-dot" aria-hidden="true"></span><span>Сортировка по максимальной доходности</span></button></div><div class="ranked-select-control"><select name="entry_config" id="entry-config" <?= !$symbolWasSubmitted ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $entryConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару' : ($favoriteView ? $favoriteEntryLabel : $entryLoadingLabel)) ?></option></select><span class="ranked-select-indicator" id="entry-sort-indicator" role="status" aria-label="Сортирую пороги входа по доходности" aria-live="polite" hidden>Сортирую<span class="ranked-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div>
 <p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию при первом пересечении порога относительно любого из последних X снимков.</p>
 </div></section>
 <section class="exit-strategy-group" aria-labelledby="exit-strategy-heading"><h2 class="exit-strategy-heading" id="exit-strategy-heading">Стратегия выхода</h2><div class="exit-strategy-fields">
-<label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL (сразу)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с учетом интервалов</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP с учетом интервалов, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL с учетом интервалов</option></select></label>
-<label class="field">TakeProfit &amp; StopLoss<select name="exit_config" id="exit-config" <?= !$symbolWasSubmitted ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $selectedExitConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару для загрузки TP/SL' : ($favoriteView ? $favoriteExitLabel : 'Загружаю варианты TP/SL…')) ?></option></select></label>
+<label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL (сразу)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с учетом интервалов</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP с учетом интервалов, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL с учетом интервалов</option><option value="none" <?= $exitConfirmationMode === 'none' ? 'selected' : '' ?>>Без выхода</option></select></label>
+<div class="field" id="exit-config-field" <?= $noExitSelected ? 'hidden' : '' ?>><div class="ranked-select-heading"><label for="exit-config">TakeProfit &amp; StopLoss</label><button class="selector-order-lock" id="exit-order-lock" type="button" aria-pressed="true"><span class="selector-sort-dot" aria-hidden="true"></span><span>Сортировка по максимальной доходности</span></button></div><div class="ranked-select-control"><select name="exit_config" id="exit-config" <?= (!$symbolWasSubmitted || $noExitSelected) ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $selectedExitConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару' : ($noExitSelected ? 'Не применяется · позиция удерживается до конца периода' : ($favoriteView ? $favoriteExitLabel : 'Загружаю варианты…'))) ?></option></select><span class="ranked-select-indicator" id="exit-sort-indicator" role="status" aria-label="Сортирую варианты TakeProfit и StopLoss по доходности" aria-live="polite" hidden>Сортирую<span class="ranked-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div>
 <input type="hidden" name="exit_confirmation_snapshots" id="exit-confirmation-snapshots" value="<?= h((string) $exitConfirmationSnapshots) ?>">
-<p class="small-note">Варианты TP/SL сгруппированы по числу интервалов проверки. При достижении TP или SL позиция закроется, если порог всё ещё достигнут через указанное число интервалов.</p>
+<p class="small-note"><?= $noExitSelected ? 'Без TP и SL позиция остаётся открытой до последней котировки периода; результат показывается как предварительный, незакрытая сделка.' : 'Варианты TP/SL сгруппированы по числу интервалов проверки. При достижении TP или SL позиция закроется, если порог всё ещё достигнут через указанное число интервалов.' ?></p>
 </div></section>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
@@ -1221,15 +1288,46 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?= rankingSegmentEditor('Только Stop Loss (%)', 'loss', $rankingRanges['loss'], $defaultRankingRanges['loss'], true) ?>
 <p class="small-note">Для каждого параметра можно добавить несколько диапазонов. Внутри каждого задайте «от», «до» и шаг; граничные значения включаются.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
 <p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Для исполнения используются действующие правила контракта Bitget (плечо 1×, шаг количества, минимумы и максимум рыночной заявки), комиссия за market/taker и указанное проскальзывание. К историческим сделкам применяются текущие правила контракта. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
-<p class="panel empty" id="strategy-results-placeholder" <?= $symbolWasSubmitted ? 'hidden' : '' ?>>Выберите торговую пару — график и расчёт стратегии появятся после загрузки данных.</p>
-<section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты рейтинга и очищает очередь. «Остановить загрузку» прекращает загрузку исторических свечей. В «Настройках» можно дополнительно сбросить кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="stop-history-import" type="button" id="stop-history-import" hidden>■ Остановить загрузку</button><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
-<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="refresh-symbols" type="button" id="refresh-symbols" aria-label="Рассчитать общий рейтинг пар" title="Рассчитать общие лучшие комбинации порога входа и TakeProfit &amp; StopLoss">↻</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><section class="ranking-history" id="portfolio-ranking-history" aria-live="polite" hidden><div class="ranking-history-header"><h3 class="ranking-history-title">Сохранённые общие рейтинги</h3><button class="ranking-history-delete" type="button" id="delete-portfolio-ranking-history" hidden>Удалить все</button></div><p class="ranking-history-status">Откройте вкладку, чтобы загрузить список расчётов для выбранного списка тикеров.</p></section><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">TP/SL с масштабированием и фиксированные TP/SL рассчитываются как отдельные варианты и участвуют в рейтинге раздельно.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
-<section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel" <?= !$symbolWasSubmitted ? 'hidden' : '' ?>><div class="chart-head chart-info-line"><h2><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><span class="count" title="<?= $visibleQuoteCount ?> исходных снимков; <?= $chartPointCount ?> точек в графике"><?= $visibleQuoteCount ?> снимков<?php if ($chartPointCount < $visibleQuoteCount): ?> · график <?= $chartPointCount ?><?php endif; ?></span><span class="chart-info-item"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
-<?php if ($hasHistoricalCandles): ?><p class="hint">Исторические минутные свечи: Bid, Ask и Last восстановлены по цене Close; биржевой спред в этих данных отсутствует.</p><?php endif; ?>
-<?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
+<p class="panel empty" id="strategy-results-placeholder" <?= $symbolWasSubmitted ? '' : 'hidden' ?>><?= $symbolWasSubmitted ? 'Загружаю «Порог входа» и «TakeProfit &amp; StopLoss»…' : 'Выберите торговую пару — график и расчёт стратегии появятся после загрузки данных.' ?></p>
+<section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты рейтинга и очищает очередь. В «Настройках» можно дополнительно сбросить кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
+<section class="panel" id="strategy-range-comparison" hidden>
+<div class="chart-head"><h3>Доходность выбранной стратегии по соседним диапазонам</h3></div>
+<p class="small-note" id="strategy-range-comparison-selection"></p>
+<p class="small-note" id="strategy-range-comparison-status" role="status" aria-live="polite"></p>
+<div class="table-wrap" id="strategy-range-comparison-table"></div>
+<p class="small-note">Текущий диапазон — (0). До пяти диапазонов назад и вперёд, той же длины, без пересечения дат. Будущие даты исключены. Итог — накопленная доходность по сохранённым закрытиям сделок; отсутствие закрытий не означает нулевую доходность.</p>
+</section>
+<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="calculate-return-history" type="button" id="calculate-return-history" <?= $favoriteView ? 'disabled' : '' ?>>Рассчитать доходность для «<?= h($tickerSetSelection['name']) ?>»</button><button class="refresh-symbols" type="button" id="refresh-symbols" hidden aria-label="Составить общий рейтинг по таблице доходности" title="Составить общий рейтинг из уже рассчитанной доходности">Составить рейтинг</button><button class="compare-portfolio-rankings" type="button" id="compare-portfolio-rankings" hidden>Сравнить готовые рейтинги</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><section class="ranking-history" id="portfolio-ranking-history" aria-live="polite" hidden><div class="ranking-history-header"><h3 class="ranking-history-title">Сохранённые общие рейтинги</h3><button class="ranking-history-delete" type="button" id="delete-portfolio-ranking-history" hidden>Удалить все</button></div><p class="ranking-history-status">Откройте вкладку, чтобы загрузить список расчётов для выбранного списка тикеров.</p></section><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><section class="ranking-comparison" id="ranking-comparison" hidden><h3>Сравнение сохранённых рейтингов · <span id="ranking-comparison-period"></span></h3><p class="ranking-comparison-note">Столбцы показывают полный сценарий запуска. В ячейке — лучший результат пары и комбинация, которая его дала. Таблица использует только завершённые рейтинги с одинаковым списком, периодом и прочими фильтрами.</p><div class="table-wrap" id="ranking-comparison-table"></div></section><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">Сначала рассчитайте доходность списка. Рейтинг ниже строится из сохранённых результатов и не запускает симуляцию повторно. TP/SL с масштабированием и фиксированные TP/SL остаются отдельными вариантами.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
+<section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel" data-rendered-entry="<?= h($entryConfig) ?>" data-rendered-exit="<?= h($selectedExitConfig) ?>" data-rendered-exit-snapshots="<?= h((string) $exitConfirmationSnapshots) ?>" <?= $symbolWasSubmitted ? 'hidden' : '' ?>><div class="chart-head chart-info-line"><h2 id="active-chart-title"><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><div class="chart-mode-switch" role="group" aria-label="Режим нижнего графика"><button type="button" id="show-quote-chart" aria-pressed="true">Котировки</button><button type="button" id="show-return-chart" aria-pressed="false">Доходность</button></div><span class="count quote-chart-info" title="<?= $visibleQuoteCount ?> исходных снимков; <?= $chartPointCount ?> точек в графике"><?= $visibleQuoteCount ?> снимков<?php if ($chartPointCount < $visibleQuoteCount): ?> · график <?= $chartPointCount ?><?php endif; ?></span><span class="chart-info-item quote-chart-info"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item quote-chart-info"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
+<div id="return-history-controls" hidden><p class="small-note">График и таблица используют выбранные выше пару, порог входа и TakeProfit &amp; StopLoss. Доходность сохраняется при расчёте вариантов стратегии и показывает результат по закрытым сделкам; открытая позиция отмечена как временная.</p><p class="history-import-status" id="strategy-return-status" role="status" aria-live="polite"></p></div>
+<?php if ($hasHistoricalCandles): ?><p class="hint quote-chart-info">Исторические минутные свечи: Bid, Ask и Last восстановлены по цене Close; биржевой спред в этих данных отсутствует.</p><?php endif; ?>
+<div id="quote-chart-view"><?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
 <div class="chart-display"><div class="chart-wrap"><svg id="chart" role="img" aria-label="График bid, ask и last для <?= h($symbol) ?>"></svg><div id="tooltip" aria-hidden="true"></div></div><nav class="chart-day-controls" id="chart-day-controls" aria-label="День на графике"><button class="chart-day-button" type="button" data-chart-day="" aria-pressed="true">Весь график</button></nav></div>
-<?php endif; ?></section>
-<section class="panel" id="results" <?= !$symbolWasSubmitted ? 'hidden' : '' ?>><div class="chart-head"><h2>Сделки стратегии</h2><span class="count"><?= $closedTradeCount ?> закрытых сделок<?php if ($openTradeCount > 0): ?> · <?= $openTradeCount ?> открыто на последнем снимке<?php endif; ?></span></div>
+<?php endif; ?></div><div id="return-chart-view" hidden><div class="return-chart-placeholder" id="return-chart-placeholder" hidden></div><div class="strategy-return-chart-wrap" id="return-chart-plot" hidden><svg id="strategy-return-chart" role="img" aria-label="График накопленной доходности стратегии"></svg></div><p class="small-note" id="strategy-return-summary">Доходность для выбранного списка и периода ещё не сохранена. Нажмите «Рассчитать доходность» в блоке общего рейтинга.</p></div></section>
+<script>
+(() => {
+    const key = 'bitget-basic-checks-date-range-v1';
+    let saved;
+    try { saved = JSON.parse(sessionStorage.getItem(key) || 'null'); } catch (_) { return; }
+    if (!saved || typeof saved !== 'object') return;
+    const params = new URLSearchParams(location.search);
+    let changed = false;
+    if (!params.has('start_day') && saved.start_day_auto === '0' && /^\d{4}-\d{2}-\d{2}$/.test(saved.start_day || '')) {
+        params.set('start_day', saved.start_day);
+        params.set('start_day_auto', '0');
+        changed = true;
+    }
+    if (!params.has('end_day') && /^\d{4}-\d{2}-\d{2}$/.test(saved.end_day || '')) {
+        params.set('end_day', saved.end_day);
+        changed = true;
+    }
+    if (!changed) return;
+    document.documentElement.style.visibility = 'hidden';
+    location.replace(`${location.pathname}?${params.toString()}${location.hash}`);
+})();
+</script>
+<section class="panel" id="results" <?= $symbolWasSubmitted ? 'hidden' : '' ?>><div class="chart-head"><h2 id="results-title">Сделки стратегии</h2><span class="count" id="ticker-results-count"><?= $closedTradeCount ?> закрытых сделок<?php if ($openTradeCount > 0): ?> · <?= $openTradeCount ?> открыто на последнем снимке<?php endif; ?></span></div>
+<div id="ticker-results-view">
 <div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div><?php if ($martingaleMode !== 'none'): ?><div class="stat"><span>Цепочки в расчёте</span><strong><?= $martingaleChainCount ?></strong></div><div class="stat"><span>Медианный результат цепочки</span><strong><?= $martingaleMedianChain === null ? '—' : (($martingaleMedianChain[0] === '-' ? '' : '+') . money($martingaleMedianChain)) ?> USDT</strong></div><div class="stat"><span>Худшая цепочка</span><strong class="<?= $martingaleWorstChain !== null && bccomp($martingaleWorstChain, '0', 24) < 0 ? 'loss' : '' ?>"><?= $martingaleWorstChain === null ? '—' : money($martingaleWorstChain) ?> USDT</strong></div><div class="stat"><span>Просадка по результатам цепочек</span><strong><?= money($martingaleMaxDrawdown) ?> USDT</strong></div><?php endif; ?></div>
 <?php if ($simulationCosts['include_funding'] || (float) $simulationCosts['slippage_bps'] > 0): ?><p class="small-note">В расчёте: funding <?= $simulationCosts['include_funding'] ? 'учтён по истории Bitget; mark price заменён midpoint первой доступной котировки после settlement' : 'отключён' ?> · проскальзывание <?= h($simulationCosts['slippage_bps']) ?> б.п. в неблагоприятную сторону. Применены действующие правила контракта Bitget.</p><?php endif; ?><?php if ($martingaleMode !== 'none' && $martingaleChainCount > 0): ?><p class="small-note">Метрики сгруппированы по одной мартингейл-попытке. Просадка рассчитана по балансу после каждой цепочки; позиция, оставшаяся открытой на последнем снимке, учитывается по этому снимку.</p><?php endif; ?>
 <?php if (count($rows) < 2): ?><div class="empty">Нужно минимум два снимка в выбранном периоде, чтобы выполнить симуляцию.</div>
@@ -1237,7 +1335,7 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Сумма входа</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Funding</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>
 <?php foreach ($trades as $index => $trade): $resultCompare = bccomp($trade['net'], '0', 24); $tradeIsOpen = $isOpenTrade($trade); $rowClass = $tradeIsOpen ? ($resultCompare > 0 ? 'trade-open-positive' : ($resultCompare < 0 ? 'trade-open-negative' : 'trade-flat')) : ($resultCompare > 0 ? 'trade-positive' : ($resultCompare < 0 ? 'trade-negative' : 'trade-flat')); $totalFees = bcadd($trade['entry_fee'], $trade['exit_fee'], 24); $tradeNotional = bcmul($trade['quantity'], $trade['entry_price'], 24); $tradeEntryLabel = $trade['is_short'] ? 'Продажа Bid' : 'Покупка Ask'; $tradeExitLabel = $trade['is_short'] ? 'Покупка Ask' : 'Продажа Bid'; ?>
 <tr class="<?= $rowClass ?> trade-row" tabindex="0" data-entry-time="<?= epochMilliseconds($trade['entry']['received_at_utc']) ?>" data-exit-time="<?= epochMilliseconds($trade['exit']['received_at_utc']) ?>" data-entry-price="<?= h((string) $trade['entry_price']) ?>" data-exit-price="<?= h((string) $trade['exit_price']) ?>" data-is-short="<?= $trade['is_short'] ? '1' : '0' ?>" data-net="<?= h((string) $trade['net']) ?>"><td><?= $index + 1 ?></td><td><?= h(formatKyivTime($trade['entry']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeEntryLabel . ' · ' . formatPrice((string) $trade['entry_price'])) ?></td><td><?= h(formatKyivTime($trade['exit']['received_at_utc'], $timezone)) ?></td><td><?= h($tradeExitLabel . ' · ' . formatPrice((string) $trade['exit_price'])) ?></td><td><?= money($trade['quantity']) ?></td><td><?= money($tradeNotional) ?> USDT</td><td><?= money($trade['gross']) ?></td><td><?= money($totalFees) ?></td><td><?= money($trade['funding'] ?? '0') ?></td><td><?= $resultCompare > 0 ? '+' : '' ?><?= money($trade['net']) ?></td><td><?= money($trade['balance']) ?></td><td class="reason"><?= $tradeIsOpen ? 'Открыта · результат по последнему снимку' : h($trade['reason']) ?></td></tr>
-<?php endforeach; ?></tbody></table></div><p class="small-note">Зелёная строка — прибыльная закрытая сделка; красная — убыточная. Результат открытой позиции по последнему снимку включён в итог и может измениться. Между снимками результат закрытой сделки может превысить заданный порог.</p><?php endif; ?><p class="footer">Источник: локальная база <?= h($db['database']) ?> · шаг сбора <?= (int) $config['poll_interval_seconds'] ?> сек.</p></section>
+<?php endforeach; ?></tbody></table></div><p class="small-note">Зелёная строка — прибыльная закрытая сделка; красная — убыточная. Результат открытой позиции по последнему снимку включён в итог и может измениться. Между снимками результат закрытой сделки может превысить заданный порог.</p><?php endif; ?><p class="footer">Источник: локальная база <?= h($db['database']) ?> · шаг сбора <?= (int) $config['poll_interval_seconds'] ?> сек.</p></div><div id="return-results-view" hidden><div class="chart-head"><h3>Сохранённые точки доходности</h3><span class="count" id="return-points-count"></span></div><p class="small-note">Эта таблица показывает те же сохранённые точки, по которым построен график выше. Закрытия за один день объединены; временная открытая позиция отмечена отдельно.</p><div class="table-wrap" id="return-points-table"><div class="empty">Сначала выберите сохранённую доходность.</div></div></div></section>
 </main>
 <?php if ($rows !== []): ?><script>
 const datasets = <?= json_encode($chart, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR) ?>;
@@ -1291,10 +1389,438 @@ chartDayControls.addEventListener('click',event=>{const button=event.target.clos
 document.querySelectorAll('.trade-row').forEach(row=>{row.addEventListener('pointerenter',()=>{hoveredTradeRow=row;activateTradeRow(row)});row.addEventListener('pointerleave',()=>{if(hoveredTradeRow===row)hoveredTradeRow=null;scheduleTradeHide()});row.addEventListener('focus',()=>{focusedTradeRow=row;activateTradeRow(row)});row.addEventListener('blur',()=>{if(focusedTradeRow===row)focusedTradeRow=null;scheduleTradeHide()});row.addEventListener('click',()=>toggleTradeRowFilter(row));row.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleTradeRowFilter(row)}})});
 svg.addEventListener('pointermove',event=>{const rect=svg.getBoundingClientRect(),viewX=(event.clientX-rect.left)/rect.width*W,viewY=(event.clientY-rect.top)/rect.height*H;if(viewY<p.t||viewY>H-p.b)return;const plotX=Math.max(p.l,Math.min(W-p.r,viewX)),t=viewMin+(plotX-p.l)/(W-p.l-p.r)*(viewMax-viewMin),idx=nearestIndex(t),time=sampleTimes[idx],px=X(time),price=ymin+(H-p.b-viewY)/(H-p.t-p.b)*(ymax-ymin),priceY=Math.max(p.t,Math.min(H-p.b,viewY)),badgeY=Math.max(p.t,Math.min(H-p.b-20,priceY-10));crosshair.setAttribute('x1',px);crosshair.setAttribute('x2',px);crosshair.setAttribute('visibility','visible');priceCrosshair.setAttribute('y1',priceY);priceCrosshair.setAttribute('y2',priceY);priceCrosshair.setAttribute('visibility','visible');priceCrosshairBadge.setAttribute('x',W-p.r+3);priceCrosshairBadge.setAttribute('y',badgeY);priceCrosshairBadge.setAttribute('width',p.r-6);priceCrosshairBadge.setAttribute('visibility','visible');priceCrosshairLabel.setAttribute('x',W-p.r+8);priceCrosshairLabel.setAttribute('y',badgeY+14);priceCrosshairLabel.textContent=Number(price).toPrecision(7).replace(/\.?0+$/,'');priceCrosshairLabel.setAttribute('visibility','visible');let markup=`<div class="tip-time">${new Date(time).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})} · Киев</div>`;for(const[key,arr]of Object.entries(datasets)){const q=arr[idx];markers[key].setAttribute('cx',X(q.t));markers[key].setAttribute('cy',Y(q.v));markers[key].setAttribute('fill',key==='last_price'?lastDayColors.get(lastDayKey(q.t)):colors[key]);markers[key].setAttribute('visibility','visible');const name={bid_price:'Bid',ask_price:'Ask',last_price:'Last'}[key];markup+=`<div class="tip-row"><span style="color:${key==='last_price'?lastDayColors.get(lastDayKey(q.t)):colors[key]}">${name}</span><b>${q.label}</b></div>`}tip.innerHTML=markup;tip.style.display='block';const wr=wrap.getBoundingClientRect(),left=event.clientX-wr.left+14;tip.style.left=`${Math.min(left,wr.width-tip.offsetWidth-4)}px`;tip.style.top=`${Math.max(4,Math.min(event.clientY-wr.top-20,wr.height-tip.offsetHeight-4))}px`});
 svg.addEventListener('pointerleave',()=>{tip.style.display='none';crosshair.setAttribute('visibility','hidden');priceCrosshair.setAttribute('visibility','hidden');priceCrosshairBadge.setAttribute('visibility','hidden');priceCrosshairLabel.setAttribute('visibility','hidden');for(const m of Object.values(markers))m.setAttribute('visibility','hidden')});
-window.addEventListener('resize',()=>{W=H*svg.clientWidth/Math.max(1,svg.clientHeight);svg.setAttribute('viewBox',`0 0 ${W} ${H}`);priceCrosshair.setAttribute('x2',W-p.r);priceCrosshairBadge.setAttribute('x',W-p.r+3);priceCrosshairBadge.setAttribute('width',p.r-6);priceCrosshairLabel.setAttribute('x',W-p.r+8);for(const line of yGrid)line.setAttribute('x2',W-p.r);clipRect.setAttribute('width',W-p.l-p.r);buildXAxis();renderXAxis();renderTradingHours();renderSeries()});
+function resizeQuoteChart(){if(!svg.clientWidth||!svg.clientHeight)return;W=H*svg.clientWidth/Math.max(1,svg.clientHeight);svg.setAttribute('viewBox',`0 0 ${W} ${H}`);priceCrosshair.setAttribute('x2',W-p.r);priceCrosshairBadge.setAttribute('x',W-p.r+3);priceCrosshairBadge.setAttribute('width',p.r-6);priceCrosshairLabel.setAttribute('x',W-p.r+8);for(const line of yGrid)line.setAttribute('x2',W-p.r);clipRect.setAttribute('width',W-p.l-p.r);buildXAxis();renderXAxis();renderTradingHours();renderSeries()}window.addEventListener('resize',resizeQuoteChart);new ResizeObserver(resizeQuoteChart).observe(svg);
 </script><?php endif; ?>
 <script>
 const filtersForm = document.querySelector('.filters');
+const basicChecksDateRangeStorageKey = 'bitget-basic-checks-date-range-v1';
+function persistBasicChecksDateRange() {
+    if (!filtersForm) return;
+    const startDay = filtersForm.elements.namedItem('start_day')?.value || '';
+    const endDay = filtersForm.elements.namedItem('end_day')?.value || '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDay) || !/^\d{4}-\d{2}-\d{2}$/.test(endDay)) return;
+    try {
+        sessionStorage.setItem(basicChecksDateRangeStorageKey, JSON.stringify({
+            start_day: filtersForm.elements.namedItem('start_day_auto')?.value === '0' ? startDay : '',
+            start_day_auto: filtersForm.elements.namedItem('start_day_auto')?.value || '1',
+            end_day: endDay,
+        }));
+    } catch (_) {}
+}
+if (new URLSearchParams(location.search).has('start_day') || new URLSearchParams(location.search).has('end_day')) {
+    persistBasicChecksDateRange();
+}
+filtersForm?.addEventListener('input', event => {
+    if (event.target.name === 'start_day') filtersForm.elements.namedItem('start_day_auto').value = '0';
+    if (event.target.name === 'start_day' || event.target.name === 'end_day') persistBasicChecksDateRange();
+}, true);
+filtersForm?.addEventListener('change', event => {
+    if (event.target.name === 'start_day') filtersForm.elements.namedItem('start_day_auto').value = '0';
+    if (event.target.name === 'start_day' || event.target.name === 'end_day') persistBasicChecksDateRange();
+}, true);
+
+const get_returnStatus=()=>document.querySelector('#strategy-return-status');
+const get_returnChart=()=>document.querySelector('#strategy-return-chart');
+const get_returnChartPlaceholder=()=>document.querySelector('#return-chart-placeholder');
+const get_returnSummary=()=>document.querySelector('#strategy-return-summary');
+const get_returnHistoryControls=()=>document.querySelector('#return-history-controls');
+const get_returnChartPlot=()=>document.querySelector('#return-chart-plot');
+const get_chartPanel=()=>document.querySelector('#chart-panel');
+const get_quoteChartView=()=>document.querySelector('#quote-chart-view');
+const get_returnChartView=()=>document.querySelector('#return-chart-view');
+const get_tickerResultsView=()=>document.querySelector('#ticker-results-view');
+const get_returnResultsView=()=>document.querySelector('#return-results-view');
+const get_returnPointsTable=()=>document.querySelector('#return-points-table');
+const get_returnPointsCount=()=>document.querySelector('#return-points-count');
+function setChartMode(mode){
+    const returns=mode==='returns';
+    if(get_chartPanel())get_chartPanel().classList.toggle('return-mode',returns);
+    if(get_quoteChartView())get_quoteChartView().hidden=returns;
+    if(get_returnChartView())get_returnChartView().hidden=!returns;
+    if(get_returnHistoryControls())get_returnHistoryControls().hidden=!returns;
+    if(get_tickerResultsView())get_tickerResultsView().hidden=returns;
+    if(get_returnResultsView())get_returnResultsView().hidden=!returns;
+    document.querySelector('#show-quote-chart')?.setAttribute('aria-pressed',String(!returns));
+    document.querySelector('#show-return-chart')?.setAttribute('aria-pressed',String(returns));
+    const title=document.querySelector('#results-title');
+    const count=document.querySelector('#ticker-results-count');
+    if(title)title.textContent=returns?'Точки доходности стратегии':'Сделки стратегии';
+    if(count)count.hidden=returns;
+    document.querySelectorAll('.quote-chart-info').forEach(item=>item.hidden=returns);
+    const chartTitle=document.querySelector('#active-chart-title');
+    if(chartTitle&&returns){
+        const symbol=document.querySelector('#symbol-select')?.value||'';
+        const entry=document.querySelector('#entry-config');
+        const exit=document.querySelector('#exit-config');
+        chartTitle.textContent=symbol&&entry?.value&&exit?.value?`${symbol} · ${entry.selectedOptions[0]?.textContent||entry.value} · ${exit.selectedOptions[0]?.textContent||exit.value}`:'Доходность стратегии';
+    }
+    if(returns){
+        if(activeReturnRunKey){
+            setReturnStatus('Загружаю доходность выбранной стратегии…');
+            if(get_returnSummary())get_returnSummary().textContent='Загружаю сохранённые точки доходности…';
+            if(get_returnPointsTable())get_returnPointsTable().innerHTML='<div class="empty">Загружаю сохранённые точки…</div>';
+            loadReturnChart(activeReturnRunKey,document.querySelector('#symbol-select')?.value||'')
+                .catch(error=>setReturnStatus(error instanceof Error?error.message:'Не удалось обновить график.'));
+        }else{
+            setReturnStatus('Ищу расчёт для выбранных пары и стратегии…');
+            if(get_returnSummary())get_returnSummary().textContent='Ищу сохранённые точки доходности для выбранной стратегии…';
+            if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Ищу сохранённые точки доходности для выбранной стратегии…';get_returnChartPlaceholder().hidden=false;}
+            scheduleTickerReturnHistoryCheck();
+        }
+    }
+}
+document.addEventListener('click',event=>{
+    const button=event.target.closest('#show-quote-chart, #show-return-chart');
+    if(!button)return;
+    setChartMode(button.id==='show-return-chart'?'returns':'quotes');
+});
+let activeReturnRunKey = '';
+let selectorReturnRunKey = '';
+let unusableSelectorReturnRunKey = '';
+let returnRankedSymbol = '';
+filtersForm?.addEventListener('change',event=>{
+    if(!event.target.matches('#symbol-select, #entry-config, #exit-config'))selectorReturnRunKey='';
+},true);
+let returnChartLoadVersion = 0;
+const returnStorageKey = scope => {
+    const params = new URLSearchParams(new FormData(filtersForm));
+    params.delete('end_day');
+    params.delete('symbol');
+    params.delete('entry_config');
+    params.delete('exit_config');
+    const stable = [...params.entries()].sort(([a],[b]) => a.localeCompare(b));
+    return 'bitget-strategy-return:' + (filtersForm.querySelector('[name="ticker_set"]')?.value || '') + ':' + scope + ':' + JSON.stringify(stable);
+};
+function setReturnStatus(text){ if(get_returnStatus()) get_returnStatus().textContent=text; }
+async function requestReturnData(runKey, symbol='', entryId='', exitId=''){
+    const query = new URLSearchParams({run_key:runKey});
+    const startDay=filtersForm?.elements.namedItem('start_day')?.value||'';
+    const endDay=filtersForm?.elements.namedItem('end_day')?.value||'';
+    if(startDay)query.set('start_day',startDay);
+    if(endDay)query.set('end_day',endDay);
+    if(symbol) query.set('symbol',symbol);
+    if(entryId) query.set('entry_id',entryId);
+    if(exitId) query.set('exit_id',exitId);
+    const response = await fetch('strategy-return-data.php?' + query.toString(), {headers:{Accept:'application/json'},cache:'no-store'});
+    const data = await response.json();
+    if(!response.ok || data.status==='error') throw new Error(data.message || 'Не удалось загрузить график доходности.');
+    return data;
+}
+async function refreshSelectorsFromReturnHistory(runKey, preferredEntry='', selectBestEntry=false){
+    const requestVersion=exitRankingRequestVersion;
+    const symbol=document.querySelector('#symbol-select')?.value||'';
+    const selectedEntry=preferredEntry||document.querySelector('#entry-config')?.value||'';
+    if(!symbol)return false;
+    const query=new URLSearchParams({run_key:runKey,symbol,entry_id:selectedEntry,rank_options:'1',min_trades:filtersForm.querySelector('[name="save_mode"]')?.value==='0'?'1':'3'});
+    query.set('start_day',filtersForm.elements.namedItem('start_day')?.value||'');
+    query.set('end_day',filtersForm.elements.namedItem('end_day')?.value||'');
+    query.set('exit_confirmation_mode',filtersForm.elements.namedItem('exit_confirmation_mode')?.value||'immediate');
+    query.set('exit_confirmation_snapshots',filtersForm.elements.namedItem('exit_confirmation_snapshots')?.value||'60');
+    query.set('rank_progress','1');
+    if(selectBestEntry&&!entryOrderLocked)query.set('prefer_best_entry','1');
+    const response=await fetch('strategy-return-data.php?'+query.toString(),{headers:{Accept:'application/json'},cache:'no-store'});
+    let data;
+    if(response.headers.get('Content-Type')?.includes('application/x-ndjson')&&response.body){
+        const reader=response.body.getReader(), decoder=new TextDecoder();
+        let buffered='';
+        const consume=line=>{
+            if(!line.trim())return;
+            const item=JSON.parse(line);
+            if(item.status==='progress'){
+                if(requestVersion===exitRankingRequestVersion)setStrategySortIndicators(true,item.progress,item.progress);
+            }else data=item;
+        };
+        while(true){
+            const {value,done}=await reader.read();
+            buffered+=done?decoder.decode():decoder.decode(value,{stream:true});
+            const lines=buffered.split('\n');buffered=lines.pop();lines.forEach(consume);
+            if(done){consume(buffered);break;}
+            if(requestVersion!==exitRankingRequestVersion){await reader.cancel();return false;}
+        }
+    }else data=await response.json();
+    if(requestVersion!==exitRankingRequestVersion)return false;
+    if(!data)throw new Error('Не удалось получить результат сортировки.');
+    if(!response.ok||data.status!=='ready')throw new Error(data.message||'Не удалось отсортировать пороги по сохранённой доходности.');
+    const hasRankedEntries=Array.isArray(data.ranked_entries)&&data.ranked_entries.length>0;
+    const hasRankedExits=Array.isArray(data.ranked_exits)&&data.ranked_exits.length>0;
+    if(hasRankedEntries){
+        const bestEntry=data.ranked_entries.reduce((best,item)=>!best||Number(item.best_pnl)>Number(best.best_pnl)?item:best,null);
+        const effectiveEntry=selectBestEntry&&!entryOrderLocked?data.selected_entry_id:selectedEntry;
+        const selectedAvailable=data.ranked_entries.some(item=>item.id===effectiveEntry);
+        renderEntryOptions(data.ranked_entries,selectedAvailable?effectiveEntry:(bestEntry?.id||selectedEntry),'%');
+    }
+    if(hasRankedExits){
+        const bestExit=data.ranked_exits.reduce((best,item)=>!best||Number(item.pnl)>Number(best.pnl)?item:best,null);
+        renderExitOptions(data.ranked_exits.map(item=>({id:item.id,label:item.label,pnl:Number(item.pnl),snapshots:Number(document.querySelector('#exit-confirmation-snapshots')?.value)||60})),bestExit?.id||document.querySelector('#exit-config')?.value||'',Number(document.querySelector('#exit-confirmation-snapshots')?.value)||60);
+    }
+    return hasRankedEntries&&hasRankedExits;
+}
+function renderReturnPointsTable(points, pointTimes=new Map()){
+    const rows=Array.isArray(points)?points:[];
+    if(get_returnPointsCount())get_returnPointsCount().textContent=`${rows.length.toLocaleString('ru-RU')} событий`;
+    if(!get_returnPointsTable())return;
+    if(!rows.length){get_returnPointsTable().innerHTML='<div class="empty">Для выбранной пары и стратегии нет сохранённых событий сделок.</div>';return;}
+    const table=document.createElement('table');
+    const hasTradeTimes=rows.some(point=>point.entry_at_utc||point.exit_at_utc);
+    table.innerHTML=hasTradeTimes
+        ? '<thead><tr><th>#</th><th>Вход · Киев</th><th>Выход / расчёт · Киев</th><th>Изменение от предыдущей точки</th><th>Накопленная доходность</th><th>Статус</th></tr></thead>'
+        : '<thead><tr><th>#</th><th>Дата и время · Киев</th><th>Тип точки</th><th>Накопленный результат</th><th>Доходность</th><th>Закрытых сделок</th></tr></thead>';
+    const body=document.createElement('tbody');
+    rows.forEach((point,index)=>{
+        const provisional=point.point_type==='provisional', pnl=Number(point.cumulative_return_percent??point.cumulative_pnl), percent=Number(point.return_percent);
+        const row=document.createElement('tr');
+        row.className=provisional?'return-point-provisional':(pnl>0?'return-point-positive':(pnl<0?'return-point-negative':''));
+        const day=String(point.point_day).slice(0,10),timestamp=pointTimes.get(day);
+        const dateLabel=timestamp?new Date(timestamp).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}):day;
+        const formatPercent=value=>`${value>=0?'+':''}${value.toLocaleString('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:6})}%`;
+        const values=hasTradeTimes
+            ? [String(index+1),new Date(point.entry_at_utc).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}),new Date(point.exit_at_utc).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}),formatPercent(percent),formatPercent(Number(point.cumulative_return_percent??pnl)),provisional?'Предварительная · открыта':'Закрыта']
+            : [String(index+1),dateLabel,provisional?'Временная · открытая позиция': 'Закрытые сделки',`${pnl>=0?'+':''}${pnl.toLocaleString('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:6})} USDT`,formatPercent(percent),Number(point.closed_trade_count||0).toLocaleString('ru-RU')];
+        values.forEach((value,column)=>{const cell=document.createElement('td');cell.textContent=value;if(column===2)cell.className='reason';row.append(cell);});
+        body.append(row);
+    });
+    table.append(body);get_returnPointsTable().replaceChildren(table);
+}
+let disposeReturnChartInteraction=()=>{};
+function drawReturnChart(data){
+    disposeReturnChartInteraction();
+    if(!get_returnChart()) return;
+    get_returnChart().replaceChildren();
+    const chartTitle=document.querySelector('#active-chart-title');
+    if(get_chartPanel()?.classList.contains('return-mode')&&chartTitle)chartTitle.textContent=`${data.selected.symbol} · ${data.selected.entry_label||data.selected.entry_id} · ${data.selected.exit_label||data.selected.exit_id}`;
+    const chart=get_returnChart();
+    const ns='http://www.w3.org/2000/svg', width=Math.max(500,chart.clientWidth||800), height=340, p={l:112,r:22,t:22,b:72};
+    get_returnChart().setAttribute('viewBox',`0 0 ${width} ${height}`);
+    const pointTimes=new Map();
+    const kyivDay=value=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Kyiv',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(value));
+    document.querySelectorAll('#results .trade-row').forEach(row=>{
+        const timestamp=Number(row.dataset.exitTime);
+        if(!Number.isFinite(timestamp)||timestamp<=0)return;
+        const day=kyivDay(timestamp);
+        if(row.classList.contains('trade-open-positive')||row.classList.contains('trade-open-negative'))pointTimes.set(day,timestamp);
+        else if(!pointTimes.has(day)||timestamp>pointTimes.get(day))pointTimes.set(day,timestamp);
+    });
+    const points=(data.points||[]).map(point=>{const day=String(point.point_day).slice(0,10),timestamp=point.exit_at_utc?Date.parse(point.exit_at_utc):pointTimes.get(day);return {...point,day,value:Number(point.cumulative_return_percent??point.cumulative_pnl),timestamp:Number.isFinite(timestamp)?timestamp:Date.parse(day+'T12:00:00Z'),hasTradeTime:Boolean(point.exit_at_utc||timestamp)};}).filter(point=>Number.isFinite(point.value));
+    renderReturnPointsTable(data.points||[],pointTimes);
+    if(!points.length){if(get_returnChartPlot())get_returnChartPlot().hidden=true;if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Для этой пары и стратегии в выбранном периоде нет закрытых сделок или открытой позиции.';get_returnChartPlaceholder().hidden=false;}get_returnSummary().textContent='Сохранённых точек доходности нет.';return;}
+    if(get_returnChartPlaceholder())get_returnChartPlaceholder().hidden=true;
+    if(get_returnChartPlot())get_returnChartPlot().hidden=false;
+    const chartRange=data.chart_range||data.run;
+    const start=Date.parse(String(chartRange.start_day)+'T00:00:00Z'), end=Date.parse(String(chartRange.end_day)+'T23:59:59Z');
+    let minX=Number.isFinite(start)?start:Date.parse(points[0].day+'T12:00:00Z'), maxX=Number.isFinite(end)?end:Date.parse(points.at(-1).day+'T12:00:00Z');
+    minX=Math.min(minX,...points.map(point=>point.timestamp));maxX=Math.max(maxX,...points.map(point=>point.timestamp));
+    if(maxX<=minX)maxX=minX+86400000;
+    const values=[0,...points.map(point=>point.value)], minY=Math.min(...values), maxY=Math.max(...values), pad=Math.max((maxY-minY)*.12,.05), y0=minY-pad, y1=maxY+pad;
+    const x=value=>p.l+(value-minX)/(maxX-minX)*(width-p.l-p.r), y=value=>height-p.b-(value-y0)/(y1-y0)*(height-p.t-p.b);
+    const el=(tag,attrs={},text='')=>{const node=document.createElementNS(ns,tag);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,String(value));if(text)node.textContent=text;return node;};
+    get_returnChart().append(el('line',{x1:p.l,y1:y(0),x2:width-p.r,y2:y(0),stroke:'#53617b','stroke-dasharray':'4 4'}));
+    get_returnChart().append(el('line',{x1:p.l,y1:p.t,x2:p.l,y2:height-p.b,stroke:'#53617b'}));
+    get_returnChart().append(el('line',{x1:p.l,y1:height-p.b,x2:width-p.r,y2:height-p.b,stroke:'#53617b'}));
+    const money=value=>`${value>=0?'+':''}${value.toLocaleString('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2})}%`;
+    const preciseMoney=value=>`${value>=0?'+':''}${value.toLocaleString('ru-RU',{minimumFractionDigits:6,maximumFractionDigits:6})}%`;
+    const yTickCount=4;
+    for(let index=0;index<=yTickCount;index++){
+        const value=y0+(y1-y0)*index/yTickCount,py=y(value);
+        chart.append(el('line',{x1:p.l,x2:width-p.r,y1:py,y2:py,stroke:'#29364f'}));
+        chart.append(el('text',{x:p.l-10,y:py+4,'text-anchor':'end',fill:'#b7c1d5','font-size':11},money(value)));
+    }
+    const dateFormatter=new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const tickFormatter=new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',...(maxX-minX<86400000?{hour:'2-digit',minute:'2-digit'}:{})});
+    const xTickCount=Math.max(1,Math.min(8,Math.floor((width-p.l-p.r)/110)));
+    for(let index=0;index<=xTickCount;index++){
+        const time=minX+(maxX-minX)*index/xTickCount,px=x(time);
+        chart.append(el('text',{x:px,y:height-p.b+17,'text-anchor':index===0?'start':index===xTickCount?'end':'middle',fill:'#b7c1d5','font-size':11},tickFormatter.format(new Date(time))));
+    }
+    const coords=[{day:String(data.run.start_day),value:0,point_type:'baseline',timestamp:minX,hasTradeTime:false},...points].map(point=>({point,...{x:x(point.timestamp),y:y(point.value)}}));
+    const closedCoords=coords.filter(item=>item.point.point_type!=='provisional');
+    if(closedCoords.length>1){let path=`M ${closedCoords[0].x} ${closedCoords[0].y}`;for(const item of closedCoords.slice(1))path+=` H ${item.x} V ${item.y}`;get_returnChart().append(el('path',{d:path,fill:'none',stroke:'#86a8ff','stroke-width':2.5,'stroke-linejoin':'round'}));}
+    const provisionalCoords=coords.filter(item=>item.point.point_type==='provisional');
+    if(provisionalCoords.length){const provisional=provisionalCoords.at(-1),previous=closedCoords.at(-1)||coords[0];get_returnChart().append(el('path',{d:`M ${previous.x} ${previous.y} H ${provisional.x} V ${provisional.y}`,fill:'none',stroke:'#ffbd59','stroke-width':2,'stroke-dasharray':'5 4'}));}
+    for(const item of coords.slice(1)){
+        const provisional=item.point.point_type==='provisional';
+        const circle=el('circle',{cx:item.x,cy:item.y,r:provisional?5:3.5,fill:provisional?'#ffbd59':'#86a8ff',stroke:'#10182b','stroke-width':1.5});
+        const labelDate=item.point.hasTradeTime?new Date(item.point.timestamp).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):item.point.day;
+        circle.append(el('title',{},`${labelDate}: ${preciseMoney(item.point.value)} · ${provisional?'временная открытая сделка':'закрытые сделки'}`));
+        chart.append(circle);
+    }
+    const hoverVertical=el('line',{y1:p.t,y2:height-p.b,stroke:'#d5defa','stroke-width':1,'stroke-dasharray':'4 5',opacity:.72,visibility:'hidden','pointer-events':'none'});
+    const hoverHorizontal=el('line',{x1:p.l,x2:width-p.r,stroke:'#d5defa','stroke-width':1,'stroke-dasharray':'4 5',opacity:.72,visibility:'hidden','pointer-events':'none'});
+    const hoverValueBg=el('rect',{x:4,width:p.l-10,height:20,rx:4,fill:'#607df4',visibility:'hidden','pointer-events':'none'});
+    const hoverValueLabel=el('text',{x:8,fill:'#fff','font-size':11,'font-weight':700,visibility:'hidden','pointer-events':'none'});
+    const dateBadgeWidth=154;
+    const hoverDateBg=el('rect',{width:dateBadgeWidth,height:21,rx:4,fill:'#607df4',visibility:'hidden','pointer-events':'none'});
+    const hoverDateLabel=el('text',{fill:'#fff','font-size':11,'font-weight':700,'text-anchor':'middle',visibility:'hidden','pointer-events':'none'});
+    const activePoint=el('circle',{r:7,fill:'#ffbd59',stroke:'#fff','stroke-width':2,'pointer-events':'none'});
+    chart.append(hoverVertical,hoverHorizontal,hoverValueBg,hoverValueLabel,hoverDateBg,hoverDateLabel,activePoint);
+    const pointCoords=coords.slice(1);
+    let activeIndex=0,hovering=false;
+    const showPoint=index=>{
+        activeIndex=index;
+        const item=pointCoords[index],pointerX=item.x,pointerY=item.y;
+        activePoint.setAttribute('cx',pointerX);activePoint.setAttribute('cy',pointerY);
+        activePoint.setAttribute('fill',item.point.point_type==='provisional'?'#ffbd59':'#86a8ff');
+        hoverVertical.setAttribute('x1',pointerX);hoverVertical.setAttribute('x2',pointerX);hoverVertical.setAttribute('visibility','visible');
+        hoverHorizontal.setAttribute('y1',pointerY);hoverHorizontal.setAttribute('y2',pointerY);hoverHorizontal.setAttribute('visibility','visible');
+        const valueY=Math.max(p.t,Math.min(height-p.b-20,pointerY-10));
+        hoverValueBg.setAttribute('y',valueY);hoverValueBg.setAttribute('visibility','visible');
+        hoverValueLabel.setAttribute('y',valueY+14);hoverValueLabel.textContent=preciseMoney(item.point.value);hoverValueLabel.setAttribute('visibility','visible');
+        const dateX=Math.max(p.l,Math.min(width-p.r-dateBadgeWidth,pointerX-dateBadgeWidth/2));
+        hoverDateBg.setAttribute('x',dateX);hoverDateBg.setAttribute('y',height-p.b+29);hoverDateBg.setAttribute('visibility','visible');
+        hoverDateLabel.setAttribute('x',dateX+dateBadgeWidth/2);hoverDateLabel.setAttribute('y',height-p.b+44);
+        hoverDateLabel.textContent=dateFormatter.format(new Date(item.point.timestamp));
+        hoverDateLabel.setAttribute('visibility','visible');
+    };
+    showPoint(0);
+    chart.onpointerenter=()=>{hovering=true;};
+    chart.onpointermove=event=>{
+        hovering=true;
+        const screenTransform=chart.getScreenCTM();
+        if(!screenTransform)return;
+        const pointer=chart.createSVGPoint();pointer.x=event.clientX;pointer.y=event.clientY;
+        const localPoint=pointer.matrixTransform(screenTransform.inverse()),pointerX=localPoint.x,pointerY=localPoint.y;
+        let nearest=0,minimumDistance=Infinity;
+        pointCoords.forEach((item,index)=>{
+            const dx=item.x-pointerX,dy=item.y-pointerY;
+            const screenX=dx*screenTransform.a+dy*screenTransform.c,screenY=dx*screenTransform.b+dy*screenTransform.d;
+            const distance=screenX*screenX+screenY*screenY;
+            if(distance<minimumDistance){minimumDistance=distance;nearest=index;}
+        });
+        showPoint(nearest);
+    };
+    chart.onpointerleave=()=>{hovering=false;};
+    const animation=window.setInterval(()=>{
+        if(!chart.isConnected){disposeReturnChartInteraction();return;}
+        if(hovering||document.hidden||!chart.getClientRects().length)return;
+        showPoint((activeIndex+1)%pointCoords.length);
+    },3000);
+    disposeReturnChartInteraction=()=>{
+        window.clearInterval(animation);
+        chart.onpointerenter=null;chart.onpointermove=null;chart.onpointerleave=null;
+    };
+    const last=points.at(-1), provisional=last.point_type==='provisional';
+    get_returnSummary().textContent=`${data.selected.symbol} · ${data.selected.entry_label||data.selected.entry_id} · ${data.selected.exit_label||data.selected.exit_id} · накопленная доходность ${preciseMoney(last.value)}${provisional?` · предварительная сделка ${Number(last.return_percent)>=0?'+':''}${Number(last.return_percent).toFixed(4)}%, позиция открыта`:''}`;
+}
+async function loadReturnChart(runKey, preferSymbol=''){
+    const loadVersion=++returnChartLoadVersion;
+    let data;
+    setReturnStatus('Загружаю сохранённые точки выбранной стратегии…');
+    if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Загружаю сохранённые точки доходности…';get_returnChartPlaceholder().hidden=false;}
+    do{
+        const entryId=document.querySelector('#entry-config')?.value||'';
+        const exitId=document.querySelector('#exit-config')?.value||'';
+        if(!entryId||!exitId){setReturnStatus('Сначала дождитесь загрузки выбранных порога входа и TakeProfit & StopLoss.');return false;}
+        data=await requestReturnData(runKey,preferSymbol,entryId,exitId);
+        if(loadVersion!==returnChartLoadVersion)return false;
+        if(data.status==='running'){
+            setReturnStatus('Варианты TP/SL готовы. Сохраняю точки графика доходности…');
+            if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Доходность для выбранной стратегии ещё сохраняется. График появится после завершения записи событий сделок.';get_returnChartPlaceholder().hidden=false;}
+            await new Promise(resolve=>window.setTimeout(resolve,1500));
+        }
+    }while(data.status==='running'&&loadVersion===returnChartLoadVersion);
+    if(data.status==='missing'){setReturnStatus('Сохранённый расчёт не найден.');if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Сохранённая история сделок для этой пары и периода не найдена.';get_returnChartPlaceholder().hidden=false;}return false;}
+    if(data.status==='rebuild_required'){const message=data.message||'Пересчитайте доходность, чтобы сохранить время каждой сделки.';setReturnStatus(message);if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent=message;get_returnChartPlaceholder().hidden=false;}return false;}
+    if(data.status!=='ready'){setReturnStatus('Расчёт ещё выполняется.');if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Расчёт ещё выполняется; точки доходности пока не готовы.';get_returnChartPlaceholder().hidden=false;}return false;}
+    activeReturnRunKey=runKey;
+    selectorReturnRunKey=runKey;
+    if(loadVersion!==returnChartLoadVersion)return false;
+    setReturnStatus(`Для выбранной стратегии загружено событий сделок: ${Number(data.points?.length||0).toLocaleString('ru-RU')}.`);
+    drawReturnChart(data);
+    return true;
+}
+function rememberPortfolioReturnHistory(ranking, scope='set'){
+    const runKey=ranking?.return_run_key;
+    if(!runKey)return;
+    activeReturnRunKey=runKey;
+    try{
+        localStorage.setItem(returnStorageKey(scope),runKey);
+        localStorage.setItem(returnStorageKey('last'),JSON.stringify({scope,runKey}));
+    }catch{}
+    setReturnStatus(`Сохранено событий сделок: ${Number(ranking.return_point_count||0).toLocaleString('ru-RU')}.`);
+    loadReturnChart(runKey,document.querySelector('#symbol-select')?.value||'').catch(error=>setReturnStatus(error instanceof Error?error.message:'Не удалось загрузить историю доходности.'));
+}
+async function refreshReturnSelection(){
+    if(!activeReturnRunKey)return;
+    try{
+        const symbol=document.querySelector('#symbol-select')?.value||'';
+        const entry=document.querySelector('#entry-config')?.value||'';
+        const exit=document.querySelector('#exit-config')?.value||'';
+        if(!entry||!exit)return;
+        const data=await requestReturnData(activeReturnRunKey,symbol,entry,exit);
+        if(data.status==='ready')drawReturnChart(data);
+    }catch(error){setReturnStatus(error instanceof Error?error.message:'Не удалось обновить график.');}
+}
+window.addEventListener('resize',()=>{if(activeReturnRunKey)refreshReturnSelection();});
+let strategyRangeComparisonVersion = 0;
+let strategyRangeComparisonTimer = null;
+let strategyRangeComparisonRequest = null;
+function scheduleStrategyRangeComparison() {
+    ++strategyRangeComparisonVersion;
+    window.clearTimeout(strategyRangeComparisonTimer);
+    strategyRangeComparisonRequest?.abort();
+    const panel = document.querySelector('#strategy-range-comparison');
+    if (!panel) return;
+    panel.hidden = !document.querySelector('#symbol-select')?.value;
+    if (panel.hidden) return;
+    document.querySelector('#strategy-range-comparison-table').replaceChildren();
+    document.querySelector('#strategy-range-comparison-status').textContent = 'Загружаю доходность соседних диапазонов…';
+    strategyRangeComparisonTimer = window.setTimeout(loadStrategyRangeComparison, 300);
+}
+async function loadStrategyRangeComparison() {
+    const version = strategyRangeComparisonVersion;
+    const params = new URLSearchParams(new FormData(filtersForm));
+    const status = document.querySelector('#strategy-range-comparison-status');
+    const tableWrap = document.querySelector('#strategy-range-comparison-table');
+    const selection = document.querySelector('#strategy-range-comparison-selection');
+    selection.textContent = [params.get('symbol'), document.querySelector('#entry-config')?.selectedOptions[0]?.textContent,
+        document.querySelector('#exit-config')?.selectedOptions[0]?.textContent].filter(Boolean).join(' · ');
+    if (!params.get('entry_config') || !params.get('exit_config')) {
+        status.textContent = 'Выберите порог входа и TakeProfit & StopLoss.';
+        return;
+    }
+    strategyRangeComparisonRequest = new AbortController();
+    try {
+        const response = await fetch('strategy-range-comparison.php?' + params.toString(), {
+            headers:{Accept:'application/json'}, cache:'no-store', signal:strategyRangeComparisonRequest.signal,
+        });
+        const data = await response.json();
+        if (version !== strategyRangeComparisonVersion) return;
+        if (!response.ok || data.status !== 'ready') throw new Error(data.message || 'Не удалось загрузить сравнение диапазонов.');
+        const table = document.createElement('table');
+        table.innerHTML = '<thead><tr><th>Диапазон</th><th>С даты</th><th>По дату</th><th>Дней</th><th>Доходность</th><th>Закрытых сделок</th></tr></thead>';
+        const body = document.createElement('tbody');
+        const dateText = value => new Date(value + 'T12:00:00Z').toLocaleDateString('ru-RU', {day:'2-digit',month:'short',year:'numeric',timeZone:'UTC'});
+        for (const range of data.ranges) {
+            const row = document.createElement('tr');
+            if (range.offset === 0) { row.style.background = '#263968'; row.setAttribute('aria-current', 'true'); }
+            const cells = [`(${range.offset > 0 ? '+' : ''}${range.offset})${range.offset === 0 ? ' · текущий' : ''}`,
+                dateText(range.start_day),dateText(range.end_day),String(range.days) + (range.partial ? ' · до сегодня' : ''),
+                range.return_percent === null ? 'Нет сохранённых закрытий' : optionPercent(Number(range.return_percent)),
+                Number(range.trade_count).toLocaleString('ru-RU')];
+            cells.forEach((text, index) => {
+                const cell = document.createElement('td');
+                cell.textContent = text;
+                if (index === 4 && range.return_percent !== null) cell.style.color = Number(range.return_percent) >= 0 ? '#3bd286' : '#f36c78';
+                row.append(cell);
+            });
+            body.append(row);
+        }
+        table.append(body);
+        tableWrap.replaceChildren(table);
+        status.textContent = `Длина выбранного диапазона: ${data.range_days} дн. · диапазонов: ${data.ranges.length} из 11`;
+    } catch (error) {
+        if (version !== strategyRangeComparisonVersion || error.name === 'AbortError') return;
+        status.textContent = error.message || 'Не удалось загрузить сравнение диапазонов.';
+    }
+}
+filtersForm?.addEventListener('change', scheduleStrategyRangeComparison);
+scheduleStrategyRangeComparison();
+async function restoreReturnChart(){
+    const symbol=document.querySelector('#symbol-select')?.value||'', scopes=symbol?['ticker:'+symbol,'set']:['set'];
+    try{const last=JSON.parse(localStorage.getItem(returnStorageKey('last'))||'null');if(last?.runKey){const restored=await loadReturnChart(last.runKey,symbol);if(restored)return;}}catch{}
+    for(const scope of scopes){const key=localStorage.getItem(returnStorageKey(scope));if(!key)continue;try{const restored=await loadReturnChart(key,symbol);if(restored)return;}catch{} }
+}
+restoreReturnChart();
+
 filtersForm.elements.namedItem('balance').addEventListener('input', event => {
     filtersForm.elements.namedItem('balance_auto').value = '0';
     filtersForm.elements.namedItem('ranking_balance').value = event.currentTarget.value;
@@ -1357,23 +1883,68 @@ syncViewNavigation();
 filtersForm?.addEventListener('input', event => {
     if (event.target.name === 'start_day') filtersForm.elements.namedItem('start_day_auto').value = '0';
     syncViewNavigation();
+    invalidateTickerReturnSummary(event);
 });
 filtersForm?.addEventListener('change', event => {
     if (event.target.name === 'start_day') filtersForm.elements.namedItem('start_day_auto').value = '0';
     syncViewNavigation();
+    invalidateTickerReturnSummary(event);
 });
 const rankingGenerationInput = document.querySelector('#ranking-generation');
 const saveModeToggle = document.querySelector('#save-mode-toggle');
 const saveModeValue = document.querySelector('#save-mode-value');
 const symbolSortMode = document.querySelector('#symbol-sort-mode');
 const symbolSelect = document.querySelector('#symbol-select');
+const tickerReturnSortStatus = document.querySelector('#ticker-return-sort-status');
+const tickerSortIndicator = document.querySelector('#ticker-sort-indicator');
+const tickerSortProgress = document.querySelector('#ticker-sort-progress');
 const demoAvailableTickerSymbols = new Set(<?= json_encode(array_keys($demoAvailableSymbols), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>);
 const knownTickerBestResults = new Map();
+let tickerSortShownAt = 0;
+let tickerSortHideTimer = null;
+let tickerSortVisibilityVersion = 0;
+let tickerReturnSummaryRunKey = '';
+let tickerReturnSummaryRequestVersion = 0;
+let tickerReturnSummaryCheckTimer = null;
+function invalidateTickerReturnSummary(event) {
+    if (['symbol', 'entry_config', 'exit_config'].includes(event.target?.name)) return;
+    tickerReturnSummaryRequestVersion++;
+    tickerReturnSummaryRunKey = '';
+    setTickerReturnSortPending(true);
+    if (tickerReturnSortStatus) tickerReturnSortStatus.textContent = 'Проверяю доходность перед сортировкой торговых пар…';
+    renderTickerBestResults([]);
+    window.clearTimeout(tickerReturnSummaryCheckTimer);
+    tickerReturnSummaryCheckTimer = window.setTimeout(() => void checkReturnHistoryActionState(), 300);
+}
+function setTickerReturnSortPending(pending, progress = null) {
+    if (!tickerSortIndicator) return;
+    const version = ++tickerSortVisibilityVersion;
+    window.clearTimeout(tickerSortHideTimer);
+    if (pending) {
+        if (tickerSortIndicator.hidden) tickerSortShownAt = performance.now();
+        tickerSortIndicator.hidden = false;
+        if (tickerSortProgress) tickerSortProgress.textContent = ` (${Math.max(0,Math.min(100,Number(progress)||0)).toLocaleString('ru-RU',{maximumFractionDigits:1})}%) `;
+        return;
+    }
+    // Cached summaries can finish before a browser paints the loading state.
+    // Keep the indicator visible briefly so the sort action is still apparent.
+    const remaining = Math.max(0, 650 - (performance.now() - tickerSortShownAt));
+    tickerSortHideTimer = window.setTimeout(() => {
+        if (version !== tickerSortVisibilityVersion) return;
+        tickerSortIndicator.hidden = true;
+        if (tickerSortProgress) tickerSortProgress.textContent = '';
+    }, remaining);
+}
 function renderTickerBestResults(items) {
     knownTickerBestResults.clear();
     const currentSymbol = symbolSelect.value;
     const options = new Map([...symbolSelect.options].map(option => [option.value, option]));
     for (const [symbol, option] of options) {
+        if (symbol === '') {
+            option.textContent = 'Выберите торговую пару';
+            option.removeAttribute('title');
+            continue;
+        }
         option.textContent = symbol;
         option.classList.toggle('demo-available-ticker', demoAvailableTickerSymbols.has(symbol));
         option.removeAttribute('title');
@@ -1382,7 +1953,7 @@ function renderTickerBestResults(items) {
         if (item.pnl === null || item.pnl === undefined || item.pnl === '') continue;
         const pnl = Number(item.pnl);
         if (!item.symbol || !Number.isFinite(pnl)) continue;
-        knownTickerBestResults.set(item.symbol, {pnl, title: item.title || 'Лучший сохранённый результат тикера'});
+        knownTickerBestResults.set(item.symbol, {pnl, unit: item.unit || 'USDT', title: item.title || 'Лучший сохранённый результат тикера'});
     }
     const ranked = [...knownTickerBestResults.entries()]
         .filter(([symbol]) => options.has(symbol))
@@ -1390,20 +1961,23 @@ function renderTickerBestResults(items) {
     const ordered = [];
     for (const [symbol, result] of ranked) {
         const option = options.get(symbol);
-        option.textContent = symbol + ' · ' + pnlText(result.pnl);
+        option.textContent = symbol + ' · ' + pnlText(result.pnl, result.unit);
         option.title = result.title;
         ordered.push(option);
     }
-    for (const option of options.values()) if (!ordered.includes(option)) ordered.push(option);
+    for (const option of options.values()) if (option.value !== '' && !ordered.includes(option)) ordered.push(option);
+    if (options.has('')) ordered.unshift(options.get(''));
     symbolSelect.replaceChildren(...ordered);
     symbolSelect.value = currentSymbol;
 }
 async function loadCachedTickerBestResults() {
+    const summaryKeyAtStart = tickerReturnSummaryRunKey;
     try {
         const params = new URLSearchParams(new FormData(filtersForm));
         params.set('balance', params.get('ranking_balance') || params.get('balance') || '100');
         const response = await fetch('cached-strategy-symbols.php?' + params.toString(), {headers:{Accept:'application/json'}, cache:'no-store'});
         const result = await response.json();
+        if (summaryKeyAtStart === '' && tickerReturnSummaryRunKey !== '') return;
         if (response.ok && result.status === 'ready' && Array.isArray(result.symbols)) {
             renderTickerBestResults(result.symbols.map(item => ({
                 symbol: item.symbol,
@@ -1413,7 +1987,264 @@ async function loadCachedTickerBestResults() {
         }
     } catch (_) {}
 }
+async function loadTickerReturnSummary(runKey) {
+    if (favoriteView) return;
+    const params = new URLSearchParams(new FormData(filtersForm));
+    const symbols = [...symbolSelect.options].map(option => option.value).filter(Boolean);
+    const summaryIdentity = JSON.stringify([runKey, params.get('start_day'), params.get('end_day'), params.get('save_mode'), params.get('exit_confirmation_mode'), params.get('exit_confirmation_snapshots'), symbols]);
+    if (tickerReturnSummaryRunKey === summaryIdentity) return;
+    tickerReturnSummaryRunKey = summaryIdentity;
+    const requestVersion = ++tickerReturnSummaryRequestVersion;
+    setTickerReturnSortPending(true);
+    params.set('run_key', runKey);
+    params.set('symbols', JSON.stringify(symbols));
+    if (tickerReturnSortStatus) tickerReturnSortStatus.textContent = 'Подготавливаю доходность по каждой торговой паре…';
+    try {
+        while (requestVersion === tickerReturnSummaryRequestVersion) {
+            const response = await fetch('ticker-return-summary.php', {
+                method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded', Accept:'application/json'},
+                body: params.toString(), cache: 'no-store',
+            });
+            const result = await response.json();
+            if (requestVersion !== tickerReturnSummaryRequestVersion) return;
+            if (!response.ok || result.status === 'error') throw new Error(result.message || 'Не удалось отсортировать торговые пары.');
+            if (result.status === 'ready') {
+                setTickerReturnSortPending(false);
+                const tickerResults = (result.symbols || []).map(item => ({
+                    symbol: item.symbol, pnl: item.pnl, unit: '%',
+                    title: item.entry_label ? `Лучший результат: ${item.entry_label} · ${item.exit_label || 'TP/SL не указаны'} · ${Number(item.trade_count || 0).toLocaleString('ru-RU')} сделок` : 'Лучший результат по сохранённым сделкам',
+                }));
+                renderTickerBestResults(tickerResults);
+                if (tickerReturnSortStatus) tickerReturnSortStatus.textContent = `Пары отсортированы по доходности за ${result.start_day} — ${result.end_day}: есть результат у ${Number(result.ranked_count || 0).toLocaleString('ru-RU')} из ${Number(result.universe_size || 0).toLocaleString('ru-RU')}.`;
+                return;
+            }
+            if (result.status === 'missing') {
+                setTickerReturnSortPending(false);
+                if (tickerReturnSortStatus) tickerReturnSortStatus.textContent = 'Сохранённая доходность для этих дат и списка не найдена.';
+                return;
+            }
+            setTickerReturnSortPending(true, result.progress);
+            if (tickerReturnSortStatus) tickerReturnSortStatus.textContent = result.message || 'Сортирую пары по рассчитанной доходности…';
+            await wait(2500);
+        }
+    } catch (error) {
+        if (requestVersion === tickerReturnSummaryRequestVersion && tickerReturnSortStatus) {
+            setTickerReturnSortPending(false);
+            tickerReturnSortStatus.textContent = error.message || 'Не удалось отсортировать торговые пары.';
+        }
+    }
+}
 const refreshSymbolsButton = document.querySelector('#refresh-symbols');
+const calculateReturnHistoryButton = document.querySelector('#calculate-return-history');
+let returnActionCheckVersion = 0;
+let returnActionCheckTimer = null;
+let tickerReturnCheckVersion = 0;
+let tickerReturnCheckTimer = null;
+const comparePortfolioRankingsButton = document.querySelector('#compare-portfolio-rankings');
+const rankingComparisonSection = document.querySelector('#ranking-comparison');
+const rankingComparisonTable = document.querySelector('#ranking-comparison-table');
+const rankingComparisonPeriod = document.querySelector('#ranking-comparison-period');
+let rankingComparisonData = null;
+let rankingComparisonRequestVersion = 0;
+function clearRankingComparison() {
+    rankingComparisonRequestVersion++;
+    rankingComparisonData = null;
+    if (comparePortfolioRankingsButton) comparePortfolioRankingsButton.hidden = true;
+    if (rankingComparisonSection) rankingComparisonSection.hidden = true;
+    if (rankingComparisonTable) rankingComparisonTable.replaceChildren();
+}
+async function checkPortfolioRankingComparisons(cacheKey) {
+    clearRankingComparison();
+    const checkVersion = ++rankingComparisonRequestVersion;
+    try {
+        const response = await fetch('portfolio-ranking-comparison.php?' + new URLSearchParams({cache_key: cacheKey}), {
+            headers: {Accept: 'application/json'}, cache: 'no-store',
+        });
+        const data = await response.json();
+        if (checkVersion !== rankingComparisonRequestVersion) return;
+        if (!response.ok || data.status !== 'ready' || !Array.isArray(data.runs) || data.runs.length < 2) return;
+        rankingComparisonData = data;
+        comparePortfolioRankingsButton.hidden = false;
+        comparePortfolioRankingsButton.textContent = `Сравнить готовые рейтинги (${data.runs.length})`;
+    } catch (_) {}
+}
+function renderPortfolioRankingComparison(data) {
+    if (!rankingComparisonTable || !Array.isArray(data?.runs)) return;
+    rankingComparisonPeriod.textContent = `${data.start_day} — ${data.end_day} · ${data.ticker_count} пар`;
+    const leadersByRun = data.runs.map(run => new Map((run.ticker_leaders || []).map(item => [item.symbol, item])));
+    const symbols = [...new Set(leadersByRun.flatMap(map => [...map.keys()]))].sort((left, right) => left.localeCompare(right));
+    const table = document.createElement('table');
+    table.className = 'ranking-comparison-table';
+    const head = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    const symbolHeading = document.createElement('th');
+    symbolHeading.textContent = 'Торговая пара';
+    headRow.appendChild(symbolHeading);
+    for (const run of data.runs) {
+        const cell = document.createElement('th');
+        cell.textContent = run.scenario.label;
+        cell.title = `Сценарий расчёта · ${run.cache_key}`;
+        headRow.appendChild(cell);
+    }
+    head.appendChild(headRow);
+    table.appendChild(head);
+    const body = document.createElement('tbody');
+    for (const symbol of symbols) {
+        const row = document.createElement('tr');
+        const name = document.createElement('th');
+        name.scope = 'row';
+        name.textContent = symbol;
+        row.appendChild(name);
+        for (const leaders of leadersByRun) {
+            const cell = document.createElement('td');
+            const leader = leaders.get(symbol);
+            if (!leader || leader.pnl === null || leader.pnl === undefined || !Number.isFinite(Number(leader.pnl))) {
+                cell.textContent = '—';
+            } else {
+                const value = Number(leader.pnl);
+                const result = document.createElement('span');
+                result.className = 'ranking-comparison-value';
+                result.textContent = `${value > 0 ? '+' : ''}${value.toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 4})}%`;
+                cell.appendChild(result);
+                const detail = document.createElement('span');
+                detail.className = 'ranking-comparison-detail';
+                detail.textContent = `${leader.entry_label || 'Вход не указан'} · ${leader.exit_label || 'Выход не указан'} · ${Number(leader.trade_count) || 0} сделок`;
+                cell.appendChild(detail);
+            }
+            row.appendChild(cell);
+        }
+        body.appendChild(row);
+    }
+    table.appendChild(body);
+    rankingComparisonTable.replaceChildren(table);
+}
+comparePortfolioRankingsButton?.addEventListener('click', () => {
+    if (!rankingComparisonData) return;
+    const show = rankingComparisonSection.hidden;
+    if (show) renderPortfolioRankingComparison(rankingComparisonData);
+    rankingComparisonSection.hidden = !show;
+    comparePortfolioRankingsButton.setAttribute('aria-expanded', String(show));
+});
+function setReturnHistoryActionState(state) {
+    const ready = state === 'ready';
+    refreshSymbolsButton.hidden = !ready || favoriteView;
+    calculateReturnHistoryButton.hidden = ready || favoriteView;
+    calculateReturnHistoryButton.disabled = favoriteView || state === 'running';
+    calculateReturnHistoryButton.textContent = state === 'running'
+        ? 'Доходность рассчитывается…'
+        : `Рассчитать доходность для «${tickerSetSelect?.selectedOptions[0]?.textContent || 'списка'}»`;
+}
+async function checkReturnHistoryActionState() {
+    const version = ++returnActionCheckVersion;
+    if (favoriteView) { setReturnHistoryActionState('missing'); return; }
+    setTickerReturnSortPending(true);
+    if (tickerReturnSortStatus) tickerReturnSortStatus.textContent = 'Проверяю доходность перед сортировкой торговых пар…';
+    const params = new URLSearchParams(new FormData(filtersForm));
+    params.set('balance', params.get('ranking_balance') || params.get('balance') || '100');
+    params.set('return_history_status', '1');
+    try {
+        while (version === returnActionCheckVersion) {
+            const response = await fetch('portfolio-ranking.php?' + params.toString(), {headers:{Accept:'application/json'}, cache:'no-store'});
+            const result = await response.json();
+            if (!response.ok || result.status === 'error') throw new Error(result.message || 'Не удалось проверить расчёт доходности');
+            if (version !== returnActionCheckVersion) return;
+            if (result.status === 'running') {
+                setReturnHistoryActionState('running');
+                let progress = result.progress_stale ? null : (Number(result.progress) || 0);
+                let label = result.progress_stale ? 'Расчёт доходности продолжается, статус давно не обновлялся' : 'Рассчитываю доходность';
+                if (!result.progress_stale && result.phase === 'loading_quotes' && Number(result.total_quote_symbols) > 0) {
+                    const done = Number(result.loaded_quote_symbols) || 0;
+                    const total = Number(result.total_quote_symbols);
+                    progress = Math.round(done * 5 / total);
+                    label = `Загружаю котировки: ${done} из ${total}${result.current_quote_symbol ? ` · ${result.current_quote_symbol}` : ''}`;
+                } else if (!result.progress_stale && result.phase === 'building_signals' && Number(result.total_signal_symbols) > 0) {
+                    const done = Number(result.signals_built_symbols) || 0;
+                    const total = Number(result.total_signal_symbols);
+                    progress = 5 + Math.round(done * 5 / total);
+                    label = `Строю сигналы: ${done} из ${total}${result.current_signal_symbol ? ` · ${result.current_signal_symbol}` : ''}`;
+                } else if (!result.progress_stale && result.phase === 'simulating_candidates') {
+                    progress = 10 + Math.round((Number(result.progress) || 0) * 0.8);
+                    label = `Рассчитываю стратегии: ${Number(result.completed_entry_profiles || 0)} из ${Number(result.total_entry_profiles || 0)} порогов${result.entry_profile ? ` · ${result.entry_profile}` : ''}`;
+                } else if (!result.progress_stale && result.phase === 'finalizing_return_history') {
+                    progress = 99;
+                    label = 'Завершаю сохранение событий сделок';
+                } else if (!result.progress_stale && result.phase === 'saving_return_history') {
+                    progress = result.history_progress === null || result.history_progress === undefined
+                        ? null : 90 + Math.round(Number(result.history_progress) * 0.1);
+                    label = result.history_progress === null || result.history_progress === undefined
+                        ? 'Подготавливаю сохранение выбранных результатов'
+                        : `Сохраняю выбранные результаты: ${Number(result.history_completed || 0)} из ${Number(result.history_total || 0)}`;
+                }
+                calculateReturnHistoryButton.textContent = progress === null ? 'Доходность рассчитывается…' : `Доходность рассчитывается… ${progress}%`;
+                if (!portfolioRankingStatusPolling) {
+                    portfolioRankingPanel.hidden = false;
+                    portfolioRankingStatus.textContent = `${label}${progress === null ? '' : ` · общий прогресс ${progress}%`}${result.progress_stale ? ' · последнее подтверждённое состояние' : ''}`;
+                    setRefreshProgress(progress, portfolioRankingStatus.textContent);
+                }
+                await wait(2000);
+                continue;
+            }
+            setReturnHistoryActionState(result.status === 'ready' ? 'ready' : 'missing');
+            if (result.status === 'ready') {
+                if (result.run_key && activeReturnRunKey !== result.run_key) {
+                    rememberPortfolioReturnHistory({return_run_key: result.run_key, return_point_count: result.point_count || 0});
+                }
+                if (result.run_key) void loadTickerReturnSummary(result.run_key);
+                else setTickerReturnSortPending(false);
+            } else if (result.status === 'missing') {
+                if (!activeReturnRunKey) {
+                    setReturnStatus('Доходность для выбранного списка и дат ещё не рассчитана. Нажмите «Рассчитать доходность» выше.');
+                    const summary = document.querySelector('#strategy-return-summary');
+                    if (summary) summary.textContent = 'Точки доходности появятся здесь после отдельного расчёта истории для выбранного списка и периода.';
+                }
+                void loadTickerReturnSummary('');
+            } else setTickerReturnSortPending(false);
+            return;
+        }
+    } catch (error) {
+        if (version === returnActionCheckVersion) {
+            setTickerReturnSortPending(false);
+            setReturnHistoryActionState('missing');
+            if (error?.message) setReturnStatus(error.message);
+        }
+    }
+}
+function scheduleReturnHistoryActionCheck() {
+    clearTimeout(returnActionCheckTimer);
+    returnActionCheckTimer = window.setTimeout(checkReturnHistoryActionState, 250);
+}
+async function checkTickerReturnHistory() {
+    const version=++tickerReturnCheckVersion;
+    const params=new URLSearchParams(new FormData(filtersForm));
+    const symbol=params.get('symbol')||'',entry=params.get('entry_config')||'',exit=params.get('exit_config')||'';
+    if(!symbol||!entry||!exit||params.get('martingale_mode')!=='none')return;
+    params.set('return_history_status','1');
+    try{
+        const response=await fetch('strategy-ranking.php?'+params.toString(),{headers:{Accept:'application/json'},cache:'no-store'});
+        const result=await response.json();
+        if(version!==tickerReturnCheckVersion||!response.ok)return;
+        if(result.status==='ready'&&result.return_run_key){
+            if(activeReturnRunKey!==result.return_run_key){rememberPortfolioReturnHistory({return_run_key:result.return_run_key,return_point_count:result.return_point_count||0},'ticker:'+symbol);}
+            else if(get_chartPanel()?.classList.contains('return-mode'))refreshReturnSelection();
+        }else if(result.status==='running'){
+            setReturnStatus('Сохраняю доходность для выбранной стратегии…');
+            if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='События сделок для доходности ещё сохраняются. График появится после завершения записи.';get_returnChartPlaceholder().hidden=false;}
+            clearTimeout(tickerReturnCheckTimer);
+            tickerReturnCheckTimer=window.setTimeout(checkTickerReturnHistory,2000);
+        }else if(result.status==='missing'&&get_chartPanel()?.classList.contains('return-mode')){
+            setReturnStatus('Для выбранных пары, периода и параметров ещё нет сохранённой доходности. Дождитесь завершения расчёта вариантов стратегии.');
+            if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Сохранённая история сделок для выбранной пары и стратегии ещё не готова.';get_returnChartPlaceholder().hidden=false;}
+            if(get_returnSummary())get_returnSummary().textContent='История доходности для выбранной комбинации пока не сохранена.';
+        }
+    }catch(_){}
+}
+function scheduleTickerReturnHistoryCheck(){
+    clearTimeout(tickerReturnCheckTimer);
+    tickerReturnCheckTimer=window.setTimeout(checkTickerReturnHistory,400);
+}
+filtersForm?.addEventListener('change',()=>{clearRankingComparison();scheduleReturnHistoryActionCheck();scheduleTickerReturnHistoryCheck();},true);
+filtersForm?.addEventListener('input',()=>{clearRankingComparison();scheduleReturnHistoryActionCheck();scheduleTickerReturnHistoryCheck();},true);
+scheduleTickerReturnHistoryCheck();
 const stopCalculationQueueButton = document.querySelector('#stop-calculation-queue');
 const portfolioRankingPanel = document.querySelector('#portfolio-ranking-panel');
 const portfolioRankingContent = document.querySelector('#portfolio-ranking-content');
@@ -1460,12 +2291,17 @@ const historyImportResultStorageKey = 'bitget-history-import-result-v1';
 let activeHistoryImportJobId = '';
 function updateHistoryImportLabels() {
     if (!selectedSymbolImportButton) return;
-    selectedSymbolImportButton.textContent = '↻ ' + (symbolSelect.value || 'Выбранная пара');
+    selectedSymbolImportButton.textContent = 'Выгрузить сырые данные по ' + (symbolSelect.value || 'выбранной паре');
     const start = filtersForm.elements.namedItem('start_day').value;
     const end = endDayInput.value;
     selectedSymbolImportButton.title = `Скачать минутные свечи ${symbolSelect.value} из Bitget за период ${start} — ${end} включительно, сохранить в БД и обновить график и расчёты. Для пропущенных минут Close свечи используется как цена.`;
     if (allSymbolsImportButton) {
         const tickerSetName = tickerSetSelect?.selectedOptions[0]?.textContent || 'выбранного списка';
+        const tickerCount = Number(allSymbolsImportButton.dataset.symbolCount || 0);
+        const lastTwo = tickerCount % 100;
+        const last = tickerCount % 10;
+        const tickerWord = lastTwo >= 11 && lastTwo <= 14 ? 'тикеров' : last === 1 ? 'тикер' : last >= 2 && last <= 4 ? 'тикера' : 'тикеров';
+        allSymbolsImportButton.textContent = `Выгрузить сырые данные по ${tickerSetName} (${tickerCount} ${tickerWord})`;
         allSymbolsImportButton.title = `Скачать минутные свечи всех активных пар списка «${tickerSetName}» из Bitget за период ${start} — ${end} включительно, сохранить в БД и обновить график и расчёты. Для пропущенных минут Close свечи используется как цена.`;
     }
 }
@@ -1549,6 +2385,10 @@ function historyImportTiming(status, now = Date.now()) {
 }
 function renderHistoryImportProgress(status) {
     historyImportStatus.dataset.status = status.status || 'running';
+    if (status.status === 'running') {
+        const stopButton = document.querySelector('#stop-history-import');
+        if (stopButton) stopButton.hidden = false;
+    }
     let message = status.message || 'Загружаю исторические свечи…';
     if (status.status === 'running') {
         const overall = Number(status.progress || 0).toLocaleString('ru-RU', {minimumFractionDigits:1, maximumFractionDigits:2});
@@ -1630,15 +2470,17 @@ async function pollHistoryImport(jobId, importRequest) {
         }
     }
 }
-stopHistoryImportButton?.addEventListener('click', async () => {
-    if (stopHistoryImportButton.disabled) return;
+document.addEventListener('click', async event => {
+    const stopButton = event.target.closest('#stop-history-import');
+    if (!stopButton) return;
+    if (stopButton.disabled) return;
     const jobId = activeHistoryImportJobId || (() => {
         try { return JSON.parse(sessionStorage.getItem(historyImportJobStorageKey) || 'null')?.job_id || ''; }
         catch (_) { return ''; }
     })();
     if (!jobId) return;
-    stopHistoryImportButton.disabled = true;
-    stopHistoryImportButton.textContent = 'Останавливаю…';
+    stopButton.disabled = true;
+    stopButton.textContent = 'Останавливаю…';
     historyImportStatus.dataset.status = 'running';
     historyImportStatus.textContent = 'Останавливаю загрузку исторических свечей…';
     try {
@@ -1652,9 +2494,9 @@ stopHistoryImportButton?.addEventListener('click', async () => {
         if (response.ok && (result.status === 'ready' || result.status === 'partial')) {
             historyImportStatus.dataset.status = result.status;
             historyImportStatus.textContent = 'Загрузка уже завершилась; обновляю данные…';
-            stopHistoryImportButton.hidden = true;
-            stopHistoryImportButton.disabled = false;
-            stopHistoryImportButton.textContent = '■ Остановить загрузку';
+            stopButton.hidden = true;
+            stopButton.disabled = false;
+            stopButton.textContent = '■ Остановить загрузку';
             return;
         }
         if (!response.ok || result.status !== 'cancelled') throw new Error(result.message || 'Не удалось остановить загрузку.');
@@ -1663,14 +2505,14 @@ stopHistoryImportButton?.addEventListener('click', async () => {
         historyImportStatus.dataset.status = 'cancelled';
         historyImportStatus.textContent = result.message || 'Загрузка остановлена.';
         historyImportButtons.forEach(button => { button.disabled = false; });
-        stopHistoryImportButton.hidden = true;
-        stopHistoryImportButton.disabled = false;
-        stopHistoryImportButton.textContent = '■ Остановить загрузку';
+        stopButton.hidden = true;
+        stopButton.disabled = false;
+        stopButton.textContent = '■ Остановить загрузку';
     } catch (error) {
         historyImportStatus.dataset.status = 'error';
         historyImportStatus.textContent = error.message || 'Не удалось остановить загрузку.';
-        stopHistoryImportButton.disabled = false;
-        stopHistoryImportButton.textContent = '■ Остановить загрузку';
+        stopButton.disabled = false;
+        stopButton.textContent = '■ Остановить загрузку';
     }
 });
 async function startHistoryImport(scope) {
@@ -1820,6 +2662,7 @@ function createElapsedTimer(element, label) {
 const strategyRankingTimer = createElapsedTimer(document.querySelector('#strategy-ranking-timer'), 'Время расчёта выбранной комбинации');
 const portfolioRankingTimer = createElapsedTimer(document.querySelector('#portfolio-ranking-timer'), 'Время общего рейтинга');
 let portfolioRankingRequestVersion = 0;
+let portfolioRankingStatusPolling = false;
 const martingaleCacheStatus = document.querySelector('#martingale-cache-status');
 const martingaleDraftStatus = document.querySelector('#martingale-draft-status');
 const martingaleInitialNotional = document.querySelector('#martingale-initial-notional');
@@ -1896,12 +2739,13 @@ function updateMartingaleInitialNotional() {
     }).format(initialNotional) + ' USDT';
 }
 function setRefreshProgress(progress, title) {
-    const percent = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+    const progressKnown = progress !== null && progress !== undefined && Number.isFinite(Number(progress));
+    const percent = progressKnown ? Math.max(0, Math.min(100, Math.round(Number(progress)))) : null;
     refreshSymbolsButton.disabled = true;
     refreshSymbolsButton.classList.add('is-loading');
     refreshSymbolsButton.setAttribute('aria-busy', 'true');
-    refreshSymbolsButton.setAttribute('aria-label', `Расчет общего рейтинга: ${percent}%`);
-    refreshSymbolsButton.title = title || `Расчет общего рейтинга: ${percent}%`;
+    refreshSymbolsButton.setAttribute('aria-label', progressKnown ? `Расчет общего рейтинга: ${percent}%` : 'Расчет общего рейтинга выполняется');
+    refreshSymbolsButton.title = title || (progressKnown ? `Расчет общего рейтинга: ${percent}%` : 'Расчет общего рейтинга выполняется');
     let indicator = refreshSymbolsButton.querySelector('.refresh-progress');
     if (!indicator) {
         indicator = document.createElement('span');
@@ -1912,15 +2756,15 @@ function setRefreshProgress(progress, title) {
         indicator.appendChild(value);
         refreshSymbolsButton.replaceChildren(indicator);
     }
-    indicator.querySelector('.refresh-progress-value').textContent = `${percent}%`;
+    indicator.querySelector('.refresh-progress-value').textContent = progressKnown ? `${percent}%` : '…';
 }
-function resetRefreshButton(title = 'Рассчитать общие лучшие комбинации порога входа и TakeProfit & StopLoss') {
+function resetRefreshButton(title = 'Составить общий рейтинг из таблицы доходности') {
     refreshSymbolsButton.disabled = false;
     refreshSymbolsButton.classList.remove('is-loading');
     refreshSymbolsButton.removeAttribute('aria-busy');
-    refreshSymbolsButton.setAttribute('aria-label', 'Рассчитать общий рейтинг пар');
+    refreshSymbolsButton.setAttribute('aria-label', 'Составить общий рейтинг по рассчитанной доходности');
     refreshSymbolsButton.title = title;
-    refreshSymbolsButton.replaceChildren(document.createTextNode('↻'));
+    refreshSymbolsButton.replaceChildren(document.createTextNode('Составить рейтинг'));
 }
 function resetPortfolioRankingForRelevantFilterChange() {
     portfolioRankingRequestVersion++;
@@ -2043,7 +2887,37 @@ saveModeToggle.addEventListener('change', () => {
 });
 let filterSubmitTimer;
 let replayRequest;
-document.querySelector('#exit-confirmation-mode')?.addEventListener('change', () => filtersForm.requestSubmit());
+document.querySelector('#exit-confirmation-mode')?.addEventListener('change', event => {
+    const noExit = event.target.value === 'none';
+    const exitConfigField = document.querySelector('#exit-config-field');
+    if (exitConfigField) exitConfigField.hidden = noExit;
+    if (exitConfigSelect) {
+        if (noExit) {
+            exitConfigSelect.replaceChildren(new Option('Не применяется · позиция удерживается до конца периода', 'none', true, true));
+        } else if (exitConfigSelect.value === 'none') {
+            exitConfigSelect.replaceChildren(...initialExitOptions.filter(item => item.id !== 'none').map(item => new Option(item.label, item.id)));
+            if (exitConfigSelect.options.length) exitConfigSelect.selectedIndex = 0;
+        }
+        exitConfigSelect.disabled = noExit || !symbolSelect?.value;
+    }
+    if (noExit && selectTopRankedResultInput) selectTopRankedResultInput.value = '0';
+    filtersForm.requestSubmit();
+});
+function revealStrategyResults() {
+    document.querySelector('#chart-panel')?.removeAttribute('hidden');
+    document.querySelector('#results')?.removeAttribute('hidden');
+    const placeholder = document.querySelector('#strategy-results-placeholder');
+    if (placeholder) placeholder.hidden = true;
+}
+function serverRenderedSelectionMatches() {
+    const chart = document.querySelector('#chart-panel');
+    return Boolean(chart
+        && entryConfigSelect?.value
+        && exitConfigSelect?.value
+        && chart.dataset.renderedEntry === entryConfigSelect.value
+        && chart.dataset.renderedExit === exitConfigSelect.value
+        && chart.dataset.renderedExitSnapshots === (document.querySelector('#exit-confirmation-snapshots')?.value || ''));
+}
 function clearStrategyResults() {
     document.querySelector('#chart-panel')?.setAttribute('hidden', '');
     document.querySelector('#results')?.setAttribute('hidden', '');
@@ -2055,6 +2929,7 @@ filtersForm?.addEventListener('change', event => { if (event.target.matches('sel
 async function refreshStrategyResults() {
     clearStrategyResults();
     if (!symbolSelect?.value) return;
+    const restoreReturnMode = document.querySelector('#chart-panel')?.classList.contains('return-mode') === true;
     replayRequest?.abort();
     replayRequest = new AbortController();
     const params = new URLSearchParams(new FormData(filtersForm));
@@ -2077,8 +2952,13 @@ async function refreshStrategyResults() {
         if (placeholder) placeholder.hidden = true;
         const chartScript = [...updatedPage.scripts].find(script => script.textContent.includes('const datasets ='));
         if (chartScript) new Function(chartScript.textContent)();
+        if (restoreReturnMode) setChartMode('returns');
     } catch (error) {
-        if (error.name !== 'AbortError') console.error('Не удалось обновить результаты стратегии', error);
+        if (error.name !== 'AbortError') {
+            console.error('Не удалось обновить результаты стратегии', error);
+            const placeholder = document.querySelector('#strategy-results-placeholder');
+            if (placeholder) { placeholder.hidden = false; placeholder.textContent = 'Не удалось загрузить расчёт стратегии. Измените фильтры или повторите выбор.'; }
+        }
     }
 }
 filtersForm.querySelectorAll('select, input').forEach(control => {
@@ -2094,12 +2974,7 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
             refreshAfterExitRanking = true;
             const selectedExit = exitConfigSelect.value;
             exitRankingRequestVersion++;
-            exitConfigSelect.replaceChildren();
-            const loadingOption = document.createElement('option');
-            loadingOption.value = selectedExit;
-            loadingOption.textContent = 'Пересчитываю TakeProfit & StopLoss для порога…';
-            loadingOption.selected = true;
-            exitConfigSelect.appendChild(loadingOption);
+            renderExitOptions(initialExitOptions, selectedExit, Number(document.querySelector('#exit-confirmation-snapshots')?.value) || 60);
             loadExitRanking(selectedExit);
             return;
         }
@@ -2120,6 +2995,7 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
         }
         clearTimeout(filterSubmitTimer);
         if (control.name === 'start_day' || control.name === 'end_day') {
+            selectTopRankedResultInput.value = '1';
             resetPortfolioRankingForRelevantFilterChange();
         }
         filtersForm.requestSubmit();
@@ -2142,26 +3018,132 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
 });
 const exitConfigSelect = document.querySelector('#exit-config');
 const entryConfigSelect = document.querySelector('#entry-config');
+const entryOrderLock = document.querySelector('#entry-order-lock');
+const exitOrderLock = document.querySelector('#exit-order-lock');
+function setSelectorOrderLock(button, locked, key) {
+    if (!button) return;
+    button.setAttribute('aria-pressed', String(!locked));
+    const label = locked ? 'Сортировка выключена для сравнения в диапазонах' : 'Сортировка по максимальной доходности';
+    button.replaceChildren();
+    const dot = document.createElement('span');
+    dot.className = 'selector-sort-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    const text = document.createElement('span');
+    text.textContent = label;
+    button.append(dot, text);
+    button.title = locked ? 'Включить сортировку по максимальной доходности' : 'Выключить сортировку для сравнения в диапазонах';
+    button.setAttribute('aria-label', `${label}: ${key === 'entry' ? 'Порог входа' : 'TakeProfit & StopLoss'}`);
+}
+function readSelectorOrderLock(key) {
+    try { return localStorage.getItem(`basic-checks-selector-order-${key}`) === '1'; } catch (_) { return false; }
+}
+let entryOrderLocked = readSelectorOrderLock('entry');
+let exitOrderLocked = readSelectorOrderLock('exit');
+setSelectorOrderLock(entryOrderLock, entryOrderLocked, 'entry');
+setSelectorOrderLock(exitOrderLock, exitOrderLocked, 'exit');
+entryOrderLock?.addEventListener('click', () => {
+    entryOrderLocked = !entryOrderLocked;
+    try { localStorage.setItem('basic-checks-selector-order-entry', entryOrderLocked ? '1' : '0'); if (entryOrderLocked) localStorage.setItem('basic-checks-selector-order-entry-values', JSON.stringify([...entryConfigSelect.options].map(option => option.value))); } catch (_) {}
+    setSelectorOrderLock(entryOrderLock, entryOrderLocked, 'entry');
+});
+exitOrderLock?.addEventListener('click', () => {
+    exitOrderLocked = !exitOrderLocked;
+    try { localStorage.setItem('basic-checks-selector-order-exit', exitOrderLocked ? '1' : '0'); if (exitOrderLocked) localStorage.setItem('basic-checks-selector-order-exit-values', JSON.stringify([...exitConfigSelect.options].map(option => option.value))); } catch (_) {}
+    setSelectorOrderLock(exitOrderLock, exitOrderLocked, 'exit');
+});
+function preserveSelectorOrder(items, select, locked) {
+    if (!locked || !select?.options.length) return items;
+    let values = [...select.options].map(option => option.value);
+    try {
+        const saved = JSON.parse(localStorage.getItem(`basic-checks-selector-order-${select === entryConfigSelect ? 'entry' : 'exit'}-values`));
+        if (Array.isArray(saved) && saved.length) values = saved;
+    } catch (_) {}
+    const currentOrder = new Map(values.map((value, index) => [value, index]));
+    return [...items].sort((left, right) => {
+        const leftIndex = currentOrder.get(String(left.id));
+        const rightIndex = currentOrder.get(String(right.id));
+        if (leftIndex === undefined) return rightIndex === undefined ? 0 : 1;
+        if (rightIndex === undefined) return -1;
+        return leftIndex - rightIndex;
+    });
+}
+const entrySortIndicator = document.querySelector('#entry-sort-indicator');
+const exitSortIndicator = document.querySelector('#exit-sort-indicator');
+function setRankedSelectSort(indicator, pending, progress=null) {
+    if (!indicator) return;
+    indicator.hidden = !pending;
+    const progressNode=indicator.querySelector('.ranked-sort-progress');
+    const percentage=Number(progress)||0;
+    progressNode.textContent=pending
+        ?` (${Math.max(0,Math.min(100,percentage)).toLocaleString('ru-RU',{maximumFractionDigits:1})}%) `:'';
+}
+function setStrategySortIndicators(pending, entryProgress=null, exitProgress=null) {
+    setRankedSelectSort(entrySortIndicator,pending,entryProgress);
+    setRankedSelectSort(exitSortIndicator,pending,exitProgress);
+}
+const initialEntryOptions = <?= json_encode($entrySelectorSeeds, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) ?>;
+const initialExitOptions = <?= json_encode($exitSelectorSeeds, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) ?>;
 const selectTopRankedResultInput = document.querySelector('#select-top-ranked-result');
 let selectTopRankedResult = selectTopRankedResultInput.value === '1';
-function renderEntryOptions(entries, selected) {
+const optionPercent = value => `${Number(value)>=0?'+':''}${Number(value).toLocaleString('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:4})}%`;
+const selectorBalance = () => Number(filtersForm.elements.namedItem('balance')?.value)||100;
+function renderEntryOptions(entries, selected, resultUnit='USDT') {
     if (!Array.isArray(entries) || entries.length === 0) return;
-    entryConfigSelect.replaceChildren();
-    for (const item of entries) {
-        const option = document.createElement('option');
-        option.value = item.id;
-        const normalizedLabel = item.label
-            .replaceAll('от стартового баланса', 'от баланса')
-            .replaceAll('в пределах окна', 'внутри');
-        const rankingMatch = normalizedLabel.match(/^(.*) · лучший результат (.+)$/);
-        option.textContent = rankingMatch ? `${rankingMatch[2]} (${rankingMatch[1]})` : normalizedLabel;
-        if (item.id === selected) option.selected = true;
-        entryConfigSelect.appendChild(option);
+    if (entryOrderLocked && entryConfigSelect.value) {
+        selected = entryConfigSelect.value;
+        if (!entries.some(item => item.id === selected)) {
+            entries = [...entries, {id:selected, label:entryConfigSelect.selectedOptions[0].textContent.replace(/\s*·\s*[+-]?[\d.,]+%\s*$/, ''), best_pnl:null}];
+        }
     }
+    entries = preserveSelectorOrder(entries, entryConfigSelect, entryOrderLocked);
+    entryConfigSelect.replaceChildren(...entries.map(item=>{
+        const option = new Option(item.label
+            .replaceAll('от стартового баланса', 'от баланса')
+            .replaceAll('в пределах окна', 'внутри')
+            .replace(/\s*·\s*лучший результат\s+[+-]?[\d., ]+\s*(?:USDT|%)/gi,''), item.id, false, item.id === selected);
+        if (item.best_pnl !== null && item.best_pnl !== undefined && Number.isFinite(Number(item.best_pnl))) {
+            const percent=resultUnit==='%'?Number(item.best_pnl):Number(item.best_pnl)*100/selectorBalance();
+            option.textContent += ` · ${optionPercent(percent)}`;
+        }
+        return option;
+    }));
     if (![...entryConfigSelect.options].some(option => option.value === selected)) {
         entryConfigSelect.options[0].selected = true;
     }
 }
+function renderExitOptions(items, selected, selectedSnapshots=null) {
+    if (document.querySelector('#exit-confirmation-mode')?.value === 'none') {
+        exitConfigSelect.replaceChildren(new Option('Не применяется · позиция удерживается до конца периода', 'none', true, true));
+        exitConfigSelect.disabled = true;
+        return;
+    }
+    if(!Array.isArray(items)||!items.length)return;
+    if (exitOrderLocked && exitConfigSelect.value && exitConfigSelect.value !== 'none') {
+        selected = exitConfigSelect.value;
+        selectedSnapshots = Number(document.querySelector('#exit-confirmation-snapshots')?.value)||60;
+        items = items.map(item => item.id === selected ? {...item, snapshots:selectedSnapshots} : item);
+        if (!items.some(item => item.id === selected)) {
+            items = [...items, {id:selected, label:exitConfigSelect.selectedOptions[0].textContent.replace(/\s*·\s*[+-]?[\d.,]+%\s*$/, ''), snapshots:selectedSnapshots}];
+        }
+    }
+    items = preserveSelectorOrder(items, exitConfigSelect, exitOrderLocked);
+    exitConfigSelect.replaceChildren(...items.map(item=>{
+        const snapshots=Number(item.snapshots)||Number(document.querySelector('#exit-confirmation-snapshots')?.value)||60;
+        const label=item.label.replace(/([+-]?\d+(?:[.,]\d+)?)\s*USDT/g,(_,value)=>optionPercent(Number(value.replace(',','.'))*100/selectorBalance()));
+        const option=new Option(label,item.id,false,item.id===selected&&(selectedSnapshots===null||snapshots===selectedSnapshots));
+        option.dataset.confirmationSnapshots=String(snapshots);
+        return option;
+    }));
+    if(![...exitConfigSelect.options].some(option=>option.selected)&&exitConfigSelect.options.length)exitConfigSelect.options[0].selected=true;
+    const selectedItem=items.find(item=>item.id===exitConfigSelect.value
+        &&(selectedSnapshots===null||Number(item.snapshots)===selectedSnapshots))
+        ||items.find(item=>item.id===exitConfigSelect.value);
+    if(selectedItem?.snapshots)document.querySelector('#exit-confirmation-snapshots').value=String(selectedItem.snapshots);
+    scheduleStrategyRangeComparison();
+}
+renderEntryOptions(initialEntryOptions,entryConfigSelect.value);
+renderExitOptions(initialExitOptions,exitConfigSelect.value,Number(document.querySelector('#exit-confirmation-snapshots')?.value)||60);
+if (symbolSelect?.value && serverRenderedSelectionMatches()) revealStrategyResults();
 let exitRankingRequestVersion = 0;
 let refreshAfterExitRanking = false;
 let rankingMaintenancePending = false;
@@ -2229,6 +3211,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (rankingMaintenancePending) return;
     const params = new URLSearchParams(new FormData(filtersForm));
     if (!(params.get('symbol') || '').trim()) {
+        setStrategySortIndicators(false);
         strategyRankingTimer.reset();
         entryConfigSelect.replaceChildren();
         const entryPrompt = new Option('Выберите торговую пару для загрузки рейтинга', '', true, true);
@@ -2241,6 +3224,43 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         entryConfigSelect.disabled = true;
         exitConfigSelect.disabled = true;
         return;
+    }
+    setStrategySortIndicators(true,0,0);
+    if (!selectorReturnRunKey && (params.get('martingale_mode') || 'none') === 'none') {
+        try {
+            const historyParams = new URLSearchParams(params);
+            historyParams.delete('symbol');
+            historyParams.set('return_history_status', '1');
+            const historyResponse = await fetch('portfolio-ranking.php?' + historyParams.toString(), {
+                headers:{Accept:'application/json'}, cache:'no-store',
+            });
+            const historyState = await historyResponse.json();
+            const unusableKey=historyState.run_key+'|'+(params.get('symbol')||'');
+            if (historyResponse.ok && historyState.status === 'ready' && historyState.run_key
+                && unusableKey!==unusableSelectorReturnRunKey) {
+                selectorReturnRunKey = historyState.run_key;
+            }
+        } catch (_) {}
+    }
+    if(selectorReturnRunKey || (params.get('martingale_mode') || 'none') === 'none'){
+        const historyRequestVersion=exitRankingRequestVersion;
+        try{
+            const selectedSymbol=params.get('symbol')||'';
+            const symbolChanged=returnRankedSymbol!==selectedSymbol;
+            const refreshed=await refreshSelectorsFromReturnHistory(selectorReturnRunKey,'',symbolChanged);
+            if(historyRequestVersion!==exitRankingRequestVersion)return;
+            if(refreshed){
+                setStrategySortIndicators(false);
+                returnRankedSymbol=selectedSymbol;
+                refreshAfterExitRanking=false;
+                if(selectorReturnRunKey) activeReturnRunKey=selectorReturnRunKey;
+                await refreshStrategyResults();
+                if(selectorReturnRunKey) await loadReturnChart(selectorReturnRunKey,params.get('symbol')||'');
+                return;
+            }
+        }catch(_){/* Use the normal selector ranking when saved options cannot be loaded. */}
+        unusableSelectorReturnRunKey=selectorReturnRunKey+'|'+(params.get('symbol')||'');
+        selectorReturnRunKey='';
     }
     entryConfigSelect.disabled = false;
     exitConfigSelect.disabled = false;
@@ -2259,13 +3279,6 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (entryConfigSelect.options.length === 1 && entryConfigSelect.options[0].value === '') {
         entryConfigSelect.options[0].textContent = 'Загружаю рейтинг порогов входа (% от баланса)…';
     }
-    if (exitConfigSelect.options.length === 0) {
-        const loadingOption = document.createElement('option');
-        loadingOption.textContent = 'Загружаю варианты TP/SL…';
-        loadingOption.disabled = true;
-        loadingOption.selected = true;
-        exitConfigSelect.appendChild(loadingOption);
-    }
     try {
         const responses = await Promise.all(snapshotCounts.map(async snapshots => {
             const rankingParams = new URLSearchParams(params);
@@ -2277,6 +3290,12 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         if (requestVersion !== exitRankingRequestVersion || rankingMaintenancePending) return;
 
         const pending = responses.filter(({ranking}) => ranking.status === 'pending');
+        const selectorProgress=responses.length
+            ? responses.reduce((sum,{ranking})=>sum+(ranking.status==='pending'?Number(ranking.progress)||0:100),0)/responses.length
+            : null;
+        const entryProgress=selectorProgress;
+        const exitProgress=selectorProgress;
+        setStrategySortIndicators(pending.length>0,entryProgress,exitProgress);
         const elapsedSeconds = Math.max(0, ...responses.map(({ranking}) => Number(ranking.elapsed_seconds) || 0));
         if (pending.length) {
             strategyRankingTimer.markPending();
@@ -2304,36 +3323,28 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         if (rankedEntries.length) renderEntryOptions(rankedEntries, params.get('entry_config'));
         else if (entryConfigSelect.options.length === 1 && entryConfigSelect.options[0].value === '') entryConfigSelect.options[0].textContent = 'Рейтинг порогов входа (% от баланса) рассчитывается…';
 
-        if (!pending.length && selectTopRankedResult && rankedEntries[0] && params.get('entry_config') !== rankedEntries[0].id) {
+        if (!pending.length && selectTopRankedResult && !entryOrderLocked && rankedEntries[0] && params.get('entry_config') !== rankedEntries[0].id) {
+            clearStrategyResults();
             entryConfigSelect.value = rankedEntries[0].id;
             loadExitRanking(null, true);
             return;
         }
 
-        const allInsufficient = responses.every(({ranking}) => ranking.status === 'insufficient_data');
-        if (allInsufficient) {
-            entryConfigSelect.replaceChildren();
-            const entryMessage = document.createElement('option');
-            entryMessage.textContent = responses[0].ranking.message || 'Для рейтинга нужно минимум три сделки';
-            entryMessage.disabled = true;
-            entryMessage.selected = true;
-            entryConfigSelect.appendChild(entryMessage);
-        }
-
-        exitConfigSelect.replaceChildren();
-        const candidates = [];
+        const bestCandidatesByExit = new Map();
         const loadingMessages = [];
         for (const {snapshots, ranking, httpOk} of responses) {
             if (ranking.status === 'ready' && Array.isArray(ranking.groups)) {
                 for (const group of ranking.groups) {
                     for (const item of group.items || []) {
-                        const label = mode === 'immediate'
-                            ? item.label
-                            : item.label
-                                .replace(/ · TP (?:через \d+ (?:снимков|интервалов)|сразу) \/ SL (?:через \d+ (?:снимков|интервалов)|сразу)/, '')
-                                .replaceAll('от стартового баланса', 'от баланса')
-                                + ` · ${snapshots} интервалов`;
-                        candidates.push({id: item.id, snapshots, pnl: Number(item.pnl) || 0, label});
+                        const label = item.label
+                            .replace(/ · TP (?:через \d+ (?:снимков|интервалов)|сразу) \/ SL (?:через \d+ (?:снимков|интервалов)|сразу)/, '')
+                            .replaceAll('от стартового баланса', 'от баланса');
+                        const candidate = {id: item.id, snapshots, pnl: Number(item.pnl) || 0, label};
+                        const previous = bestCandidatesByExit.get(item.id);
+                        const pinnedExit = exitOrderLocked && candidate.id === currentExit;
+                        if (!previous || (pinnedExit
+                            ? candidate.snapshots === selectedSnapshots
+                            : candidate.pnl > previous.pnl)) bestCandidatesByExit.set(item.id, candidate);
                     }
                 }
             } else {
@@ -2346,28 +3357,14 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
                             : ranking.message || (!httpOk ? 'Не удалось загрузить рейтинг' : 'Рейтинг временно недоступен'));
             }
         }
-        candidates.sort((left, right) => right.pnl - left.pnl || left.id.localeCompare(right.id));
-        for (const candidate of candidates) {
-            const option = document.createElement('option');
-            option.value = candidate.id;
-            option.dataset.confirmationSnapshots = String(candidate.snapshots);
-            option.textContent = candidate.label;
-            exitConfigSelect.appendChild(option);
-        }
-        if (!candidates.length && loadingMessages.length) {
-            const option = document.createElement('option');
-            option.disabled = true;
-            option.selected = true;
-            option.textContent = loadingMessages[0];
-            exitConfigSelect.appendChild(option);
-        }
-        if (![...exitConfigSelect.options].some(option => option.selected)) {
-            exitConfigSelect.options[0]?.setAttribute('selected', 'selected');
-            if (exitConfigSelect.options[0]) exitConfigSelect.options[0].selected = true;
-        }
-
+        const candidates = [...bestCandidatesByExit.values()]
+            .sort((left, right) => right.pnl - left.pnl || left.id.localeCompare(right.id));
+        // Keep the complete server-rendered TP/SL grid available while this
+        // entry's ranked subset is still loading or the ranking request fails.
+        // Replacing these selectors with a loading/error option made every
+        // configured value disappear for the whole calculation window.
         let selectedCandidate = null;
-        if (selectTopRankedResult && candidates.length) {
+        if (selectTopRankedResult && !exitOrderLocked && candidates.length) {
             selectedCandidate = candidates.reduce((best, candidate) => candidate.pnl > best.pnl ? candidate : best);
         } else {
             selectedCandidate = candidates.find(candidate => candidate.id === currentExit && candidate.snapshots === selectedSnapshots)
@@ -2375,14 +3372,17 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         }
         if (!selectedCandidate) selectedCandidate = candidates[0] || null;
         if (selectedCandidate) {
-            const selectedOption = [...exitConfigSelect.options].find(option => option.value === selectedCandidate.id
-                && Number(option.dataset.confirmationSnapshots) === selectedCandidate.snapshots);
-            if (selectedOption) selectedOption.selected = true;
-            document.querySelector('#exit-confirmation-snapshots').value = String(selectedCandidate.snapshots);
+            if (selectedCandidate.id !== currentExit || selectedCandidate.snapshots !== selectedSnapshots) {
+                clearStrategyResults();
+            }
+            renderExitOptions(candidates,selectedCandidate.id,selectedCandidate.snapshots);
+            if (!exitOrderLocked) document.querySelector('#exit-confirmation-snapshots').value = String(selectedCandidate.snapshots);
         }
 
         if (allInsufficient || (!pending.length && responses.every(({ranking}) => ranking.status === 'entry_unavailable'))) {
-            if (selectTopRankedResult && rankedEntries[0]) {
+            setStrategySortIndicators(false);
+            if (selectTopRankedResult && !entryOrderLocked && rankedEntries[0]) {
+                if (entryConfigSelect.value !== rankedEntries[0].id) clearStrategyResults();
                 entryConfigSelect.value = rankedEntries[0].id;
                 loadExitRanking(null, true);
                 return;
@@ -2390,6 +3390,8 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             if (refreshAfterExitRanking) {
                 refreshAfterExitRanking = false;
                 void refreshStrategyResults();
+            } else {
+                revealStrategyResults();
             }
             return;
         }
@@ -2398,6 +3400,11 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
                 if (requestVersion === exitRankingRequestVersion && !rankingMaintenancePending) loadExitRanking(null, true);
             }, 1500);
             return;
+        }
+        setStrategySortIndicators(false);
+        const returnRunKey = responses.find(({ranking}) => ranking.status === 'ready' && ranking.return_run_key)?.ranking.return_run_key;
+        if (returnRunKey) {
+            rememberPortfolioReturnHistory({return_run_key: returnRunKey, return_point_count: 0}, 'ticker:' + (params.get('symbol') || ''));
         }
         if (!candidates.length) {
             if (!exitConfigSelect.options.length) {
@@ -2410,11 +3417,13 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             if (refreshAfterExitRanking) {
                 refreshAfterExitRanking = false;
                 void refreshStrategyResults();
+            } else {
+                revealStrategyResults();
             }
             return;
         }
 
-        const appliedAutomaticSelection = selectTopRankedResult;
+        const appliedAutomaticSelection = selectTopRankedResult && mode !== 'none';
         if (selectTopRankedResult) {
             selectTopRankedResult = false;
             selectTopRankedResultInput.value = '0';
@@ -2426,20 +3435,20 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         if (appliedAutomaticSelection || refreshAfterExitRanking) {
             refreshAfterExitRanking = false;
             void refreshStrategyResults();
+        } else {
+            revealStrategyResults();
         }
         void loadCachedTickerBestResults();
     } catch (_) {
         if (requestVersion !== exitRankingRequestVersion || rankingMaintenancePending) return;
+        setStrategySortIndicators(false);
         strategyRankingTimer.finish('Общее время до ошибки', {persist: false});
-        exitConfigSelect.replaceChildren();
-        const errorOption = document.createElement('option');
-        errorOption.textContent = 'Не удалось загрузить рейтинг';
-        errorOption.disabled = true;
-        errorOption.selected = true;
-        exitConfigSelect.appendChild(errorOption);
+        renderExitOptions(initialExitOptions, exitConfigSelect.value, Number(document.querySelector('#exit-confirmation-snapshots')?.value) || 60);
         if (refreshAfterExitRanking) {
             refreshAfterExitRanking = false;
             void refreshStrategyResults();
+        } else if (serverRenderedSelectionMatches()) {
+            revealStrategyResults();
         }
     }
 }
@@ -2646,10 +3655,10 @@ function rankingTable(container, columns, rows, sortOptions = null) {
     };
     render();
 }
-function pnlText(value) {
+function pnlText(value, unit='USDT') {
     if (value === null || value === undefined) return '—';
     const amount = Number(value);
-    return (amount > 0 ? '+' : '') + new Intl.NumberFormat('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:4}).format(amount) + ' USDT';
+    return (amount > 0 ? '+' : '') + new Intl.NumberFormat('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:4}).format(amount) + ' ' + unit;
 }
 function portfolioCombinationDetailLink(params, item) {
     if (!item.entry_id || !item.exit_id) return null;
@@ -2677,6 +3686,9 @@ function portfolioRankingDiagnosticsText(ranking) {
     const estimatedFinish = () => {
         if (ranking.status !== 'pending') return '';
         if (ranking.queued) return 'Ожидаемое окончание: после запуска расчёта из очереди.';
+        if (ranking.phase === 'saving_return_history' && ranking.history_progress === null) {
+            return 'Ожидаемое окончание: текущий старый процесс не передаёт подробный прогресс сохранения.';
+        }
         const elapsedSeconds = Number(ranking.elapsed_seconds);
         const completedCandidates = Number(ranking.completed_candidates);
         const totalCandidates = Number(ranking.total_candidates);
@@ -2699,8 +3711,23 @@ function portfolioRankingDiagnosticsText(ranking) {
     if (ranking.result_cache_hit) {
         const cachedAt = ranking.result_cached_at ? new Date(ranking.result_cached_at).toLocaleString('ru-RU', {timeZone:'Europe/Kyiv'}) : null;
         lines.push(`Готовый общий рейтинг взят из точного кэша${cachedAt ? ` · сохранен ${cachedAt}` : ''}; новый перебор не выполнялся.`);
+    } else if (ranking.status === 'pending' && !ranking.queued && ranking.phase === 'saving_return_history') {
+        lines.push('Расчёт комбинаций завершён. Сейчас результаты записываются в таблицу истории доходности; после этого рейтинг будет построен из сохранённых данных.');
+    } else if (ranking.status === 'pending' && !ranking.queued && ranking.phase === 'finalizing_return_history') {
+        lines.push('Симуляция и запись событий сделок завершены. Завершаю сохранённый расчёт.');
     } else if (ranking.status === 'pending' && !ranking.queued) {
         lines.push('Готового общего рейтинга с этими датами и фильтрами нет. Идет новый проход: worker использует подходящие дневные состояния и результаты симуляций, если их версия котировок и параметры совпадают; остальное рассчитывает заново.');
+    }
+    if (ranking.phase === 'loading_quotes') {
+        lines.push(`Загружаю котировки по тикерам: ${number(ranking.loaded_quote_symbols)} из ${number(ranking.total_quote_symbols)}${ranking.current_quote_symbol ? ` · сейчас ${ranking.current_quote_symbol}` : ''}.`);
+    } else if (ranking.phase === 'building_signals') {
+        if (ranking.signals_built_symbols !== undefined) {
+            lines.push(`Строю сигналы входа по тикерам: ${number(ranking.signals_built_symbols)} из ${number(ranking.total_signal_symbols)}${ranking.current_signal_symbol ? ` · сейчас ${ranking.current_signal_symbol}` : ''}.`);
+        } else {
+            lines.push('Котировки загружены. Подготавливаю сигналы входа для расчёта.');
+        }
+    } else if (ranking.phase === 'simulating_candidates') {
+        lines.push(`Сигналы готовы. Перебираю ${number(ranking.total_candidates)} комбинаций по ${number(ranking.universe_size)} тикерам.`);
     }
     if (ranking.start_day || ranking.end_day) lines.push(`Диапазон котировок: ${ranking.start_day || '—'} — ${ranking.end_day || '—'}; тикеров: ${number(ranking.universe_size)}.`);
     if (ranking.total_candidates !== undefined) {
@@ -2722,13 +3749,15 @@ function portfolioRankingDiagnosticsText(ranking) {
     const checkpointDates = ranking.checkpoint_days_reused && typeof ranking.checkpoint_days_reused === 'object'
         ? Object.entries(ranking.checkpoint_days_reused).sort(([a], [b]) => a.localeCompare(b)) : [];
     const checkpointCount = Number(ranking.checkpoint_result_reuses) || 0;
-    lines.push(`Дневные состояния использованы для ${number(checkpointCount)} результатов${checkpointDates.length ? `; даты контрольных точек: ${checkpointDates.map(([day, count]) => `${day} (${number(count)} связок тикер/порог)`).join(', ')}` : '; подтвержденные даты контрольных точек пока не записаны'}.`);
+    if (ranking.phase === 'simulating_candidates' || ranking.checkpoint_result_reuses !== undefined) {
+        lines.push(`Дневные состояния использованы для ${number(checkpointCount)} результатов${checkpointDates.length ? `; даты контрольных точек: ${checkpointDates.map(([day, count]) => `${day} (${number(count)} связок тикер/порог)`).join(', ')}` : '; подтвержденные даты контрольных точек пока не записаны'}.`);
+    }
     const hits = Number(ranking.pair_cache_hits) || 0;
     const misses = Number(ranking.pair_cache_misses) || 0;
     if (hits + misses > 0 || ranking.pair_cache_hits !== undefined) {
         const percent = hits + misses ? Math.round(hits * 100 / (hits + misses)) : 0;
         lines.push(`Кэш результатов: найдено ${number(hits)} (${percent}%), рассчитано заново ${number(misses)}; сохранены дневные точки для ${number(ranking.checkpoint_writes)} связок тикер/порог${Number(ranking.checkpoint_skips_low_disk) ? `, не сохранены из-за свободного места для ${number(ranking.checkpoint_skips_low_disk)} связок` : ''}.`);
-    } else if (ranking.status === 'pending' && !ranking.queued) lines.push('Счетчики попаданий/промахов кэша появятся в новых расчетах; этот уже запущенный процесс их не записывает.');
+    } else if (ranking.status === 'pending' && !ranking.queued && ranking.phase !== 'saving_return_history' && ranking.phase !== 'finalizing_return_history') lines.push('Счетчики попаданий/промахов кэша появятся в новых расчетах; этот уже запущенный процесс их не записывает.');
     if (ranking.queued) lines.push('Задача пока ждет свободного обработчика; статистика появится после запуска.');
     else if (ranking.elapsed_seconds !== undefined) lines.push(`Прошло: ${duration(ranking.elapsed_seconds)}.`);
     if (ranking.status === 'pending') lines.push(estimatedFinish());
@@ -2776,16 +3805,6 @@ async function loadPortfolioRankingHistory(force = false) {
         if (requestId !== portfolioRankingHistoryRequest) return;
         if (!response.ok || payload.status !== 'ready') throw new Error(payload.message || 'Не удалось загрузить сохранённые расчёты.');
         const rankings = Array.isArray(payload.rankings) ? payload.rankings : [];
-        const selectedStartDay = filtersForm.elements.namedItem('start_day')?.value || '';
-        const selectedEndDay = filtersForm.elements.namedItem('end_day')?.value || '';
-        const sameRangeLegacy = rankings.find((item) => item.legacy
-            && item.start_day === selectedStartDay
-            && item.end_day === selectedEndDay);
-        if (sameRangeLegacy) {
-            portfolioRankingHistory.hidden = true;
-            await loadPortfolioRanking({savedCacheKey: sameRangeLegacy.cache_key, autoMatchedLegacy: true});
-            return;
-        }
         if (rankings.length === 0) {
             deletePortfolioRankingHistoryButton.hidden = true;
             status.textContent = `Для списка «${payload.ticker_set?.name || 'выбранный список'}» пока нет сохранённых общих рейтингов.`;
@@ -2802,7 +3821,8 @@ async function loadPortfolioRankingHistory(force = false) {
             const range = document.createElement('strong');
             range.textContent = item.start_day && item.end_day ? `${item.start_day} — ${item.end_day}` : 'Диапазон дат не записан';
             const count = document.createElement('p');
-            count.textContent = `${Number(item.universe_size || 0).toLocaleString('ru-RU')} тикеров · сохранён ${new Date(item.cached_at).toLocaleString('ru-RU')}`;
+            const duplicateCount = Number(item.duplicate_count) || 1;
+            count.textContent = `${Number(item.universe_size || 0).toLocaleString('ru-RU')} тикеров · сохранён ${new Date(item.cached_at).toLocaleString('ru-RU')}${duplicateCount > 1 ? ` · одинаковый результат сохранён ${duplicateCount} раза` : ''}`;
             info.append(range, count);
             const actions = document.createElement('div');
             actions.className = 'ranking-history-actions';
@@ -2830,12 +3850,6 @@ async function loadPortfolioRankingHistory(force = false) {
             }, null, 2);
             details.append(summary, pre);
             row.appendChild(details);
-            if (!item.parameters) {
-                const legacy = document.createElement('p');
-                legacy.className = 'ranking-history-legacy';
-                legacy.textContent = 'Старый расчёт: параметры в кэше не записаны. Готовый результат можно показать, но повторить расчёт с теми же настройками нельзя.';
-                row.appendChild(legacy);
-            }
             list.appendChild(row);
         }
         portfolioRankingHistory.appendChild(list);
@@ -2913,20 +3927,31 @@ async function ensurePortfolioRankingCacheChecked() {
     }
     return portfolioRankingCacheLookupPromise;
 }
-async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', autoMatchedLegacy = false} = {}) {
+async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', calculateReturnsOnly = false, selectorsOnly = false} = {}) {
     const requestVersion = ++portfolioRankingRequestVersion;
+    portfolioRankingStatusPolling = !selectorsOnly;
     const showingSavedResult = savedCacheKey !== '';
+    if (!selectorsOnly) clearRankingComparison();
     portfolioRankingTimer.reset();
-    portfolioRankingPanel.hidden = false;
-    portfolioRankingContent.hidden = portfolioRankingCollapsed;
-    if (!cachedOnly && !showingSavedResult) {
+    if (!selectorsOnly) {
+        portfolioRankingPanel.hidden = false;
+        portfolioRankingContent.hidden = portfolioRankingCollapsed;
+    }
+    if (selectorsOnly) {
+        setReturnStatus('Сортирую списки торговых пар и стратегий по сохранённой доходности…');
+    } else if (!cachedOnly && !showingSavedResult && !calculateReturnsOnly) {
         portfolioRankingTimer.start();
         portfolioRankingStatus.textContent = 'Подготавливаю общий рейтинг…';
         setRefreshProgress(0, 'Подготавливаю общий рейтинг…');
+    } else if (calculateReturnsOnly) {
+        calculateReturnHistoryButton.disabled = true;
+        calculateReturnHistoryButton.textContent = 'Рассчитываю доходность…';
+        portfolioRankingStatus.textContent = 'Подготавливаю расчёт доходности для выбранного списка…';
+        portfolioRankingContent.hidden = false;
     } else if (showingSavedResult) {
         portfolioRankingStatus.textContent = 'Загружаю сохранённый общий рейтинг…';
     }
-    let buttonTitle = 'Рассчитать рейтинг еще раз';
+    let buttonTitle = 'Составить рейтинг из таблицы доходности';
     let sawPending = false;
     try {
         const params = new URLSearchParams(new FormData(filtersForm));
@@ -2938,6 +3963,14 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
             if (requestVersion !== portfolioRankingRequestVersion) return;
             const requestParams = new URLSearchParams(params);
             if (cachedOnly) requestParams.set('cached_only', '1');
+            if (!showingSavedResult) {
+                if (calculateReturnsOnly) {
+                    requestParams.set('persist_returns', '1');
+                    requestParams.set('return_history_only', '1');
+                } else if (!cachedOnly) {
+                    requestParams.set('rank_from_returns', '1');
+                }
+            }
             if (retryCancelled) requestParams.set('retry_cancelled', '1');
             retryCancelled = false;
             const responseUrl = showingSavedResult
@@ -2953,7 +3986,18 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
                 portfolioRankingStatus.textContent = 'Сохранённый общий рейтинг для выбранного периода и параметров не найден. Нажмите ↻, чтобы запустить расчёт.';
                 return;
             }
-            portfolioRankingDiagnosticsText(ranking);
+            if (ranking.status === 'missing_return_history') {
+                if (cachedOnly) {
+                    portfolioRankingExactCacheReady = false;
+                    portfolioRankingCacheChecked = true;
+                }
+                portfolioRankingStatus.textContent = ranking.message || 'Сначала рассчитайте доходность для выбранного списка.';
+                if (calculateReturnsOnly) throw new Error(portfolioRankingStatus.textContent);
+                setPortfolioRankingCollapsed(false);
+                portfolioRankingContent.hidden = false;
+                return;
+            }
+            if (!selectorsOnly) portfolioRankingDiagnosticsText(ranking);
             if (ranking.status === 'pending') {
                 sawPending = true;
                 const completedProfiles = Number(ranking.completed_entry_profiles);
@@ -2961,13 +4005,78 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
                 const profileProgress = Number.isFinite(completedProfiles) && Number.isFinite(totalProfiles) && totalProfiles > 0
                     ? `Порог входа ${completedProfiles} из ${totalProfiles}${ranking.entry_profile ? ` · ${ranking.entry_profile}` : ''}`
                     : '';
-                const progressText = ranking.queued
-                    ? 'Расчет рейтинга ожидает очереди…'
-                    : 'Идет расчет рейтинга для всех тикеров… ' + (ranking.progress || 0) + '%' + (profileProgress ? ' · ' + profileProgress : '');
-                portfolioRankingStatus.textContent = ranking.queued
-                    ? 'Расчет ожидает очереди общего обработчика.'
-                    : 'Перебираю комбинации для всех тикеров… ' + (ranking.progress || 0) + '%' + (profileProgress ? ' · ' + profileProgress : '');
-                setRefreshProgress(ranking.progress, progressText);
+                const savedReturnsLabel = ranking.saved_return_points !== undefined
+                    ? `уже сохранено событий сделок: ${Number(ranking.saved_return_points).toLocaleString('ru-RU')}`
+                    : '';
+                const returnHistoryProgress = !ranking.progress_stale && ranking.history_progress !== null && ranking.history_progress !== undefined && Number.isFinite(Number(ranking.history_progress))
+                    ? `${Number(ranking.history_progress)}% (${Number(ranking.history_completed || 0).toLocaleString('ru-RU')} из ${Number(ranking.history_total || 0).toLocaleString('ru-RU')} связок тикер/порог${ranking.history_symbol ? ` · ${ranking.history_symbol}` : ''}${ranking.history_entry_profile ? ` · ${ranking.history_entry_profile}` : ''}${ranking.emitted_return_points !== null && ranking.emitted_return_points !== undefined ? ` · сформировано ${Number(ranking.emitted_return_points).toLocaleString('ru-RU')} точек` : ''})`
+                    : '';
+                let stageProgress = ranking.progress_stale ? null : ranking.progress;
+                let stageText = ranking.progress_stale ? 'Расчёт продолжается, статус давно не обновлялся' : '';
+                if (ranking.phase === 'aggregating_returns') {
+                    stageText = `Подготавливаю сводку: ${Number(ranking.completed_symbols)||0} из ${Number(ranking.total_symbols)||0} пар${ranking.current_symbol ? ' · '+ranking.current_symbol : ''}`;
+                } else if (ranking.phase === 'finalizing_return_ranking') {
+                    stageText = 'Сортирую готовые итоги стратегий';
+                } else if (!ranking.progress_stale && ranking.phase === 'loading_quotes' && Number(ranking.total_quote_symbols) > 0) {
+                    const done = Number(ranking.loaded_quote_symbols) || 0;
+                    const total = Number(ranking.total_quote_symbols);
+                    stageProgress = Math.round(done * 5 / total);
+                    stageText = `Загружаю котировки: ${done} из ${total}${ranking.current_quote_symbol ? ` · ${ranking.current_quote_symbol}` : ''}`;
+                } else if (!ranking.progress_stale && ranking.phase === 'building_signals' && Number(ranking.total_signal_symbols) > 0) {
+                    const done = Number(ranking.signals_built_symbols) || 0;
+                    const total = Number(ranking.total_signal_symbols);
+                    stageProgress = 5 + Math.round(done * 5 / total);
+                    stageText = `Строю сигналы: ${done} из ${total}${ranking.current_signal_symbol ? ` · ${ranking.current_signal_symbol}` : ''}`;
+                } else if (!ranking.progress_stale && ranking.phase === 'simulating_candidates') {
+                    stageProgress = 10 + Math.round((Number(ranking.progress) || 0) * 0.8);
+                    stageText = `Рассчитываю стратегии${profileProgress ? ` · ${profileProgress}` : ''}`;
+                } else if (!ranking.progress_stale && ranking.phase === 'saving_return_history') {
+                    stageProgress = returnHistoryProgress ? 90 + Math.round(Number(ranking.history_progress) * 0.1) : null;
+                    stageText = returnHistoryProgress
+                        ? `Сохраняю выбранные результаты · ${returnHistoryProgress}`
+                        : 'Подготавливаю сохранение выбранных результатов';
+                } else if (!ranking.progress_stale && ranking.phase === 'finalizing_return_history') {
+                    stageProgress = 99;
+                    stageText = 'Завершаю сохранение событий сделок';
+                }
+                if (calculateReturnsOnly) {
+                    const progress = Number(stageProgress) || 0;
+                    const stageProgressKnown = stageProgress !== null && stageProgress !== undefined && Number.isFinite(Number(stageProgress));
+                    calculateReturnHistoryButton.textContent = ranking.queued ? 'Доходность в очереди…' : ranking.progress === null
+                        ? 'Сохраняю доходность…'
+                        : `Рассчитываю доходность… ${progress}%`;
+                    portfolioRankingStatus.textContent = ranking.queued
+                        ? 'Расчёт доходности ожидает очереди.'
+                        : stageText
+                            ? `${stageText}${stageProgressKnown ? ` · общий прогресс ${progress}%` : ''}${ranking.progress_stale ? ' · показывается последнее подтверждённое состояние' : ''}`
+                            : ranking.phase === 'saving_return_history' || ranking.phase === 'finalizing_return_history'
+                            ? `Сохраняю историю доходности для всех пар…${returnHistoryProgress ? ` ${returnHistoryProgress}` : ranking.progress === null ? '' : ` ${progress}%`}${savedReturnsLabel ? ` · ${savedReturnsLabel}` : ''}${ranking.progress_stale ? ' · этап может долго выполняться без обновления статуса' : ''}`
+                            : `Сохраняю историю доходности для всех пар… ${progress}%${profileProgress ? ' · ' + profileProgress : ''}`;
+                } else if (selectorsOnly) {
+                    const progress=Number(ranking.progress)||0;
+                    const progressLabel=ranking.progress===null?'':` ${progress}%`;
+                    setReturnStatus(ranking.phase==='saving_return_history'||ranking.phase==='finalizing_return_history'
+                        ? `Завершаю сохранение событий сделок…${progressLabel}`
+                        : 'Ожидаю завершения сохранения доходности…');
+                } else {
+                    const progress=Number(stageProgress)||0;
+                    const progressKnown=stageProgress!==null&&stageProgress!==undefined&&Number.isFinite(Number(stageProgress));
+                    const waitingForReturns=ranking.phase==='saving_return_history'||ranking.phase==='finalizing_return_history';
+                    const progressLabel=progressKnown?` ${progress}%`:'';
+                    const progressText = ranking.queued
+                        ? 'Рейтинг ожидает очереди…'
+                        : stageText
+                            ? `${stageText}${progressKnown ? ` · общий прогресс ${progress}%` : ''}${ranking.progress_stale ? ' · показывается последнее подтверждённое состояние' : ''}`
+                        : waitingForReturns
+                            ? `Сохраняю точки доходности перед рейтингом…${returnHistoryProgress ? ` ${returnHistoryProgress}` : progressLabel}${savedReturnsLabel ? ` · ${savedReturnsLabel}` : ''}${ranking.progress_stale ? ' · этап может долго выполняться без обновления статуса' : ''}`
+                            : progressKnown
+                                ? 'Составляю рейтинг по рассчитанной доходности… ' + progress + '%'
+                                : 'Расчёт доходности продолжается · подробный процент пока недоступен';
+                    portfolioRankingStatus.textContent = ranking.queued
+                        ? 'Рейтинг ожидает очереди общего обработчика.'
+                        : progressText;
+                    setRefreshProgress(progressKnown ? progress : null, progressText);
+                }
                 await wait(1500);
             }
         } while (ranking.status === 'pending');
@@ -2977,6 +4086,37 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
             return;
         }
         if (ranking.status !== 'ready') throw new Error(ranking.message || 'Общий рейтинг пока недоступен');
+        if (!calculateReturnsOnly && ranking.cache_key) void checkPortfolioRankingComparisons(ranking.cache_key);
+        if (calculateReturnsOnly) {
+            rememberPortfolioReturnHistory(ranking);
+            setReturnHistoryActionState('ready');
+            if (ranking.return_run_key) void loadTickerReturnSummary(ranking.return_run_key);
+            setReturnStatus(symbolSelect.value
+                ? `История доходности рассчитана: ${Number(ranking.return_point_count || 0).toLocaleString('ru-RU')} точек. Для выбора порога загружаю рейтинг выбранной пары.`
+                : `История доходности рассчитана: ${Number(ranking.return_point_count || 0).toLocaleString('ru-RU')} точек. Чтобы показать доходность и отсортировать пары, нажмите «Составить рейтинг».`);
+            if (symbolSelect.value) {
+                selectorReturnRunKey = ranking.return_run_key || '';
+                await loadExitRanking(null, true);
+            }
+            return;
+        }
+        if (selectorsOnly) {
+            const tickerResults=(ranking.ticker_leaders||[]).map(item=>({
+                symbol:item.symbol,pnl:item.pnl,
+                title:item.entry_label?'Лучший вариант: '+item.entry_label+' · '+(item.exit_label||'TP/SL не указаны'):'Лучший сохранённый результат тикера',
+            }));
+            renderTickerBestResults(tickerResults);
+            selectorReturnRunKey=ranking.return_run_key||'';
+            const selectedEntryBefore=entryConfigSelect.value;
+            await refreshSelectorsFromReturnHistory(ranking.return_run_key,'',true);
+            if(entryConfigSelect.value!==selectedEntryBefore){
+                await loadExitRanking(null,true);
+                return;
+            }
+            setReturnStatus(`Селекты отсортированы по сохранённой доходности за ${ranking.start_day} — ${ranking.end_day}.`);
+            return;
+        }
+        if (!cachedOnly && !showingSavedResult) rememberPortfolioReturnHistory(ranking);
         if (!showingSavedResult) {
             portfolioRankingExactCacheReady = true;
             portfolioRankingCacheChecked = true;
@@ -2985,6 +4125,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
         if (!cachedOnly || sawPending) setPortfolioRankingCollapsed(false);
         portfolioRankingContent.hidden = portfolioRankingCollapsed;
         const canLinkCurrentSettings = !showingSavedResult;
+        const rankingUnit = ranking.ranking_data_source === 'strategy_return_points' ? '%' : 'USDT';
         const savedMartingaleMode = ranking.history_metadata?.parameters?.martingale?.mode ?? null;
         const tradeMetricLabel = showingSavedResult
             ? (savedMartingaleMode === null ? 'Сделки / цепочки' : (savedMartingaleMode === 'none' ? 'Сделки' : 'Ордеры · цепочки'))
@@ -3014,7 +4155,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
         const globalRows = (ranking.global_top || []).map(item => {
             const detailLink = canLinkCurrentSettings ? portfolioCombinationDetailLink(params, item) : null;
             return [
-                detailLink?.entry || item.entry_label, detailLink?.exit || item.exit_label, pnlText(item.average_pnl),
+                detailLink?.entry || item.entry_label, detailLink?.exit || item.exit_label, pnlText(item.average_pnl, rankingUnit),
                 item.eligible_symbols + ' из ' + ranking.universe_size,
                 String(item.profitable_symbols),
                 {favoriteParams: favoritePayload(item, 'global_top', symbolSelect.value)},
@@ -3022,7 +4163,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
         });
         rankingTable(document.querySelector('#portfolio-global-table'), [
             {label:'Порог входа'}, {label:'TakeProfit & StopLoss'},
-            {label:'Средний итог на тикер',numeric:true}, {label:'Подходят по SAVE MODE',numeric:true}, {label:'В плюсе',numeric:true},
+            {label:`Средний итог на тикер · ${rankingUnit}`,numeric:true}, {label:'Подходят по SAVE MODE',numeric:true}, {label:'В плюсе',numeric:true},
             {label:'Избранное'},
         ], globalRows);
         const tickerRows = (ranking.ticker_leaders || []).map(item => {
@@ -3032,7 +4173,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
             return {
                 cells: [
                     item.symbol, entryCell, exitCell,
-                    pnlText(item.pnl), pnlText(item.market_average_pnl),
+                    pnlText(item.pnl, rankingUnit), pnlText(item.market_average_pnl, rankingUnit),
                     item.market_eligible_symbols === undefined ? '—' : item.market_eligible_symbols + ' из ' + ranking.universe_size,
                     item.trade_count ? (showingSavedResult
                         ? (savedMartingaleMode === null ? `${item.trade_count} · ${item.chain_count ?? 0}` : (savedMartingaleMode === 'none' ? String(item.trade_count) : `${item.trade_count} · ${item.chain_count ?? 0}`))
@@ -3048,19 +4189,15 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
         });
         rankingTable(document.querySelector('#portfolio-ticker-table'), [
             {label:'Тикер'}, {label:'Лучший порог входа'}, {label:'Лучший TakeProfit & StopLoss'},
-            {label:'Итог тикера',numeric:true,sortKey:'tickerPnl',defaultDirection:'desc'}, {label:'Средний итог этой пары на рынке',numeric:true,sortKey:'marketAverage',defaultDirection:'desc'},
+            {label:`Итог тикера · ${rankingUnit}`,numeric:true,sortKey:'tickerPnl',defaultDirection:'desc'}, {label:`Средний итог этой пары на рынке · ${rankingUnit}`,numeric:true,sortKey:'marketAverage',defaultDirection:'desc'},
             {label:'Поддержка',numeric:true}, {label:tradeMetricLabel,numeric:true}, {label:'Избранное'},
         ], tickerRows, {initialKey:'tickerPnl',initialDirection:'desc'});
         portfolioRankingStatus.textContent = showingSavedResult
             ? `Показан сохранённый рейтинг за ${ranking.start_day || 'неизвестный период'} — ${ranking.end_day || 'неизвестный период'}; в расчёте ${ranking.universe_size} тикеров. SAVE MODE требует минимум ${ranking.min_trades}${ranking.min_trades === 1 ? ' сделку.' : ' сделки.'}`
-            : 'Средний итог рассчитан по ' + ranking.universe_size
+            : 'Средний итог рассчитан по '
+                + ranking.universe_size
                 + ' тикерам с данными за период; пары без подходящей выборки учитываются как 0. SAVE MODE требует минимум '
                 + ranking.min_trades + (ranking.min_trades === 1 ? ' сделку.' : ' сделки.');
-        if (showingSavedResult && ranking.history_legacy) {
-            portfolioRankingStatus.textContent += autoMatchedLegacy
-                ? ' Диапазон дат и список тикеров совпадают с текущими; параметры старого расчёта не сохранились, поэтому подтвердить их совпадение нельзя.'
-                : ' Параметры старого расчёта не были сохранены; они указаны как неизвестные в списке истории.';
-        }
         portfolioRankingDiagnosticsText(ranking);
         const tickerResults = (ranking.ticker_leaders || []).map(item => ({
             symbol: item.symbol,
@@ -3073,13 +4210,22 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', aut
         const rankedCount = tickerResults.filter(item => item.pnl !== null && item.pnl !== undefined).length;
         buttonTitle = 'Пары отсортированы по их лучшему результату: надежных рейтингов ' + rankedCount + ' из ' + symbolSelect.options.length + '.';
     } catch (error) {
-        if (!cachedOnly && requestVersion === portfolioRankingRequestVersion) {
+        if (selectorsOnly && requestVersion === portfolioRankingRequestVersion) {
+            setReturnStatus(error.message || 'Не удалось отсортировать селекты по сохранённой доходности.');
+        } else if (!cachedOnly && requestVersion === portfolioRankingRequestVersion) {
             portfolioRankingStatus.textContent = error.message || 'Не удалось рассчитать общий рейтинг';
             buttonTitle = error.message || 'Не удалось рассчитать общий рейтинг';
         }
     } finally {
         if (requestVersion === portfolioRankingRequestVersion) {
-            if (cachedOnly) {
+            portfolioRankingStatusPolling = false;
+            if (selectorsOnly) {
+                portfolioRankingTimer.reset();
+            } else if (calculateReturnsOnly) {
+                calculateReturnHistoryButton.disabled = false;
+                calculateReturnHistoryButton.textContent = `Рассчитать доходность для «${tickerSetSelect?.selectedOptions[0]?.textContent || 'списка'}»`;
+                portfolioRankingTimer.reset();
+            } else if (cachedOnly) {
                 portfolioRankingTimer.reset();
             } else {
                 portfolioRankingTimer.finish();
@@ -3093,6 +4239,17 @@ refreshSymbolsButton.addEventListener('click', () => {
     setPortfolioRankingCollapsed(false);
     symbolSortMode.value = 'profit';
     loadPortfolioRanking();
+});
+calculateReturnHistoryButton?.addEventListener('click', () => {
+    if (rankingMaintenancePending) return;
+    setPortfolioRankingCollapsed(false);
+    if ((filtersForm.elements.namedItem('martingale_mode')?.value || 'none') !== 'none') {
+        setPortfolioRankingCollapsed(false);
+        portfolioRankingContent.hidden = false;
+        portfolioRankingStatus.textContent = 'Для расчёта истории и рейтинга из таблицы выберите обычный режим без мартингейла.';
+        return;
+    }
+    loadPortfolioRanking({calculateReturnsOnly: true});
 });
 const collectorStatus = latestQuoteControl;
 async function refreshCollectorStatus() {
@@ -3157,10 +4314,9 @@ window.setInterval(refreshCollectorStatus, 30000);
 refreshCalculationQueue();
 window.setInterval(refreshCalculationQueue, 5000);
 updateMartingaleInitialNotional();
-if (!favoriteView && symbolSortMode.value === 'profit') {
-    loadPortfolioRanking();
-}
 if (!favoriteView) {
+    void ensurePortfolioRankingCacheChecked();
+    void checkReturnHistoryActionState();
     if (symbolSelect.value) loadCachedTickerBestResults();
     loadExitRanking();
 }

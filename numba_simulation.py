@@ -473,7 +473,9 @@ def simulate_standard_stateful_numba(
     open_is_short: bool,
     take_confirmation_snapshots: int,
     stop_confirmation_snapshots: int,
-) -> tuple[float, int, float, int, int, bool]:
+    capture_events: bool = False,
+    mark_open_event: bool = True,
+) -> tuple[float, int, float, int, int, bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     """Resume a run with stake capped by initial and available balance."""
     balance = closed_balance
     count = tree_length
@@ -484,6 +486,13 @@ def simulate_standard_stateful_numba(
     signal_cursor = _lower_bound(signal_indexes, 0, signal_from)
     open_index = open_entry_index
     open_short = open_is_short
+    event_capacity = len(signal_indexes) + 1 if capture_events else 0
+    event_entries = np.empty(event_capacity, dtype=np.int32)
+    event_exits = np.empty(event_capacity, dtype=np.int32)
+    event_pnls = np.empty(event_capacity, dtype=np.float64)
+    event_balances = np.empty(event_capacity, dtype=np.float64)
+    event_provisional = np.empty(event_capacity, dtype=np.bool_)
+    event_count = 0
 
     if open_index >= 0:
         first_take = -1
@@ -494,7 +503,7 @@ def simulate_standard_stateful_numba(
             quantity_step, quantity_places, min_order_notional, max_market_order_quantity,
         )
         if not order_valid:
-            return np.nan, 0, balance, max(0, signal_from), -1, False
+            return np.nan, closed_trades, balance, max(0, signal_from), -1, False, event_entries, event_exits, event_pnls, event_balances, event_provisional, event_count
         first_take, first_stop = _find_funded_standard_exit(
             bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
             tree_size, count, open_index, entry_price, quantity,
@@ -526,10 +535,18 @@ def simulate_standard_stateful_numba(
                 net_ratio = entry_price * quantity * (1.0 - fee_rate) - exit_price * quantity * (1.0 + fee_rate)
             else:
                 net_ratio = exit_price * quantity * (1.0 - fee_rate) - entry_price * quantity * (1.0 + fee_rate)
-            balance += net_ratio + _standard_funding_cashflow(
+            funding_cashflow = _standard_funding_cashflow(
                 open_index, exit_index, quantity,
                 open_short, funding_event_indexes, funding_mark_prices, funding_rates,
             )
+            if capture_events:
+                event_entries[event_count] = open_index
+                event_exits[event_count] = exit_index
+                event_pnls[event_count] = net_ratio + funding_cashflow
+                event_balances[event_count] = balance
+                event_provisional[event_count] = False
+                event_count += 1
+            balance += net_ratio + funding_cashflow
             closed_trades += 1
             open_index = -1
             signal_cursor = _lower_bound(signal_indexes, signal_cursor, exit_index + 1)
@@ -547,7 +564,7 @@ def simulate_standard_stateful_numba(
             quantity_step, quantity_places, min_order_notional, max_market_order_quantity,
         )
         if not order_valid:
-            return np.nan, 0, balance, max(0, signal_from), -1, False
+            return np.nan, closed_trades, balance, max(0, signal_from), -1, False, event_entries, event_exits, event_pnls, event_balances, event_provisional, event_count
 
         first_take, first_stop = _find_funded_standard_exit(
             bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
@@ -584,10 +601,18 @@ def simulate_standard_stateful_numba(
             net_ratio = entry_price * quantity * (1.0 - fee_rate) - exit_price * quantity * (1.0 + fee_rate)
         else:
             net_ratio = exit_price * quantity * (1.0 - fee_rate) - entry_price * quantity * (1.0 + fee_rate)
-        balance += net_ratio + _standard_funding_cashflow(
+        funding_cashflow = _standard_funding_cashflow(
             entry_index, exit_index, quantity,
             is_short, funding_event_indexes, funding_mark_prices, funding_rates,
         )
+        if capture_events:
+            event_entries[event_count] = entry_index
+            event_exits[event_count] = exit_index
+            event_pnls[event_count] = net_ratio + funding_cashflow
+            event_balances[event_count] = balance
+            event_provisional[event_count] = False
+            event_count += 1
+        balance += net_ratio + funding_cashflow
         closed_trades += 1
         signal_cursor = _lower_bound(signal_indexes, signal_cursor, exit_index + 1)
         signal_from = exit_index + 1
@@ -607,9 +632,16 @@ def simulate_standard_stateful_numba(
             open_index, count - 1, quantity,
             open_short, funding_event_indexes, funding_mark_prices, funding_rates,
         )
-        return marked_balance - start_balance, closed_trades + 1, balance, max(0, signal_from), open_index, open_short
+        if capture_events and mark_open_event:
+            event_entries[event_count] = open_index
+            event_exits[event_count] = count - 1
+            event_pnls[event_count] = marked_balance - balance
+            event_balances[event_count] = balance
+            event_provisional[event_count] = True
+            event_count += 1
+        return marked_balance - start_balance, closed_trades + 1, balance, max(0, signal_from), open_index, open_short, event_entries, event_exits, event_pnls, event_balances, event_provisional, event_count
 
-    return balance - start_balance, closed_trades, balance, max(0, count - 1, signal_from), -1, False
+    return balance - start_balance, closed_trades, balance, max(0, count - 1, signal_from), -1, False, event_entries, event_exits, event_pnls, event_balances, event_provisional, event_count
 
 
 @njit(cache=True)
@@ -643,7 +675,8 @@ def simulate_standard_stateful_days_numba(
     open_is_short: bool,
     take_confirmation_snapshots: int,
     stop_confirmation_snapshots: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    capture_events: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     day_count = len(day_quote_counts)
     pnls = np.empty(day_count, dtype=np.float64)
     trade_counts = np.empty(day_count, dtype=np.int64)
@@ -652,6 +685,13 @@ def simulate_standard_stateful_days_numba(
     closed_counts = np.empty(day_count, dtype=np.int64)
     open_indexes = np.empty(day_count, dtype=np.int32)
     open_shorts = np.empty(day_count, dtype=np.bool_)
+    event_capacity = len(signal_indexes) + 1 if capture_events else 0
+    event_entries = np.empty(event_capacity, dtype=np.int32)
+    event_exits = np.empty(event_capacity, dtype=np.int32)
+    event_pnls = np.empty(event_capacity, dtype=np.float64)
+    event_balances = np.empty(event_capacity, dtype=np.float64)
+    event_provisional = np.empty(event_capacity, dtype=np.bool_)
+    event_count = 0
     current_balance = closed_balance
     current_signal_from = signal_from
     current_closed_trades = closed_trades
@@ -670,6 +710,7 @@ def simulate_standard_stateful_days_numba(
             funding_rates, take_profit, stop_loss,
             current_balance, current_signal_from, current_closed_trades,
             current_open_index, current_open_short, take_confirmation_snapshots, stop_confirmation_snapshots,
+            capture_events, day_index == day_count - 1,
         )
         pnls[day_index], trade_counts[day_index] = result[0], result[1]
         current_balance, current_signal_from = result[2], result[3]
@@ -680,8 +721,16 @@ def simulate_standard_stateful_days_numba(
         closed_counts[day_index] = current_closed_trades
         open_indexes[day_index] = current_open_index
         open_shorts[day_index] = current_open_short
+        if capture_events:
+            for event_index in range(result[11]):
+                event_entries[event_count] = result[6][event_index]
+                event_exits[event_count] = result[7][event_index]
+                event_pnls[event_count] = result[8][event_index]
+                event_balances[event_count] = result[9][event_index]
+                event_provisional[event_count] = result[10][event_index]
+                event_count += 1
 
-    return pnls, trade_counts, balances, signal_positions, closed_counts, open_indexes, open_shorts
+    return pnls, trade_counts, balances, signal_positions, closed_counts, open_indexes, open_shorts, event_entries, event_exits, event_pnls, event_balances, event_provisional, event_count
 
 
 @njit(cache=True)

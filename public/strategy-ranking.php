@@ -15,6 +15,15 @@ function respond(array $payload, int $status = 200): never
     exit;
 }
 
+function returnStatusFromFiles(string $cacheDir, string $runKey): array
+{
+    foreach (glob($cacheDir . '/*.status.json') ?: [] as $path) {
+        $status = json_decode((string) @file_get_contents($path), true);
+        if (is_array($status) && ($status['return_run_key'] ?? '') === $runKey) return $status;
+    }
+    return [];
+}
+
 try {
     $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
     $simulationCosts = rankingSimulationCosts($_GET);
@@ -97,6 +106,20 @@ try {
         }
         $cacheGeneration = trim($generationValue);
     }
+    if ((string) ($_GET['return_history_status'] ?? '') === '1') {
+        if ($martingaleMode !== 'none') respond(['status' => 'unsupported']);
+        $statusRunKey = hash('sha256', json_encode([
+            'strategy-return-history-v4-append-only-minute-points', $config['category'], 'ticker:' . $symbol, $symbol,
+            [$symbol], $startValue, (float) $balance, (float) $fee, $ranking,
+            $martingaleMode, $martingaleTiming, $martingaleAttempts,
+            $simulationCosts['include_funding'] ? '1' : '0', (float) $simulationCosts['slippage_bps'], $cacheGeneration,
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+        $history = returnStatusFromFiles($cacheDir, $statusRunKey);
+        if (!is_array($history) || ($history['start_day'] ?? $startValue) !== $startValue || ($history['end_day'] ?? $endValue) !== $endValue) respond(['status' => 'missing']);
+        if (($history['status'] ?? '') === 'pending') respond(['status' => 'running', 'return_run_key' => $statusRunKey, 'progress' => $history['progress'] ?? null]);
+        if (($history['status'] ?? '') === 'ready') respond(['status' => 'ready', 'return_run_key' => $statusRunKey, 'return_point_count' => (int) ($history['return_point_count'] ?? 0)]);
+        respond(['status' => 'error', 'message' => 'Сохранённый расчёт доходности завершился ошибкой.']);
+    }
     $requestedGeneration = (string) ($_GET['ranking_generation'] ?? '');
     if ($requestedGeneration === '' || !hash_equals($cacheGeneration, $requestedGeneration)) {
         respond(['status' => 'cancelled', 'message' => 'Расчёт остановлен: поколение рейтинга уже сброшено.']);
@@ -104,13 +127,33 @@ try {
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config, $tickerSetId);
     $maxId = (int) ($snapshotIds[$symbol] ?? 0);
-    $keyParts = ['ranking-v30-futures-contract-quantity', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
+    $keyParts = ['ranking-v31-range-reset-at-start', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
     array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
     array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
     array_push($keyParts, ...rankingContractRulesIdentity($config['category'], [$symbol]));
     $snapshotRevision = rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration);
     if ($snapshotRevision !== null) $keyParts[] = ['refreshed_snapshot' => $snapshotRevision];
     $key = hash('sha256', json_encode($keyParts, JSON_THROW_ON_ERROR));
+    $returnRunKey = '';
+    $returnHistoryRow = false;
+    if ($martingaleMode === 'none') {
+        $returnRunKey = hash('sha256', json_encode([
+            'strategy-return-history-v4-append-only-minute-points', $config['category'], 'ticker:' . $symbol, $symbol,
+            [$symbol], $startValue, (float) $balance, (float) $fee, $ranking,
+            $martingaleMode, $martingaleTiming, $martingaleAttempts,
+            $simulationCosts['include_funding'] ? '1' : '0', (float) $simulationCosts['slippage_bps'], $cacheGeneration,
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+        $returnHistoryRow = returnStatusFromFiles($cacheDir, $returnRunKey);
+    }
+    $returnHistoryReady = is_array($returnHistoryRow)
+        && ($returnHistoryRow['status'] ?? '') === 'ready'
+        && ($returnHistoryRow['start_day'] ?? $startValue) === $startValue
+        && ($returnHistoryRow['end_day'] ?? $endValue) === $endValue;
+    $returnHistoryRunning = is_array($returnHistoryRow)
+        && ($returnHistoryRow['status'] ?? '') === 'pending'
+        && ($returnHistoryRow['start_day'] ?? $startValue) === $startValue
+        && ($returnHistoryRow['end_day'] ?? $endValue) === $endValue;
+    $returnHistoryNeedsPersist = $martingaleMode === 'none' && !$returnHistoryReady && !$returnHistoryRunning;
     $resultPath = $cacheDir . '/' . $key . '.json';
     $statusPath = $cacheDir . '/' . $key . '.status.json';
     $profilePath = $cacheDir . '/' . $key . '.' . $entryConfig . '.json';
@@ -127,7 +170,22 @@ try {
             }
             $profile = is_file($profilePath) ? json_decode((string) file_get_contents($profilePath), true) : null;
             if (is_array($profile) && ($profile['status'] ?? '') === 'ready') {
-                respond(['status' => 'ready', 'entries' => $entries, 'groups' => $profile['groups'], 'elapsed_seconds' => $elapsedSeconds]);
+                if ($returnHistoryReady) {
+                    respond(['status' => 'ready', 'entries' => $entries, 'groups' => $profile['groups'], 'elapsed_seconds' => $elapsedSeconds, 'return_run_key' => $returnRunKey, 'return_point_count' => (int) ($returnHistoryRow['return_point_count'] ?? 0)]);
+                }
+                if ($returnHistoryRunning) {
+                    // Keep available ranking options responsive while the
+                    // worker finishes persisting trade events.
+                    respond([
+                        'status' => 'ready', 'entries' => $entries, 'groups' => $profile['groups'],
+                        'elapsed_seconds' => $elapsedSeconds, 'return_run_key' => $returnRunKey,
+                        'return_point_count' => (int) ($returnHistoryRow['return_point_count'] ?? 0),
+                        'return_history_status' => 'running',
+                    ]);
+                }
+                // Ranking results are cached already; start the worker only to
+                // rebuild missing trade-event history.
+
             }
         }
     }
@@ -166,10 +224,13 @@ try {
             respond(['status' => 'entry_unavailable', 'message' => 'Для этого порога нет вариантов выхода минимум с ' . $minTrades . ' ' . ($minTrades === 1 ? 'сделкой' : 'сделками') . '.', 'entries' => $entries, 'groups' => []]);
         }
     }
-    $stale = !is_array($status)
+    $stale = $returnHistoryNeedsPersist
+        || !is_array($status)
         || ($retryCancelled && ($status['status'] ?? '') === 'cancelled')
         || ($isPending ? !$workerBusy : ($statusAge > 1800 || (($status['status'] ?? '') === 'error' && $statusAge > 300)));
     if ($stale) {
+        if ($returnHistoryNeedsPersist) {
+        }
         $lock = fopen($cacheDir . '/' . $key . '.lock', 'c');
         if ($lock !== false && flock($lock, LOCK_EX | LOCK_NB)) {
             file_put_contents($statusPath, json_encode(['status' => 'pending', 'progress' => 0]));
@@ -197,6 +258,7 @@ try {
                 . ' --martingale-max-day-loss ' . escapeshellarg($martingaleRiskLimits['max_day_loss'])
                 . ' --include-funding ' . escapeshellarg($simulationCosts['include_funding'] ? '1' : '0')
                 . ' --slippage-bps ' . escapeshellarg($simulationCosts['slippage_bps'])
+                . ($returnRunKey !== '' ? ' --return-run-key ' . escapeshellarg($returnRunKey) . ' --return-scope-name ' . escapeshellarg($symbol) : '')
                 . ' >> ' . escapeshellarg($logPath) . ' 2>&1 < /dev/null &';
             exec($command);
             flock($lock, LOCK_UN);
@@ -212,7 +274,7 @@ try {
             $status['queued'] = false;
         }
     }
-    respond((is_array($status) ? $status : ['status' => 'pending', 'progress' => 0]) + ['entries' => $entries]);
+    respond((is_array($status) ? $status : ['status' => 'pending', 'progress' => 0]) + ['entries' => $entries] + ($returnHistoryReady ? ['return_run_key' => $returnRunKey, 'return_point_count' => (int) ($returnHistoryRow['return_point_count'] ?? 0)] : []) + ($returnHistoryRunning ? ['return_run_key' => $returnRunKey, 'return_point_count' => (int) ($returnHistoryRow['return_point_count'] ?? 0), 'return_history_status' => 'running'] : []));
 } catch (InvalidArgumentException $error) {
     respond(['status' => 'error', 'message' => $error->getMessage()], 400);
 } catch (Throwable $error) {

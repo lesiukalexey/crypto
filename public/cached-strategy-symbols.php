@@ -80,7 +80,7 @@ try {
     $symbols = [];
     foreach ($snapshotIds as $symbol => $_maxId) {
         $keyParts = [
-            'ranking-v30-futures-contract-quantity', $generation, $config['category'], $symbol,
+            'ranking-v31-range-reset-at-start', $generation, $config['category'], $symbol,
             $startValue, $endValue, $balance, $fee, $minTrades, $ranking,
             $martingaleMode, $martingaleTiming, $martingaleAttempts,
         ];

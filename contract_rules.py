@@ -19,7 +19,8 @@ CACHE_ROOT = Path.home() / ".ai" / "home" / ".local" / "bitget-contract-specs"
 RULE_FIELDS = (
     "symbolStatus", "minTradeUSDT", "minTradeNum", "sizeMultiplier",
     "volumePlace", "pricePlace", "priceEndStep", "maxMarketOrderQty",
-    "maxOrderQty", "minLever", "maxLever", "takerFeeRate",
+    "maxOrderQty", "minLever", "maxLever", "takerFeeRate", "openTime",
+    "fundInterval",
 )
 
 
@@ -54,6 +55,10 @@ def load_contract_specs(product_type: str, force_refresh: bool = False) -> dict[
             not force_refresh and isinstance(cached, dict)
             and int(cached.get("fetched_at", 0)) >= int(time.time()) - CACHE_TTL_SECONDS
             and isinstance(cached.get("contracts"), dict)
+            and all(
+                isinstance(contract, dict) and all(field in contract for field in RULE_FIELDS)
+                for contract in cached["contracts"].values()
+            )
         ):
             return cached["contracts"]
 

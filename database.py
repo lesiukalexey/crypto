@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -95,7 +96,168 @@ def initialize_schema(connection: Any) -> None:
                 KEY idx_ticker_capability_demo (category, demo_available, demo_checked_at_utc)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
         )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS strategy_return_variant_types (
+                variant_type_id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                entry_type VARCHAR(32) NOT NULL,
+                entry_direction VARCHAR(12) NOT NULL,
+                exit_type VARCHAR(16) NOT NULL,
+                UNIQUE KEY uq_strategy_return_variant (entry_type,entry_direction,exit_type)
+            ) ENGINE=InnoDB DEFAULT CHARSET=ascii COLLATE=ascii_bin"""
+        )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS strategy_return_profiles (
+                strategy_id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                variant_type_id SMALLINT UNSIGNED NOT NULL,
+                entry_id VARCHAR(96) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                entry_label VARCHAR(255) NOT NULL,
+                exit_id VARCHAR(96) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                exit_label VARCHAR(255) NOT NULL,
+                entry_threshold_tenths_percent SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                entry_window_snapshots SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                take_profit_tenths_percent SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                stop_loss_tenths_percent SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                exit_confirmation_mode VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'immediate',
+                exit_confirmation_snapshots SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                UNIQUE KEY uq_strategy_return_profile (entry_id,exit_id,exit_confirmation_mode,exit_confirmation_snapshots),
+                KEY idx_strategy_return_profile_type (variant_type_id,strategy_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+        )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS strategy_return_points (
+                symbol VARCHAR(40) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                strategy_id INT UNSIGNED NOT NULL,
+                point_minute DATETIME NOT NULL,
+                return_percent DECIMAL(20,10) NOT NULL,
+                trade_count SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+                PRIMARY KEY (symbol,strategy_id,point_minute),
+                KEY idx_strategy_return_point_time (point_minute,strategy_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=ascii COLLATE=ascii_bin"""
+        )
+        variants = []
+        for entry_type in ("momentum_exact_follow", "momentum_within_follow", "momentum_exact_reverse", "momentum_within_reverse", "immediate"):
+            directions = ("long", "short") if entry_type == "immediate" else ("both", "long", "short")
+            for direction in directions:
+                for exit_type in ("fixed", "loss", "profit", "none"):
+                    variants.append((entry_type, direction, exit_type))
+    # Ranking requests can start several Python processes at once. Serialize
+    # the first seed so simultaneous INSERT IGNORE batches do not deadlock on
+    # the catalog's supremum record. Once populated, later schema checks are
+    # read-only for this lookup table.
+    seed_lock = "bitget_strategy_return_variant_types_seed"
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT GET_LOCK(%s, 60)", (seed_lock,))
+        acquired = cursor.fetchone()[0]
+    if acquired != 1:
+        raise RuntimeError("Timed out waiting to seed strategy return variant types")
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM strategy_return_variant_types")
+            existing_count = int(cursor.fetchone()[0])
+            if existing_count < len(variants):
+                cursor.executemany(
+                    "INSERT IGNORE INTO strategy_return_variant_types (entry_type,entry_direction,exit_type) VALUES (%s,%s,%s)",
+                    variants,
+                )
+        connection.commit()
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT RELEASE_LOCK(%s)", (seed_lock,))
+        connection.commit()
+
+def ensure_strategy_return_profile(
+    connection: Any, entry_id: str, entry_label: str, exit_id: str, exit_label: str,
+    exit_confirmation_mode: str = "immediate", exit_confirmation_snapshots: int = 0,
+) -> int:
+    """Return the compact profile ID for a complete entry/exit configuration."""
+    parts = entry_id.split(":")
+    if parts[0] == "immediate":
+        entry_type, direction, threshold, window = "immediate", parts[1], 0, 0
+    else:
+        # IDs for the combined direction are `entry:<window>:<threshold>`;
+        # directional IDs are `entry:<long|short>:<window>:<threshold>`.
+        if parts[0] == "entry" and parts[1] in {"long", "short"}:
+            direction, offset = parts[1], 2
+        else:
+            direction, offset = "both", 1
+        window, threshold = int(parts[offset]), int(parts[offset + 1])
+        suffix = parts[offset + 2:]
+        mode = "within" if "within" in suffix else "exact"
+        signal_direction = "reverse" if "reverse" in suffix else "follow"
+        entry_type = f"momentum_{mode}_{signal_direction}"
+    exit_parts = exit_id.split(":")
+    exit_type = exit_parts[0] if exit_parts[0] in {"fixed", "loss", "profit", "none"} else "none"
+    tp = sl = 0
+    if exit_type == "fixed" and len(exit_parts) >= 3:
+        # Fixed profiles are stored in basis points; table values use tenths of a percent.
+        tp, sl = int(exit_parts[1]) // 10, int(exit_parts[2]) // 10
+    elif exit_type == "loss" and len(exit_parts) > 1:
+        sl = int(exit_parts[1])
+    elif exit_type == "profit" and len(exit_parts) > 1:
+        tp = int(exit_parts[1])
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT variant_type_id FROM strategy_return_variant_types WHERE entry_type=%s AND entry_direction=%s AND exit_type=%s",
+            (entry_type, direction, exit_type),
+        )
+        variant_id = cursor.fetchone()
+        if not variant_id:
+            raise RuntimeError(f"Unsupported saved strategy type: {entry_type}/{direction}/{exit_type}")
+    for attempt in range(5):
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO strategy_return_profiles (variant_type_id,entry_id,entry_label,exit_id,exit_label,"
+                    "entry_threshold_tenths_percent,entry_window_snapshots,take_profit_tenths_percent,stop_loss_tenths_percent,"
+                    "exit_confirmation_mode,exit_confirmation_snapshots) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON DUPLICATE KEY UPDATE strategy_id=LAST_INSERT_ID(strategy_id)",
+                    (variant_id[0], entry_id, entry_label, exit_id, exit_label, threshold, window, tp, sl,
+                     exit_confirmation_mode, exit_confirmation_snapshots),
+                )
+                profile_id = cursor.lastrowid
+                if not profile_id:
+                    cursor.execute(
+                        "SELECT strategy_id FROM strategy_return_profiles WHERE entry_id=%s AND exit_id=%s "
+                        "AND exit_confirmation_mode=%s AND exit_confirmation_snapshots=%s",
+                        (entry_id, exit_id, exit_confirmation_mode, exit_confirmation_snapshots),
+                    )
+                    profile = cursor.fetchone()
+                    if not profile:
+                        raise RuntimeError("Strategy return profile was not persisted")
+                    profile_id = profile[0]
+            # Release profile index locks before the worker stages its next
+            # large return-point batch; concurrent workers retry transient
+            # deadlocks on this idempotent upsert.
+            connection.commit()
+            return int(profile_id)
+        except Exception as error:
+            connection.rollback()
+            mysql_error_code = error.args[0] if getattr(error, "args", ()) else None
+            if mysql_error_code not in (1205, 1213) or attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+    raise RuntimeError("Unable to persist strategy return profile")
+
+
+def flush_strategy_return_points(connection: Any, rows: list[tuple[Any, ...]]) -> int:
+    """Insert a batch, compounding closes that share a minute before first write."""
+    if not rows:
+        return 0
+    grouped: dict[tuple[str, int, Any], tuple[float, int]] = {}
+    for symbol, strategy_id, point_minute, return_percent, trade_count in rows:
+        key = (str(symbol), int(strategy_id), point_minute)
+        percent, count = grouped.get(key, (0.0, 0))
+        grouped[key] = ((1.0 + percent / 100.0) * (1.0 + float(return_percent) / 100.0) - 1.0) * 100.0, count + int(trade_count)
+    values = [(symbol, strategy_id, minute, f"{percent:.10f}", min(count, 65535))
+              for (symbol, strategy_id, minute), (percent, count) in grouped.items()]
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            "INSERT IGNORE INTO strategy_return_points (symbol,strategy_id,point_minute,return_percent,trade_count) "
+            "VALUES (%s,%s,%s,%s,%s)", values,
+        )
     connection.commit()
+    return len(values)
 
 
 def latest_snapshot_timestamp_ms(connection: Any, category: str, symbol: str) -> int | None:

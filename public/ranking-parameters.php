@@ -281,10 +281,22 @@ function rankingHistoricalFundingRates(string $productType, string $symbol, int 
     $lock = fopen($path . '.lock', 'c');
     if ($lock === false || !flock($lock, LOCK_EX)) throw new RuntimeException('Не удалось заблокировать кэш funding Bitget.');
     try {
+        $coversStart = static function (int $firstFundingTimestamp) use ($productType, $symbol, $startMilliseconds): bool {
+            if ($firstFundingTimestamp <= intdiv($startMilliseconds, 1000)) return true;
+            $contract = rankingCurrentBitgetContract($productType, $symbol);
+            $openTimeMilliseconds = (int) ($contract['openTime'] ?? 0);
+            $fundingIntervalHours = (float) ($contract['fundInterval'] ?? 0);
+            if ($openTimeMilliseconds <= 0 || $fundingIntervalHours <= 0) return false;
+            $openTimestamp = intdiv($openTimeMilliseconds, 1000);
+            $firstTimestamp = $firstFundingTimestamp;
+            return $firstTimestamp > intdiv($startMilliseconds, 1000)
+                && $openTimestamp <= $firstTimestamp
+                && $firstTimestamp - $openTimestamp <= $fundingIntervalHours * 3600;
+        };
         $cache = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
         $covered = is_array($cache) && is_array($cache['rates'] ?? null)
             && (int) ($cache['fetched_at'] ?? 0) >= time() - 21600
-            && (int) ($cache['first_timestamp'] ?? PHP_INT_MAX) <= intdiv($startMilliseconds, 1000)
+            && $coversStart((int) ($cache['first_timestamp'] ?? PHP_INT_MAX))
             && ((int) ($cache['last_timestamp'] ?? 0) >= intdiv($endMilliseconds, 1000)
                 || (int) ($cache['latest_request_time'] ?? 0) >= intdiv($endMilliseconds, 1000));
         if (!$covered) {
@@ -324,7 +336,7 @@ function rankingHistoricalFundingRates(string $productType, string $symbol, int 
                 $page++;
             }
             if ($page > 100) throw new RuntimeException('История funding Bitget превысила 100 страниц.');
-            if ($rates === [] || $first > intdiv($startMilliseconds, 1000)
+            if ($rates === [] || !$coversStart($first)
                 || ($last < intdiv($endMilliseconds, 1000) && $latestRequestTime < intdiv($endMilliseconds, 1000))) {
                 throw new RuntimeException('История funding Bitget не покрывает выбранный период. Расчёт остановлен, ставка не подменялась нулём.');
             }
@@ -469,7 +481,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         throw new InvalidArgumentException('Неизвестное направление входа.');
     }
     $exitConfirmationMode = (string) ($query['exit_confirmation_mode'] ?? 'immediate');
-    if (!in_array($exitConfirmationMode, ['immediate', 'both_delayed', 'tp_delayed', 'sl_delayed'], true)) {
+    if (!in_array($exitConfirmationMode, ['immediate', 'both_delayed', 'tp_delayed', 'sl_delayed', 'none'], true)) {
         throw new InvalidArgumentException('Неизвестный тип проверки Take Profit / Stop Loss.');
     }
     $exitConfirmationSnapshots = filter_var($query['exit_confirmation_snapshots'] ?? 60, FILTER_VALIDATE_INT);
@@ -563,9 +575,10 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
         static fn (array $profile): int => count($profile['thresholds_tenths_percent']) * count($profile['windows']),
         $entryProfiles
     )) + count($entryDefaults['immediate_directions'] ?? []);
-    $count = $entryVariantCount
-        * (count(rankingValues($ranges['fixed_tp'])) * count(rankingValues($ranges['fixed_sl']))
-            + count(rankingValues($ranges['profit'])) + count(rankingValues($ranges['loss'])));
+    $exitVariantCount = $exitConfirmationMode === 'none' ? 1
+        : count(rankingValues($ranges['fixed_tp'])) * count(rankingValues($ranges['fixed_sl']))
+            + count(rankingValues($ranges['profit'])) + count(rankingValues($ranges['loss']));
+    $count = $entryVariantCount * $exitVariantCount;
     foreach ($entryProfiles as $profile) {
         if (count($profile['thresholds_tenths_percent']) > 100 || count($profile['windows']) > 50) {
             throw new InvalidArgumentException('Слишком много сочетаний. Увеличьте шаг или сузьте диапазон.');
@@ -587,6 +600,7 @@ function rankingParameters(array $query, array $entryDefaults, array $exitDefaul
             'exit_confirmation_snapshots' => $exitConfirmationSnapshots,
             'immediate_directions' => $entryDefaults['immediate_directions'] ?? [],
             'exit_profiles' => [
+                'no_exit' => $exitConfirmationMode === 'none',
                 'fixed_tp' => $ranges['fixed_tp'],
                 'fixed_sl' => $ranges['fixed_sl'],
                 'profit' => ['segments' => $ranges['profit']],

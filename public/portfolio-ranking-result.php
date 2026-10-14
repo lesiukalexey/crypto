@@ -29,6 +29,8 @@ try {
     $status = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
     $metadata = is_file($metadataPath) ? json_decode((string) file_get_contents($metadataPath), true) : null;
     if (!is_array($result) || ($result['status'] ?? '') !== 'ready'
+        || ($result['ranking_data_source'] ?? '') !== 'strategy_return_points'
+        || !is_array($metadata)
         || (is_array($status) && ($status['status'] ?? '') !== 'ready')) {
         respond(['status' => 'missing']);
     }
@@ -46,13 +48,13 @@ try {
     respond([
         ...$result,
         'status' => 'ready',
+        'cache_key' => $key,
         'progress' => 100,
         'start_day' => (string) ($metadata['start_day'] ?? (is_array($status) ? ($status['start_day'] ?? '') : '')),
         'end_day' => (string) ($metadata['end_day'] ?? (is_array($status) ? ($status['end_day'] ?? '') : '')),
         'universe_size' => (int) ($result['universe_size'] ?? count($symbols)),
         'min_trades' => (int) ($result['min_trades'] ?? 3),
-        'history_metadata' => is_array($metadata) ? $metadata : null,
-        'history_legacy' => !is_array($metadata),
+        'history_metadata' => $metadata,
         'result_cached_at' => gmdate(DATE_ATOM, (int) filemtime($resultPath)),
     ]);
 } catch (Throwable $error) {

@@ -47,7 +47,7 @@ try {
         candleCompletenessRespond(['status' => 'error', 'message' => 'Пара не входит в выбранный активный список тикеров.'], 400);
     }
     if ($enabled === []) {
-        candleCompletenessRespond(['status' => 'ready', 'symbol_incomplete' => false, 'all_incomplete' => false, 'incomplete_symbols' => [], 'checked_days' => 0]);
+        candleCompletenessRespond(['status' => 'ready', 'symbol_incomplete' => false, 'all_incomplete' => false, 'checked_days' => 0]);
     }
 
     $db = $config['mysql'];
@@ -63,46 +63,70 @@ try {
     $today = $nowKyiv->setTime(0, 0);
     $nowUtc = new DateTimeImmutable('now', new DateTimeZone('UTC'));
     $completeUntilUtc = $nowUtc->setTime((int) $nowUtc->format('H'), (int) $nowUtc->format('i'), 0);
-    $symbolsSql = implode(',', array_fill(0, count($enabled), '?'));
-    $stmt = $pdo->prepare(
-        "SELECT symbol, COUNT(DISTINCT DATE_FORMAT(received_at_utc, '%Y-%m-%d %H:%i')) AS minute_count
-         FROM quote_snapshots
-         WHERE category = ? AND symbol IN ($symbolsSql)
-           AND received_at_utc >= ? AND received_at_utc < ?
-         GROUP BY symbol"
-    );
+    $prepareCounts = static function (array $symbols) use ($pdo): PDOStatement {
+        $symbolsSql = implode(',', array_fill(0, count($symbols), '?'));
+        return $pdo->prepare(
+            "SELECT symbol, COUNT(DISTINCT DATE_FORMAT(received_at_utc, '%Y-%m-%d %H:%i')) AS minute_count
+             FROM quote_snapshots
+             WHERE category = ? AND symbol IN ($symbolsSql)
+               AND received_at_utc >= ? AND received_at_utc < ?
+             GROUP BY symbol"
+        );
+    };
+    $allSymbolsStatement = $prepareCounts($enabled);
+    $selectedSymbolStatement = $selected !== '' ? $prepareCounts([$selected]) : null;
 
-    $incomplete = [];
     $checkedDays = 0;
-    $day = $startDay;
     $lastDay = $endDay < $today ? $endDay : $today;
-    while ($day <= $lastDay) {
+    $dayRanges = [];
+    for ($day = $lastDay; $day >= $startDay; $day = $day->modify('-1 day')) {
         $dayEnd = $day->modify('+1 day');
         $dayStartUtc = $day->setTimezone(new DateTimeZone('UTC'));
         $dayEndUtc = $dayEnd->setTimezone(new DateTimeZone('UTC'));
         $expectedUntilUtc = $dayEndUtc < $completeUntilUtc ? $dayEndUtc : $completeUntilUtc;
         $expectedMinutes = intdiv(max(0, $expectedUntilUtc->getTimestamp() - $dayStartUtc->getTimestamp()), 60);
-        if ($expectedMinutes > 0) {
-            $stmt->execute([
-                $config['category'], ...$enabled,
-                $dayStartUtc->format('Y-m-d H:i:s'), $expectedUntilUtc->format('Y-m-d H:i:s'),
-            ]);
-            $counts = [];
-            foreach ($stmt->fetchAll() as $row) $counts[strtoupper((string) $row['symbol'])] = (int) $row['minute_count'];
-            foreach ($enabled as $symbol) {
-                if (($counts[$symbol] ?? 0) < $expectedMinutes) $incomplete[$symbol] = true;
-            }
-            $checkedDays++;
-        }
-        $day = $day->modify('+1 day');
+        if ($expectedMinutes > 0) $dayRanges[] = [$day, $dayStartUtc, $expectedUntilUtc, $expectedMinutes];
     }
 
-    $incompleteSymbols = array_keys($incomplete);
+    // A single missing day is enough to show an import button. Check newest days first
+    // so interrupted history is detected promptly instead of scanning the full range.
+    $symbolIncomplete = false;
+    if ($selected !== '' && $selectedSymbolStatement !== null) {
+        foreach ($dayRanges as [, $dayStartUtc, $expectedUntilUtc, $expectedMinutes]) {
+            $selectedSymbolStatement->execute([
+                $config['category'], $selected,
+                $dayStartUtc->format('Y-m-d H:i:s'), $expectedUntilUtc->format('Y-m-d H:i:s'),
+            ]);
+            $row = $selectedSymbolStatement->fetch();
+            $checkedDays++;
+            if ((int) ($row['minute_count'] ?? 0) < $expectedMinutes) {
+                $symbolIncomplete = true;
+                break;
+            }
+        }
+    }
+
+    $allIncomplete = false;
+    foreach ($dayRanges as [, $dayStartUtc, $expectedUntilUtc, $expectedMinutes]) {
+        $allSymbolsStatement->execute([
+            $config['category'], ...$enabled,
+            $dayStartUtc->format('Y-m-d H:i:s'), $expectedUntilUtc->format('Y-m-d H:i:s'),
+        ]);
+        $counts = [];
+        foreach ($allSymbolsStatement->fetchAll() as $row) $counts[strtoupper((string) $row['symbol'])] = (int) $row['minute_count'];
+        $checkedDays++;
+        foreach ($enabled as $symbol) {
+            if (($counts[$symbol] ?? 0) < $expectedMinutes) {
+                $allIncomplete = true;
+                break 2;
+            }
+        }
+    }
+
     candleCompletenessRespond([
         'status' => 'ready',
-        'symbol_incomplete' => $selected !== '' && isset($incomplete[$selected]),
-        'all_incomplete' => $incompleteSymbols !== [],
-        'incomplete_symbols' => $incompleteSymbols,
+        'symbol_incomplete' => $selected !== '' && $symbolIncomplete,
+        'all_incomplete' => $allIncomplete,
         'checked_days' => $checkedDays,
     ]);
 } catch (Throwable) {

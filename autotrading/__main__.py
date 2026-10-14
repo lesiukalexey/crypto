@@ -134,13 +134,13 @@ def main() -> int:
     run = commands.add_parser("paper-run", help="run a public-quote paper executor")
     run.add_argument("release", help="strategy release JSON")
     run.add_argument("--state", required=True, help="SQLite state path outside the repository")
-    run.add_argument("--interval", type=float, default=5, help="public ticker polling interval in seconds")
-    run.add_argument("--stale-seconds", type=int, default=30, help="maximum accepted quote age")
+    run.add_argument("--interval", type=float, default=30, help="public ticker polling interval in seconds")
+    run.add_argument("--stale-seconds", type=int, default=90, help="maximum accepted quote age")
     run.add_argument("--control", help="local JSON control file")
     portfolio_run = commands.add_parser("portfolio-run", help="run all local paper strategies against one shared account")
     portfolio_run.add_argument("--state", required=True)
-    portfolio_run.add_argument("--interval", type=float, default=5)
-    portfolio_run.add_argument("--stale-seconds", type=int, default=30)
+    portfolio_run.add_argument("--interval", type=float, default=30)
+    portfolio_run.add_argument("--stale-seconds", type=int, default=90)
     portfolio_run.add_argument("--control")
     portfolio_run.add_argument("--risk-settings")
     portfolio_run.add_argument("--mode", choices=("paper", "demo", "live"), default="paper")
@@ -152,7 +152,7 @@ def main() -> int:
     start = commands.add_parser("service-start", help="start a detached local paper service")
     for option in ("release", "state", "control", "pid-file", "log"):
         start.add_argument("--" + option, required=True)
-    start.add_argument("--interval", type=float, default=5)
+    start.add_argument("--interval", type=float, default=30)
     stop = commands.add_parser("service-stop", help="stop a managed local paper service")
     stop.add_argument("--state", required=True)
     stop.add_argument("--pid-file", required=True)
@@ -181,7 +181,8 @@ def main() -> int:
     portfolio_start = commands.add_parser("portfolio-start", help="start the shared portfolio service in Paper, Demo, or Real mode")
     for option in ("state", "control", "pid-file", "log"):
         portfolio_start.add_argument("--" + option, required=True)
-    portfolio_start.add_argument("--interval", type=float, default=5)
+    portfolio_start.add_argument("--interval", type=float, default=30)
+    portfolio_start.add_argument("--stale-seconds", type=int, default=90)
     portfolio_start.add_argument("--mode", choices=("paper", "demo", "live"), default="paper")
     portfolio_start.add_argument("--risk-settings")
     portfolio_start.add_argument("--enable-live", action="store_true", help="explicitly arm live mode")
@@ -352,7 +353,7 @@ def main() -> int:
                 reconciliation = adapter.reconcile(expected, pending)
                 if not reconciliation.matched:
                     raise ExchangeStateMismatch("Exchange account does not match the local portfolio ledger: " + "; ".join(reconciliation.discrepancies))
-            print(json.dumps(start_portfolio_service(args.state, args.control, args.pid_file, args.log, args.interval, mode=args.mode, enable_live=args.enable_live, risk_settings=args.risk_settings)))
+            print(json.dumps(start_portfolio_service(args.state, args.control, args.pid_file, args.log, args.interval, mode=args.mode, enable_live=args.enable_live, risk_settings=args.risk_settings, stale_seconds=args.stale_seconds)))
             return 0
         except (ValueError, OSError, RuntimeError) as exc:
             print(f"Could not start portfolio: {exc}", file=sys.stderr)

@@ -153,13 +153,13 @@ function simulate_cross_hedge(
             'minimum_after_maximum_net_pnl' => $minimumAfterMaximumPoint['net_pnl'],
             'minimum_after_maximum_time_ms' => $minimumAfterMaximumPoint['t'],
             'decline_after_maximum' => $maximumPoint['net_pnl'] - $minimumAfterMaximumPoint['net_pnl'],
-            'decline_after_maximum_percent' => $maximumPoint['net_pnl'] > 0.0
+            'decline_after_maximum_percent' => ($startingBalance + $maximumPoint['net_pnl']) > 0.0
                 ? ($maximumPoint['net_pnl'] - $minimumAfterMaximumPoint['net_pnl'])
-                    / $maximumPoint['net_pnl'] * 100.0
+                    / ($startingBalance + $maximumPoint['net_pnl']) * 100.0
                 : null,
             'maximum_drawdown' => $maximumDrawdown,
-            'maximum_drawdown_percent' => $maximumDrawdownPeakPoint['net_pnl'] > 0.0
-                ? $maximumDrawdown / $maximumDrawdownPeakPoint['net_pnl'] * 100.0
+            'maximum_drawdown_percent' => ($startingBalance + $maximumDrawdownPeakPoint['net_pnl']) > 0.0
+                ? $maximumDrawdown / ($startingBalance + $maximumDrawdownPeakPoint['net_pnl']) * 100.0
                 : null,
             'maximum_drawdown_peak_net_pnl' => $maximumDrawdownPeakPoint['net_pnl'],
             'maximum_drawdown_peak_time_ms' => $maximumDrawdownPeakPoint['t'],

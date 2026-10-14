@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
@@ -25,9 +26,9 @@ import pymysql
 from app import load_config
 from contract_rules import load_contract_specs, numba_market_order_rules
 from futures_costs import load_historical_funding_rates
-from database import connect_mysql
+from database import connect_mysql, ensure_strategy_return_profile, flush_strategy_return_points
 from martingale import martingale_base_notional
-from ranking_checkpoints import STATE_DTYPE, daily_quote_boundaries, dated_state_checkpoint_path, has_dated_state_checkpoint, load_best_state_checkpoint, load_exact_state_checkpoint, write_state_checkpoint
+from ranking_checkpoints import STATE_DTYPE, daily_quote_boundaries, dated_state_checkpoint_path, has_dated_state_checkpoint, load_best_state_checkpoint, write_state_checkpoint
 
 TOP_PER_GROUP = 500
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -176,6 +177,9 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     temporary.replace(path)
+
+
+_write_json_without_return_key = write_json
 
 
 def signal_profile_family(family: str, signal_mode: str, direction_mode: str) -> str:
@@ -629,7 +633,7 @@ def simulate_standard_checkpoint(
     take_profit_amount = None if take_profit is None else start_balance * take_profit / 1000.0
     stop_loss_amount = None if stop_loss is None else start_balance * stop_loss / 1000.0
     market_rules = order_rules or (0.0, 0.0, 12, 0.0, 0.0)
-    pnl, trade_count, balance, signal_from, open_entry_index, open_is_short = simulate_standard_stateful_numba(
+    result = simulate_standard_stateful_numba(
         quotes.bids,
         quotes.asks,
         bid_tree.maximum,
@@ -655,6 +659,7 @@ def simulate_standard_checkpoint(
         bool(checkpoint[4]),
         take_confirmation_snapshots, stop_confirmation_snapshots,
     )
+    pnl, trade_count, balance, signal_from, open_entry_index, open_is_short = result[:6]
     state = (float(balance), int(signal_from), int(trade_count if open_entry_index < 0 else trade_count - 1), int(open_entry_index), bool(open_is_short))
     return float(pnl), int(trade_count), state
 
@@ -674,7 +679,8 @@ def simulate_standard_checkpoint_days(
     take_confirmation_snapshots: int = 0,
     stop_confirmation_snapshots: int = 0,
     order_rules: tuple[float, float, int, float, float] | None = None,
-) -> tuple[float, int, tuple[float, int, int, int, bool], list[tuple[float, int, int, int, bool]]]:
+    capture_events: bool = False,
+) -> tuple[float, int, tuple[float, int, int, int, bool], list[tuple[float, int, int, int, bool]]] | tuple[float, int, tuple[float, int, int, int, bool], list[tuple[float, int, int, int, bool]], list[tuple[int, int, float, float, bool]]]:
     """Resume once through the range and capture each supplied day boundary."""
     from numba_simulation import simulate_standard_stateful_days_numba
 
@@ -694,8 +700,13 @@ def simulate_standard_checkpoint_days(
         float(checkpoint[0]), int(checkpoint[1]), int(checkpoint[2]),
         int(checkpoint[3]), bool(checkpoint[4]),
         take_confirmation_snapshots, stop_confirmation_snapshots,
+        capture_events,
     )
-    pnls, trade_counts, balances, signal_positions, closed_counts, open_indexes, open_shorts = values
+    pnls, trade_counts, balances, signal_positions, closed_counts, open_indexes, open_shorts = values[:7]
+    events = [
+        (int(values[7][index]), int(values[8][index]), float(values[9][index]), float(values[10][index]), bool(values[11][index]))
+        for index in range(int(values[12]))
+    ]
     states = [
         (
             float(balances[index]), int(signal_positions[index]), int(closed_counts[index]),
@@ -704,7 +715,8 @@ def simulate_standard_checkpoint_days(
         for index in range(len(day_quote_counts))
     ]
     final_state = states[-1]
-    return float(pnls[-1]), int(trade_counts[-1]), final_state, states
+    result = (float(pnls[-1]), int(trade_counts[-1]), final_state, states)
+    return result + (events,) if capture_events else result
 
 
 def finalize_standard_checkpoints(
@@ -884,6 +896,8 @@ def main() -> int:
     parser.add_argument("--martingale-max-day-loss", type=float, default=0.0)
     parser.add_argument("--include-funding", choices=("0", "1"), default="1")
     parser.add_argument("--slippage-bps", type=float, default=0.0)
+    parser.add_argument("--return-run-key", default="")
+    parser.add_argument("--return-scope-name", default="")
     args = parser.parse_args()
     ranking = json.loads(args.ranking_params)
     exit_profiles = ranking["exit_profiles"]
@@ -894,6 +908,16 @@ def main() -> int:
 
     status_path = args.cache_dir / f"{args.cache_key}.status.json"
     result_path = args.cache_dir / f"{args.cache_key}.json"
+    write_json_base = _write_json_without_return_key
+    def write_json(path: Path, payload: dict[str, Any]) -> None:
+        if args.return_run_key and path == status_path:
+            payload = {
+                **payload,
+                "return_run_key": args.return_run_key,
+                "exit_confirmation_mode": confirmation_mode,
+                "exit_confirmation_snapshots": confirmation_snapshots if confirmation_mode != "immediate" else 0,
+            }
+        write_json_base(path, payload)
     job_lock = (args.cache_dir / f"strategy-worker-{args.cache_key}.lock").open("a", encoding="utf-8")
     while True:
         try:
@@ -906,7 +930,7 @@ def main() -> int:
             cached_result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             cached_result = None
-        if isinstance(cached_result, dict) and cached_result.get("status") == "ready":
+        if isinstance(cached_result, dict) and cached_result.get("status") == "ready" and not args.return_run_key:
             write_json(status_path, {"status": "ready", "progress": 100})
             return 0
     worker_lock = (args.cache_dir / "ranking-worker.lock").open("a", encoding="utf-8")
@@ -922,7 +946,7 @@ def main() -> int:
             cached_result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             cached_result = None
-        if isinstance(cached_result, dict) and cached_result.get("status") == "ready":
+        if isinstance(cached_result, dict) and cached_result.get("status") == "ready" and not args.return_run_key:
             write_json(status_path, {"status": "ready", "progress": 100})
             return 0
     try:
@@ -981,11 +1005,9 @@ def main() -> int:
                 quotes.timestamps, source_day, args.end_day,
             ) if count > 0
         ]
-        previous_range_day = (date.fromisoformat(args.start_day) - timedelta(days=1)).isoformat()
-        range_start_day = next((day for day, count in reversed(all_day_boundaries)
-            if day <= previous_range_day and count > 0), None)
-        range_start_quote_count = next((count for day, count in all_day_boundaries
-            if day == range_start_day), 0) if range_start_day is not None else 0
+        range_start_timestamp = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV).timestamp()
+        range_start_quote_count = int(np.searchsorted(quotes.timestamps, range_start_timestamp, side="left"))
+        range_boundaries = [(day, count) for day, count in all_day_boundaries if day >= args.start_day]
 
         groups_specs = [
             ("fixed", "Автоматические · фиксированные Take Profit и Stop Loss", len(exit_values("fixed_tp", exit_profiles)) * len(exit_values("fixed_sl", exit_profiles))),
@@ -1032,12 +1054,22 @@ def main() -> int:
             bid_tree = PriceTree([])
             ask_tree = PriceTree([])
         fee_rate = args.fee_percent / 100
-
+        return_trade_connection = connect_mysql(config["mysql"]) if args.return_run_key else None
+        return_trade_rows: list[tuple[Any, ...]] = []
+        return_trade_count = 0
+        return_profile_ids: dict[tuple[str, str], int] = {}
+        return_trade_insert_sql = (
+            "INSERT IGNORE INTO strategy_return_points "
+            "(symbol,strategy_id,point_minute,return_percent,trade_count) VALUES (%s,%s,%s,%s,%s)"
+        )
         for entry_id, entry_label, lookback, threshold_tenths_percent, entry_family, immediate_short in entry_specs_for_worker:
                 if len(quotes) < 2:
                     signals, shorts = np.empty(0, dtype=np.int64), np.empty(0, dtype=np.bool_)
                 elif immediate_short is not None:
-                    signals, shorts = np.array([0], dtype=np.int64), np.array([immediate_short], dtype=np.bool_)
+                    if range_start_quote_count < len(quotes):
+                        signals, shorts = np.array([range_start_quote_count], dtype=np.int64), np.array([immediate_short], dtype=np.bool_)
+                    else:
+                        signals, shorts = np.empty(0, dtype=np.int64), np.empty(0, dtype=np.bool_)
                 else:
                     signals, shorts = make_signals(quotes, int(threshold_tenths_percent) / 10, int(lookback), entry_family or "both")
                 if len(signals) == 0 or (
@@ -1088,14 +1120,12 @@ def main() -> int:
                 previous_quote_count = 0
                 previous_checkpoint_day = None
                 boundaries_to_capture: list[tuple[str, int]] = []
-                range_start_states = None
-                range_start_in_capture = False
                 if args.martingale_mode == "none":
                     checkpoint_path = dated_state_checkpoint_path(checkpoint_state, args.symbol, entry_id, args.end_day)
-                    first_missing_day = next((index for index, (day, _) in enumerate(all_day_boundaries)
+                    first_missing_day = next((index for index, (day, _) in enumerate(range_boundaries)
                         if not has_dated_state_checkpoint(checkpoint_state, args.symbol, entry_id, day)), None)
-                    resume_until_day = (
-                        all_day_boundaries[first_missing_day - 1][0]
+                    resume_until_day = None if args.return_run_key else (
+                        range_boundaries[first_missing_day - 1][0]
                         if first_missing_day is not None and first_missing_day > 0
                         else (None if first_missing_day == 0 else args.end_day)
                     )
@@ -1105,21 +1135,9 @@ def main() -> int:
                     ) if resume_until_day is not None else None
                     if checkpoint is not None:
                         previous_states, previous_quote_count, previous_checkpoint_day = checkpoint
-                    if range_start_day is not None:
-                        range_start_states = load_exact_state_checkpoint(
-                            checkpoint_state, args.symbol, entry_id, range_start_day,
-                            quotes, total_per_entry, range_start_quote_count,
-                        )
-                    if first_missing_day is None and checkpoint is not None and previous_quote_count == len(quotes):
-                        if range_start_day is not None and range_start_states is None:
-                            range_start_states = load_exact_state_checkpoint(
-                                checkpoint_state, args.symbol, entry_id, range_start_day,
-                                quotes, total_per_entry, range_start_quote_count,
-                            )
-                            if range_start_states is None:
-                                raise RuntimeError(f"Missing canonical range-start checkpoint for {range_start_day}")
+                    if not args.return_run_key and first_missing_day is None and checkpoint is not None and previous_quote_count == len(quotes):
                         saved_pnls, saved_trades = standard_range_results(
-                            quotes, args.balance, fee_rate, range_start_states, previous_states, order_rules,
+                            quotes, args.balance, fee_rate, None, previous_states, order_rules,
                         )
                         groups, best_pnl = rank_saved_standard_results(
                             saved_pnls, saved_trades, args.min_trades,
@@ -1143,16 +1161,13 @@ def main() -> int:
                         })
                         continue
                     boundaries_to_capture = [
-                        (day, count) for day, count in all_day_boundaries
-                        if count > 0 and (
+                        (day, count) for day, count in range_boundaries
+                        if count > 0 and (args.return_run_key or (
                             previous_checkpoint_day is None
                             or day > previous_checkpoint_day
                             or (day == previous_checkpoint_day and count > previous_quote_count)
-                        )
+                        ))
                     ]
-                    range_start_in_capture = any(
-                        day == range_start_day for day, _ in boundaries_to_capture
-                    )
 
                 profile_best = [-math.inf]
                 groups: list[dict[str, Any]] = []
@@ -1180,24 +1195,52 @@ def main() -> int:
                         target: float | None,
                         loss: float | None,
                     ) -> None:
-                        nonlocal completed
+                        nonlocal completed, return_trade_count
                         for target_policy, policy_label in martingale_target_policies(args.martingale_mode, loss):
                             if args.martingale_mode == "none":
                                 candidate_index = len(next_states)
                                 previous_state = (
                                     previous_states[len(next_states)]
-                                    if previous_states is not None else (args.balance, 0, 0, -1, False)
+                                    if previous_states is not None else (args.balance, range_start_quote_count, 0, -1, False)
                                 )
                                 if boundaries_to_capture:
                                     state_index = len(next_states)
-                                    pnl, trade_count, next_state, day_states = simulate_standard_checkpoint_days(
+                                    simulation_result = simulate_standard_checkpoint_days(
                                         quotes, signals, shorts, bid_tree, ask_tree,
                                         args.balance, fee_rate, target, loss,
                                         day_quote_counts_to_capture,
                                         previous_state,
                                         take_confirmation_snapshots, stop_confirmation_snapshots,
                                         order_rules,
+                                        bool(args.return_run_key),
                                     )
+                                    pnl, trade_count, next_state, day_states = simulation_result[:4]
+                                    if args.return_run_key:
+                                        trade_events = simulation_result[4]
+                                        cumulative_factor = 1.0
+                                        for trade_index, (entry_index, exit_index, event_pnl, balance_before, provisional) in enumerate(trade_events):
+                                            if balance_before <= 0 or entry_index < 0 or exit_index < 0:
+                                                continue
+                                            trade_return = event_pnl / balance_before
+                                            cumulative_factor *= 1.0 + trade_return
+                                            if not provisional:
+                                                profile_key = (entry_id, identifier)
+                                                strategy_id = return_profile_ids.get(profile_key)
+                                                if strategy_id is None:
+                                                    strategy_id = ensure_strategy_return_profile(
+                                                        return_trade_connection, entry_id, entry_label,
+                                                        identifier, f"{display_kind} {identifier}",
+                                                        confirmation_mode,
+                                                        confirmation_snapshots if confirmation_mode != "immediate" else 0,
+                                                    )
+                                                    return_profile_ids[profile_key] = strategy_id
+                                                point_time = datetime.fromtimestamp(
+                                                    float(quotes.timestamps[exit_index]), timezone.utc
+                                                ).replace(second=0, microsecond=0, tzinfo=None)
+                                                return_trade_rows.append((args.symbol, strategy_id, point_time, f"{trade_return * 100:.10f}", 1))
+                                        if len(return_trade_rows) >= 5000:
+                                            return_trade_count += flush_strategy_return_points(return_trade_connection, return_trade_rows)
+                                            return_trade_rows.clear()
                                     for index, (day, _) in enumerate(boundaries_to_capture):
                                         states_by_day[day][state_index] = day_states[index]
                                         state_counts_by_day[day] += 1
@@ -1209,21 +1252,6 @@ def main() -> int:
                                         order_rules,
                                     )
                                 next_states.append(next_state)
-                                if range_start_day is not None:
-                                    if range_start_states is not None:
-                                        start_state = range_start_states[candidate_index]
-                                    elif range_start_in_capture:
-                                        start_boundary_index = next(
-                                            index for index, (day, _) in enumerate(boundaries_to_capture)
-                                            if day == range_start_day
-                                        )
-                                        start_state = day_states[start_boundary_index]
-                                    else:
-                                        raise RuntimeError(
-                                            f"Missing canonical checkpoint for range start {range_start_day}"
-                                        )
-                                    pnl -= float(start_state[0]) - args.balance
-                                    trade_count -= int(start_state[2])
                                 chain_count = trade_count
                             else:
                                 result = martingale_batch_results[(identifier, target_policy)]
@@ -1250,8 +1278,11 @@ def main() -> int:
                                     else:
                                         heapq.heapreplace(best, item)
                             completed += 1
-                            if completed % 1000 == 0:
-                                progress_reporter.update(status_path, {"status": "pending", "progress": int(completed * 100 / total), "elapsed_seconds": int(time.monotonic() - started)})
+                            progress_reporter.update(status_path, {
+                                "status": "pending",
+                                "progress": min(99.9, round(completed * 100 / total, 1)),
+                                "elapsed_seconds": int(time.monotonic() - started),
+                            })
 
                     if family == "fixed":
                         for target_basis_points in exit_values("fixed_tp", exit_profiles):
@@ -1327,16 +1358,37 @@ def main() -> int:
 
         entries.sort(key=lambda item: (-item["best_pnl"], item["label"]))
         elapsed_seconds = int(time.monotonic() - started)
+        if args.return_run_key:
+            if return_trade_rows:
+                return_trade_count += flush_strategy_return_points(return_trade_connection, return_trade_rows)
+                return_trade_rows.clear()
+            return_trade_connection.close()
+            write_json(status_path, {
+                "status": "pending", "progress": 99, "phase": "finalizing_return_history",
+                "elapsed_seconds": int(time.monotonic() - started), "return_point_count": return_trade_count,
+                "return_run_key": args.return_run_key,
+            })
         write_json(result_path, {"status": "ready", "entries": entries, "elapsed_seconds": elapsed_seconds})
         write_json(status_path, {
             "status": "ready", "progress": 100, "elapsed_seconds": elapsed_seconds,
+            "start_day": args.start_day, "end_day": args.end_day,
             "checkpoint_result_reuses": checkpoint_result_reuses,
             "checkpoint_writes": checkpoint_writes,
             "checkpoint_skips_low_disk": checkpoint_skips,
+            "return_run_key": args.return_run_key or None,
+            "return_point_count": return_trade_count if args.return_run_key else None,
         })
         return 0
     except Exception as exc:
         write_json(status_path, {"status": "error", "progress": 0, "message": "Не удалось рассчитать рейтинг стратегий."})
+        if args.return_run_key:
+            try:
+                if "return_trade_connection" in locals() and return_trade_connection is not None:
+                    if return_trade_rows:
+                        flush_strategy_return_points(return_trade_connection, return_trade_rows)
+                    return_trade_connection.close()
+            except Exception:
+                pass
         print(f"strategy ranking failed: {exc}", file=sys.stderr)
         return 1
 

@@ -16,7 +16,7 @@ if (!in_array((string) ($_SERVER['REMOTE_ADDR'] ?? ''), ['127.0.0.1', '::1'], tr
 }
 
 $mode = (string) ($_GET['mode'] ?? '');
-if (!in_array($mode, ['demo', 'real'], true)) historyResponse(['status' => 'error', 'message' => 'Выберите режим Bitget Demo или Bitget Real.'], 422);
+if (!in_array($mode, ['paper', 'demo', 'real'], true)) historyResponse(['status' => 'error', 'message' => 'Выберите режим Paper, Bitget Demo или Bitget Real.'], 422);
 $symbol = strtoupper(trim((string) ($_GET['symbol'] ?? '')));
 $strategyId = strtolower(trim((string) ($_GET['strategy_id'] ?? '')));
 if (!preg_match('/^[A-Z0-9]{2,40}$/', $symbol)) historyResponse(['status' => 'error', 'message' => 'Укажите корректный тикер.'], 422);

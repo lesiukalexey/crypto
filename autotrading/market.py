@@ -50,7 +50,7 @@ class BitgetPublicTickerPoller:
         self,
         category: str,
         *,
-        interval_seconds: float = 5,
+        interval_seconds: float = 30,
         request_timeout_seconds: float = 10,
     ) -> None:
         if category not in {"SPOT", "USDT-FUTURES", "COIN-FUTURES", "USDC-FUTURES"}:
