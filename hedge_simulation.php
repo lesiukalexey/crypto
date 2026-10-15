@@ -11,7 +11,10 @@ function simulate_cross_hedge(
     float $startingBalance,
     float $feeRate,
     int $maxQuoteAgeSeconds = 120,
+    bool $longEnabled = true,
+    bool $shortEnabled = true,
 ): array {
+    if (!$longEnabled && !$shortEnabled) throw new InvalidArgumentException("Выберите хотя бы один тикер.");
     $longIndex = -1;
     $shortIndex = -1;
     $longCursor = 0;
@@ -37,9 +40,9 @@ function simulate_cross_hedge(
     }
     $chartStartMs = $chartRangeStarts === [] ? 0 : min($chartRangeStarts);
     $chartEndMs = $chartRangeEnds === [] ? $chartStartMs : max($chartRangeEnds);
-    $allocation = $startingBalance / 2.0;
-    $longNotional = $allocation / (1.0 + $feeRate);
-    $shortNotional = $allocation / (1.0 + $feeRate);
+    $allocation = $startingBalance / ((int) $longEnabled + (int) $shortEnabled);
+    $longNotional = $longEnabled ? $allocation / (1.0 + $feeRate) : 0.0;
+    $shortNotional = $shortEnabled ? $allocation / (1.0 + $feeRate) : 0.0;
 
     while (isset($longRows[$longCursor]) || isset($shortRows[$shortCursor])) {
         $timestampMs = min(
@@ -52,9 +55,10 @@ function simulate_cross_hedge(
         while (isset($shortRows[$shortCursor]) && hedge_timestamp_ms($shortRows[$shortCursor]) <= $timestampMs) {
             $shortIndex = $shortCursor++;
         }
-        if ($longIndex < 0 || $shortIndex < 0) continue;
-        $longQuote = $longRows[$longIndex];
-        $shortQuote = $shortRows[$shortIndex];
+        if (($longEnabled && $longIndex < 0) || ($shortEnabled && $shortIndex < 0)) continue;
+        $inactiveQuote = ['_timestamp_ms'=>$timestampMs, 'bid_price'=>1, 'ask_price'=>1, 'last_price'=>1];
+        $longQuote = $longEnabled ? $longRows[$longIndex] : $inactiveQuote;
+        $shortQuote = $shortEnabled ? $shortRows[$shortIndex] : $inactiveQuote;
         $longAge = ($timestampMs - hedge_timestamp_ms($longQuote)) / 1000;
         $shortAge = ($timestampMs - hedge_timestamp_ms($shortQuote)) / 1000;
         if ($longAge > $maxQuoteAgeSeconds || $shortAge > $maxQuoteAgeSeconds) continue;

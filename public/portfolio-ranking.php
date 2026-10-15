@@ -241,6 +241,7 @@ try {
         'portfolio-ranking-v17-futures-contract-quantity', $cacheGeneration, $config['category'], $startValue, $endValue, $balance, $fee,
         $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts,
     ];
+    if ($persistReturns || $rankFromReturns) $keyParts[] = ['return_storage_version'=>2];
     array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
     array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
     $contractRulesIdentity = rankingContractRulesIdentity($config['category'], array_keys($maxIds));
@@ -251,10 +252,12 @@ try {
     $returnScopeId = $returnSymbol !== '' ? 'ticker:' . $returnSymbol : $selectedSet['id'];
     $returnScopeName = $returnSymbol !== '' ? $returnSymbol : $selectedSet['name'];
     $returnRunKey = ($persistReturns || $rankFromReturns || $returnHistoryStatusRequest) ? hash('sha256', json_encode([
-        'strategy-return-history-v6-append-only-minute-points', $config['category'], $returnScopeId, $returnSymbol ?: null,
-        array_keys($maxIds), $startValue, (float) $balance, (float) $fee, $ranking,
+        'strategy-return-history-v8-isolated-context', $config['category'], $returnScopeId, $returnSymbol ?: null,
+        array_keys($maxIds), $startValue, $endValue, (float) $balance, (float) $fee, $ranking,
         $martingaleMode, $martingaleTiming, $martingaleAttempts,
         $simulationCosts['include_funding'] ? '1' : '0', (float) $simulationCosts['slippage_bps'], $cacheGeneration,
+            rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration),
+            rankingContractRulesIdentity($config['category'], array_keys($maxIds)),
     ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)) : '';
     $resultPath = $cacheDir . '/portfolio-' . $key . '.json';
     $statusPath = $cacheDir . '/portfolio-' . $key . '.status.json';

@@ -19,123 +19,83 @@ from numba import njit
 
 
 @njit(cache=True)
-def _calculate_chunk_kernel(
-    timestamps,
-    bids,
-    asks,
-    offsets,
-    counts,
-    long_index,
-    short_start,
-    short_end,
-    starting_balance,
-    fee_rate,
-    max_age_ms,
-):
-    output = np.empty(short_end - short_start, dtype=np.float64)
-    output[:] = np.nan
-    long_offset = offsets[long_index]
-    long_count = counts[long_index]
+def _calculate_metrics_chunk_kernel(timestamps, bids, asks, offsets, counts, long_index,
+                                    short_start, short_end, starting_balance, fee_rate, max_age_ms,
+                                    window_start_ms, window_end_ms):
+    output = np.full((short_end-short_start, 4), np.nan)
+    long_offset, long_count = offsets[long_index], counts[long_index]
     if long_count == 0:
         return output
-
+    notional = (starting_balance/2)/(1+fee_rate)
     for output_index, short_index in enumerate(range(short_start, short_end)):
-        if long_index == short_index:
+        if long_index == short_index or counts[short_index] == 0:
             continue
-        short_offset = offsets[short_index]
-        short_count = counts[short_index]
-        if short_count == 0:
-            continue
-
-        long_cursor = 0
-        short_cursor = 0
-        long_quote_index = -1
-        short_quote_index = -1
-        entry_long_index = -1
-        entry_short_index = -1
-
-        while long_cursor < long_count or short_cursor < short_count:
-            next_long_time = (
-                timestamps[long_offset + long_cursor]
-                if long_cursor < long_count
-                else np.uint64(18446744073709551615)
-            )
-            next_short_time = (
-                timestamps[short_offset + short_cursor]
-                if short_cursor < short_count
-                else np.uint64(18446744073709551615)
-            )
-            timestamp = min(next_long_time, next_short_time)
-            while long_cursor < long_count and timestamps[long_offset + long_cursor] <= timestamp:
-                long_quote_index = long_offset + long_cursor
-                long_cursor += 1
-            while short_cursor < short_count and timestamps[short_offset + short_cursor] <= timestamp:
-                short_quote_index = short_offset + short_cursor
-                short_cursor += 1
-            if long_quote_index < 0 or short_quote_index < 0:
+        short_offset, short_count = offsets[short_index], counts[short_index]
+        full_stream = window_start_ms == np.uint64(0) and window_end_ms == np.uint64(18446744073709551615)
+        if not full_stream:
+            boundary_tolerance_ms = np.uint64(3 * 86_400_000)
+            latest_first_ms = window_start_ms + boundary_tolerance_ms
+            earliest_last_ms = window_end_ms - boundary_tolerance_ms
+            if (timestamps[long_offset] > latest_first_ms
+                    or timestamps[long_offset+long_count-1] < earliest_last_ms
+                    or timestamps[short_offset] > latest_first_ms
+                    or timestamps[short_offset+short_count-1] < earliest_last_ms):
                 continue
-            if (
-                timestamp - timestamps[long_quote_index] <= max_age_ms
-                and timestamp - timestamps[short_quote_index] <= max_age_ms
-                and min(
-                    bids[long_quote_index],
-                    asks[long_quote_index],
-                    bids[short_quote_index],
-                    asks[short_quote_index],
-                ) > 0.0
-            ):
-                entry_long_index = long_quote_index
-                entry_short_index = short_quote_index
+        long_cursor = short_cursor = 0
+        long_quote = short_quote = -1
+        long_entry = short_entry = -1
+        maximum = peak = -np.inf
+        drawdown = 0.
+        drawdown_peak = np.nan
+        net = np.nan
+        while long_cursor < long_count or short_cursor < short_count:
+            long_time = timestamps[long_offset+long_cursor] if long_cursor < long_count else np.uint64(18446744073709551615)
+            short_time = timestamps[short_offset+short_cursor] if short_cursor < short_count else np.uint64(18446744073709551615)
+            timestamp = min(long_time, short_time)
+            if timestamp >= window_end_ms:
                 break
-
-        if entry_long_index < 0 or entry_short_index < 0:
-            continue
-
-        long_local_index = long_count - 1
-        short_local_index = short_count - 1
-        last_long_index = long_offset + long_local_index
-        last_short_index = short_offset + short_local_index
-        while long_local_index >= 0 or short_local_index >= 0:
-            long_time = timestamps[last_long_index] if long_local_index >= 0 else np.uint64(0)
-            short_time = timestamps[last_short_index] if short_local_index >= 0 else np.uint64(0)
-            timestamp = max(long_time, short_time)
-            if (
-                long_local_index >= 0
-                and short_local_index >= 0
-                and timestamp - long_time <= max_age_ms
-                and timestamp - short_time <= max_age_ms
-                and min(
-                    bids[last_long_index],
-                    asks[last_long_index],
-                    bids[last_short_index],
-                    asks[last_short_index],
-                ) > 0.0
-            ):
-                break
-            while long_local_index >= 0 and timestamps[last_long_index] == timestamp:
-                long_local_index -= 1
-                last_long_index = long_offset + long_local_index if long_local_index >= 0 else -1
-            while short_local_index >= 0 and timestamps[last_short_index] == timestamp:
-                short_local_index -= 1
-                last_short_index = short_offset + short_local_index if short_local_index >= 0 else -1
-
-        if long_local_index < 0 or short_local_index < 0:
-            continue
-
-        long_notional = (starting_balance / 2.0) / (1.0 + fee_rate)
-        short_notional = (starting_balance / 2.0) / (1.0 + fee_rate)
-        long_quantity = long_notional / asks[entry_long_index]
-        short_quantity = short_notional / bids[entry_short_index]
-        entry_fees = (long_notional + short_notional) * fee_rate
-        gross_pnl = (
-            (bids[last_long_index] - asks[entry_long_index]) * long_quantity
-            + (bids[entry_short_index] - asks[last_short_index]) * short_quantity
-        )
-        exit_fees = (
-            bids[last_long_index] * long_quantity + asks[last_short_index] * short_quantity
-        ) * fee_rate
-        output[output_index] = gross_pnl - entry_fees - exit_fees
+            while long_cursor < long_count and timestamps[long_offset+long_cursor] <= timestamp:
+                long_quote = long_offset+long_cursor
+                long_cursor += 1
+            while short_cursor < short_count and timestamps[short_offset+short_cursor] <= timestamp:
+                short_quote = short_offset+short_cursor
+                short_cursor += 1
+            if timestamp < window_start_ms:
+                continue
+            if long_quote < 0 or short_quote < 0:
+                continue
+            if timestamp-timestamps[long_quote] > max_age_ms or timestamp-timestamps[short_quote] > max_age_ms:
+                continue
+            if min(bids[long_quote],asks[long_quote],bids[short_quote],asks[short_quote]) <= 0:
+                continue
+            if long_entry < 0:
+                long_entry, short_entry = long_quote, short_quote
+                long_quantity = notional/asks[long_entry]
+                short_quantity = notional/bids[short_entry]
+            # Match PHP's separately netted legs, including both-side fees.
+            long_pnl = (bids[long_quote]-asks[long_entry])*long_quantity-notional*fee_rate-bids[long_quote]*long_quantity*fee_rate
+            short_pnl = (bids[short_entry]-asks[short_quote])*short_quantity-notional*fee_rate-asks[short_quote]*short_quantity*fee_rate
+            net = long_pnl+short_pnl
+            maximum = max(maximum, net)
+            peak = max(peak, net)
+            current_drawdown = peak-net
+            if current_drawdown > drawdown:
+                drawdown = current_drawdown
+                drawdown_peak = peak
+        if long_entry >= 0:
+            output[output_index,0] = net
+            output[output_index,1] = maximum
+            output[output_index,2] = drawdown
+            output[output_index,3] = drawdown_peak
     return output
+
+
+@njit(cache=True)
+def _calculate_chunk_kernel(timestamps,bids,asks,offsets,counts,long_index,short_start,short_end,
+                            starting_balance,fee_rate,max_age_ms):
+    return _calculate_metrics_chunk_kernel(timestamps,bids,asks,offsets,counts,long_index,short_start,
+                                            short_end,starting_balance,fee_rate,max_age_ms,
+                                            np.uint64(0),np.uint64(18446744073709551615))[:,0]
 
 
 def main() -> int:
@@ -166,10 +126,11 @@ def main() -> int:
     symbol_count = len(symbols)
     ordered_pair_count = symbol_count * max(0, symbol_count - 1)
     chunk_size = 64
+    windows = metadata.get("windows", [])
     for long_index in range(symbol_count):
         for short_start in range(0, symbol_count, chunk_size):
             short_end = min(symbol_count, short_start + chunk_size)
-            values = _calculate_chunk_kernel(
+            metrics = _calculate_metrics_chunk_kernel(
                 timestamps,
                 bids,
                 asks,
@@ -180,15 +141,74 @@ def main() -> int:
                 short_end,
                 float(metadata["balance"]),
                 float(metadata["fee_rate"]),
-                120_000,
+                9_223_372_036_854_775_807,
+                np.uint64(0),
+                np.uint64(18446744073709551615),
             )
+            worst_interval_values = np.full(short_end-short_start, np.nan)
+            worst_interval_maximums = np.full(short_end-short_start, np.nan)
+            worst_interval_drawdowns = np.full(short_end-short_start, np.nan)
+            worst_interval_indices = np.full(short_end-short_start, -1, dtype=np.int64)
+            minimum_interval_ratios = np.full(short_end-short_start, np.nan)
+            minimum_interval_ratio_indices = np.full(short_end-short_start, -1, dtype=np.int64)
+            maximum_interval_ratios = np.full(short_end-short_start, np.nan)
+            maximum_interval_ratio_indices = np.full(short_end-short_start, -1, dtype=np.int64)
+            maximum_interval_drawdowns = np.full(short_end-short_start, np.nan)
+            maximum_interval_drawdown_indices = np.full(short_end-short_start, -1, dtype=np.int64)
+            maximum_interval_drawdown_peaks = np.full(short_end-short_start, np.nan)
+            for window_index, window in enumerate(windows):
+                part = _calculate_metrics_chunk_kernel(
+                    timestamps, bids, asks, offsets, counts, long_index,
+                    short_start, short_end, float(metadata["balance"]),
+                    float(metadata["fee_rate"]), 9_223_372_036_854_775_807,
+                    np.uint64(window["start_ms"]), np.uint64(window["end_ms"]),
+                )
+                for offset, interval_net in enumerate(part[:, 0]):
+                    if math.isnan(float(interval_net)):
+                        continue
+                    if math.isnan(float(worst_interval_values[offset])) or interval_net < worst_interval_values[offset]:
+                        worst_interval_values[offset] = interval_net
+                        worst_interval_maximums[offset] = part[offset, 1]
+                        worst_interval_drawdowns[offset] = part[offset, 2]
+                        worst_interval_indices[offset] = window_index
+                    interval_drawdown = float(part[offset, 2])
+                    interval_maximum = float(part[offset, 1])
+                    if not math.isnan(interval_drawdown) and (math.isnan(float(maximum_interval_drawdowns[offset])) or interval_drawdown > maximum_interval_drawdowns[offset]):
+                        maximum_interval_drawdowns[offset] = interval_drawdown
+                        maximum_interval_drawdown_indices[offset] = window_index
+                        maximum_interval_drawdown_peaks[offset] = part[offset, 3]
+                    if math.isnan(interval_drawdown) or math.isnan(interval_maximum) or interval_drawdown <= 0:
+                        continue
+                    interval_ratio = interval_maximum / interval_drawdown
+                    current_minimum_ratio = minimum_interval_ratios[offset]
+                    if math.isnan(float(current_minimum_ratio)) or interval_ratio < current_minimum_ratio:
+                        minimum_interval_ratios[offset] = interval_ratio
+                        minimum_interval_ratio_indices[offset] = window_index
+                    current_maximum_ratio = maximum_interval_ratios[offset]
+                    if math.isnan(float(current_maximum_ratio)) or interval_ratio > current_maximum_ratio:
+                        maximum_interval_ratios[offset] = interval_ratio
+                        maximum_interval_ratio_indices[offset] = window_index
             print(
                 json.dumps(
                     {
                         "type": "chunk",
                         "long_index": long_index,
                         "short_start": short_start,
-                        "values": [None if math.isnan(float(value)) else float(value) for value in values],
+                        "values": [None if math.isnan(float(value)) else float(value) for value in metrics[:,0]],
+                        "maximums": [None if math.isnan(float(value)) else float(value) for value in metrics[:,1]],
+                        "drawdowns": [None if math.isnan(float(value)) else float(value) for value in metrics[:,2]],
+                        "drawdown_peaks": [None if math.isnan(float(value)) else float(value) for value in metrics[:,3]],
+                        "worst_interval_values": [None if math.isnan(float(value)) else float(value) for value in worst_interval_values],
+                        "worst_interval_maximums": [None if math.isnan(float(value)) else float(value) for value in worst_interval_maximums],
+                        "worst_interval_drawdowns": [None if math.isnan(float(value)) else float(value) for value in worst_interval_drawdowns],
+                        "worst_interval_indices": [int(value) for value in worst_interval_indices],
+                        "minimum_interval_ratios": [None if math.isnan(float(value)) else float(value) for value in minimum_interval_ratios],
+                        "minimum_interval_ratio_indices": [int(value) for value in minimum_interval_ratio_indices],
+                        "maximum_interval_ratios": [None if math.isnan(float(value)) else float(value) for value in maximum_interval_ratios],
+                        "maximum_interval_ratio_indices": [int(value) for value in maximum_interval_ratio_indices],
+                        "maximum_interval_drawdowns": [None if math.isnan(float(value)) else float(value) for value in maximum_interval_drawdowns],
+                        "maximum_interval_drawdown_indices": [int(value) for value in maximum_interval_drawdown_indices],
+                        "maximum_interval_drawdown_peaks": [None if math.isnan(float(value)) else float(value) for value in maximum_interval_drawdown_peaks],
                     },
                     separators=(",", ":"),
                     allow_nan=False,

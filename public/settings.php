@@ -112,14 +112,27 @@ $quoteSets = loadQuoteSets($config);
 $riskSettingsPath = autotradingRiskSettingsPath();
 $riskSettings = is_file($riskSettingsPath) ? json_decode((string) file_get_contents($riskSettingsPath), true) : null;
 $minimumEquityPercent = is_array($riskSettings) && is_numeric($riskSettings['minimum_equity_percent'] ?? null) && (float) $riskSettings['minimum_equity_percent'] >= 1 && (float) $riskSettings['minimum_equity_percent'] <= 100 ? (string) $riskSettings['minimum_equity_percent'] : '75';
+$exportTickerSet = selectedTickerSet($config, (string) ($_GET['ticker_set'] ?? $_SESSION['settings_export_ticker_set'] ?? ''));
+$_SESSION['settings_export_ticker_set'] = $exportTickerSet['id'];
+$exportTimezone = new DateTimeZone('Europe/Kyiv');
+$exportToday = new DateTimeImmutable('today', $exportTimezone);
+$exportEndDay = (string) ($_GET['end_day'] ?? $exportToday->format('Y-m-d'));
+$parsedExportEnd = DateTimeImmutable::createFromFormat('!Y-m-d', $exportEndDay, $exportTimezone);
+if ($parsedExportEnd === false || $parsedExportEnd->format('Y-m-d') !== $exportEndDay) $parsedExportEnd = $exportToday;
+$exportEndDay = $parsedExportEnd->format('Y-m-d');
+$exportStartDay = (string) ($_GET['start_day'] ?? $parsedExportEnd->sub(new DateInterval('P30D'))->format('Y-m-d'));
+$parsedExportStart = DateTimeImmutable::createFromFormat('!Y-m-d', $exportStartDay, $exportTimezone);
+if ($parsedExportStart === false || $parsedExportStart->format('Y-m-d') !== $exportStartDay) $parsedExportStart = $parsedExportEnd->sub(new DateInterval('P30D'));
+$exportStartDay = $parsedExportStart->format('Y-m-d');
 $settingsPages = [
+    'data-export' => 'Выгрузить данные',
     'ticker-lists' => 'Списки тикеров',
     'active-tickers' => 'Активные тикеры',
     'general' => 'Общие настройки',
     'autotrading' => 'Автоторговля',
     'ranking-cache' => 'Кэш рейтингов',
 ];
-$settingsPage = (string) ($_GET['page'] ?? 'ticker-lists');
+$settingsPage = (string) ($_GET['page'] ?? 'data-export');
 if (!isset($settingsPages[$settingsPage])) $settingsPage = 'ticker-lists';
 $isGeneralPage = in_array($settingsPage, ['general', 'autotrading', 'ranking-cache'], true);
 if (!isset($_SESSION['settings_csrf'])) $_SESSION['settings_csrf'] = bin2hex(random_bytes(32));
@@ -134,13 +147,14 @@ if (!isset($_SESSION['settings_csrf'])) $_SESSION['settings_csrf'] = bin2hex(ran
 <style>
 .market-cap-status{margin:8px 0;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}.ticker-row-main{min-width:0}.ticker-cap-rank{margin-top:2px;color:#aebbe0;font-size:12px;font-variant-numeric:tabular-nums}.ticker-cap-unranked{color:var(--muted)}@media(max-width:600px){.ticker-row{gap:10px}.ticker-cap-rank{max-width:calc(100vw - 118px);overflow-wrap:anywhere}}
 .quote-sets-panel{padding:18px 20px}.quote-sets-panel h2{margin:2px 0 6px;font-size:20px}.quote-sets-intro{margin:0 0 14px;color:var(--muted);font-size:13px}.quote-set-create,.quote-set-add{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.quote-set-create input,.quote-set-add select{min-width:220px;padding:9px 11px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.quote-set-create button,.quote-set-add button{min-width:0;padding:9px 13px;border:0;border-radius:9px;background:#607df4;color:#fff;font:inherit;font-weight:700;cursor:pointer}.quote-set-list{display:grid;gap:12px;margin-top:16px}.quote-set-card{padding:14px;border:1px solid var(--line);border-radius:12px;background:#0e1527}.quote-set-card h3{margin:0 0 10px;font-size:16px}.quote-set-members{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px;padding:0;list-style:none}.quote-set-members li{display:inline-flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #34415e;border-radius:8px;color:#dce5ff;font-size:13px}.quote-set-remove{padding:0;border:0;background:none;color:#ff9eaa;font:inherit;cursor:pointer}.quote-set-empty{margin:0 0 12px;color:var(--muted);font-size:13px}.quote-set-status{min-height:20px;margin:10px 0 0;color:var(--muted);font-size:13px}.quote-set-status.error{color:#ff9eaa}.ranking-cache-reset{padding:9px 13px;border:1px solid #6b5263;border-radius:9px;background:#211b2c;color:#f0d7e1;font:inherit;font-weight:700;cursor:pointer}.ranking-cache-reset:disabled{cursor:progress;opacity:.65}.ranking-cache-status{min-height:20px;margin:10px 0 0;color:var(--muted);font-size:13px}.ranking-cache-status.error{color:#ff9eaa}.field{display:grid;gap:5px;color:var(--muted);font-size:13px}.field input{width:100%}@media(max-width:600px){.quote-sets-panel{padding:14px}.quote-set-create input,.quote-set-add select{min-width:0;width:100%}.quote-set-create button,.quote-set-add button{width:100%}}
-.settings-subnav{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 4px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.settings-subnav a{padding:8px 13px;border-radius:8px;color:#b7c1d5;text-decoration:none}.settings-subnav a:hover,.settings-subnav a:focus-visible,.settings-subnav a[aria-current=page]{background:#263968;color:#fff;outline:none}.settings-section>h2{margin:2px 0 8px;font-size:20px}.settings-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:20px}.settings-card{display:block;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);text-decoration:none}.settings-card:hover{border-color:#607df4}.settings-card strong{display:block;margin-bottom:5px}.settings-card span{color:var(--muted);font-size:13px}@media(max-width:600px){.settings-subnav{width:100%}.settings-subnav a{flex:1;text-align:center}}
+.settings-subnav{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 4px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.settings-subnav a{padding:8px 13px;border-radius:8px;color:#b7c1d5;text-decoration:none}.settings-subnav a:hover,.settings-subnav a:focus-visible,.settings-subnav a[aria-current=page]{background:#263968;color:#fff;outline:none}.settings-section>h2{margin:2px 0 8px;font-size:20px}.settings-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:20px}.settings-card{display:block;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);text-decoration:none}.settings-card:hover{border-color:#607df4}.settings-card strong{display:block;margin-bottom:5px}.settings-card span{color:var(--muted);font-size:13px}.data-export-form{display:grid;grid-template-columns:minmax(220px,1.3fr) repeat(2,minmax(170px,.8fr)) auto;align-items:end;gap:12px}.data-export-form select,.data-export-form input{min-width:0;padding:10px 11px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.data-export-form button{min-height:42px;padding:9px 15px;border:0;border-radius:9px;background:#607df4;color:#fff;font:inherit;font-weight:700;cursor:pointer}.data-export-form button:disabled{cursor:progress;opacity:.65}.export-panel .quote-set-status{white-space:pre-line}.export-panel .quote-set-status[data-status=error]{color:#ff9eaa}.export-panel .quote-set-status[data-status=ready],.export-panel .quote-set-status[data-status=partial]{color:#a8f0cf}@media(max-width:700px){.settings-subnav{width:100%}.settings-subnav a{flex:1;text-align:center}.data-export-form{grid-template-columns:1fr}.data-export-form button{width:100%}}
 </style>
 </head>
 <body><main class="wrap">
-<nav class="nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="basic-checks.php">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php" aria-current="page">Настройки</a><a href="autotrading.php?mode=paper">Автоторговля (Paper)</a><a href="autotrading.php?mode=demo">Автоторговля (Тест)</a><a href="autotrading.php?mode=real">Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<nav class="nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="basic-checks.php">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="settings.php" aria-current="page">Настройки</a><a href="autotrading.php?mode=paper">Автоторговля (Paper)</a><a href="autotrading.php?mode=demo">Автотрейдинг (демо)</a><a href="autotrading.php?mode=real">Автотрейдинг (real)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
 <h1><?= settingsH($settingsPages[$settingsPage]) ?></h1>
 <nav class="settings-subnav" aria-label="Разделы настроек">
+<a href="settings.php?page=data-export" <?= $settingsPage === 'data-export' ? 'aria-current="page"' : '' ?>>Выгрузить данные</a>
 <a href="settings.php?page=ticker-lists" <?= $settingsPage === 'ticker-lists' ? 'aria-current="page"' : '' ?>>Списки тикеров</a>
 <a href="settings.php?page=active-tickers" <?= $settingsPage === 'active-tickers' ? 'aria-current="page"' : '' ?>>Активные тикеры</a>
 <a href="settings.php?page=general" <?= $isGeneralPage ? 'aria-current="page"' : '' ?>>Общие настройки</a>
@@ -151,11 +165,14 @@ if (!isset($_SESSION['settings_csrf'])) $_SESSION['settings_csrf'] = bin2hex(ran
 </nav><?php endif; ?>
 <?php if ($settingsPage === 'general'): ?>
 <div class="settings-cards"><a class="settings-card" href="settings.php?page=autotrading"><strong>Автоторговля</strong><span>Порог остановки стратегии при снижении баланса.</span></a><a class="settings-card" href="settings.php?page=ranking-cache"><strong>Кэш рейтингов</strong><span>Остановка расчётов и сброс кэша рейтингов.</span></a></div>
+<?php elseif ($settingsPage === 'data-export'): ?>
+<p class="intro">Загрузите минутные свечи Bitget для выбранного списка и периода. Новые котировки будут сохранены в базе и станут доступны графикам и расчётам.</p>
+<section class="panel settings-section export-panel" aria-labelledby="data-export-heading"><h2 id="data-export-heading">Исторические данные</h2><form id="data-export-form" class="data-export-form"><label class="field">Список тикеров<select name="ticker_set" id="export-ticker-set" required><?php foreach ($exportTickerSet['sets'] as $set): $setMembers = array_values(array_intersect(array_map('strval', $set['symbols'] ?? []), array_keys($enabledLookup))); ?><option value="<?= settingsH((string) ($set['id'] ?? '')) ?>" data-symbol-count="<?= count($setMembers) ?>" <?= ($set['id'] ?? '') === $exportTickerSet['id'] ? 'selected' : '' ?>><?= settingsH((string) ($set['name'] ?? '')) ?></option><?php endforeach; ?></select></label><label class="field">С даты<input type="date" name="start_day" id="export-start-day" value="<?= settingsH($exportStartDay) ?>" required></label><label class="field">По дату<input type="date" name="end_day" id="export-end-day" value="<?= settingsH($exportEndDay) ?>" required></label><button type="submit" id="start-data-export">Выгрузить данные</button></form><p class="quote-sets-intro" id="export-ticker-count"><?= count($exportTickerSet['symbols']) ?> активных тикеров в выбранном списке</p><p class="quote-set-status" id="data-export-status" role="status" aria-live="polite"></p><button class="ranking-cache-reset" type="button" id="cancel-data-export" hidden>■ Остановить выгрузку</button></section>
 <?php elseif ($settingsPage === 'ticker-lists'): ?>
 <p class="intro">Создавайте списки тикеров и добавляйте в каждый нужные пары.</p>
 <section class="panel quote-sets-panel settings-section" aria-labelledby="quote-sets-heading"><h2 id="quote-sets-heading">Списки тикеров</h2><p class="quote-sets-intro">Создавайте списки и добавляйте в каждый нужные тикеры по одному.</p><form class="quote-set-create" id="quote-set-create"><input type="text" name="name" maxlength="100" placeholder="Название списка" aria-label="Название нового списка тикеров" required><button type="submit">Создать список</button></form><p class="quote-set-status" id="quote-set-status" role="status" aria-live="polite"></p><div class="quote-set-list" id="quote-set-list"></div></section>
 <?php elseif ($settingsPage === 'active-tickers'): ?>
-<p class="intro">Выключенные тикеры продолжают собираться и сохраняться в MySQL, но скрыты на других страницах и исключены из расчётов. История котировок и избранное остаются на месте.</p><p class="market-cap-status" id="market-cap-status" role="status" aria-live="polite">Загружаю капитализацию тикеров…</p>
+<p class="intro">Выключенные тикеры продолжают собираться и сохраняться в MySQL, но скрыты на других страницах и исключены из расчётов. История котировок остаётся на месте.</p><p class="market-cap-status" id="market-cap-status" role="status" aria-live="polite">Загружаю капитализацию тикеров…</p>
 <section class="panel settings-section" aria-labelledby="active-tickers-heading"><h2 id="active-tickers-heading">Активные тикеры</h2>
 <?php foreach ($configuredSymbols as $symbol): $isEnabled = isset($enabledLookup[$symbol]); ?>
 <div class="ticker-row"><div class="ticker-row-main"><div class="ticker-name"><?= settingsH($symbol) ?></div><div class="ticker-cap-rank" data-market-cap-for="<?= settingsH($symbol) ?>">Загружаю капитализацию…</div><div class="ticker-state" data-state-for="<?= settingsH($symbol) ?>"><?= $isEnabled ? 'Включён' : 'Выключен' ?></div></div><label class="switch"><input type="checkbox" role="switch" data-symbol="<?= settingsH($symbol) ?>" aria-label="Участвует тикер <?= settingsH($symbol) ?>" <?= $isEnabled ? 'checked' : '' ?>><span class="switch-track"></span></label></div>
@@ -268,6 +285,66 @@ rankingCacheResetButton?.addEventListener('click',async()=>{
         rankingCacheResetButton.textContent='🧹 Сбросить кэш рейтингов по всем данным';
     }
 });
+const dataExportForm=document.querySelector('#data-export-form');
+const dataExportStatus=document.querySelector('#data-export-status');
+const dataExportButton=document.querySelector('#start-data-export');
+const dataExportCancel=document.querySelector('#cancel-data-export');
+const dataExportTickerCount=document.querySelector('#export-ticker-count');
+const exportJobKey='bitget-history-import-job-v1';
+let dataExportJobId='';
+const exportSleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function exportDateTime(ms){return new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Kyiv',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(ms))}
+function updateExportTickerCount(){if(dataExportTickerCount)dataExportTickerCount.textContent=`${Number(dataExportForm?.elements.ticker_set.selectedOptions[0]?.dataset.symbolCount||0)} активных тикеров в выбранном списке`}
+document.querySelector('#export-ticker-set')?.addEventListener('change',updateExportTickerCount);
+updateExportTickerCount();
+function renderDataExportProgress(job){
+    dataExportStatus.dataset.status=job.status||'running';
+    let message=job.message||'Загружаю исторические свечи…';
+    if(job.status==='running'){
+        message+=` · ${Number(job.progress||0).toLocaleString('ru-RU',{maximumFractionDigits:1})}%`;
+        if(Number.isFinite(Number(job.candles_received)))message+=` · свечей получено: ${Number(job.candles_received).toLocaleString('ru-RU')}`;
+        if(Number(job.progress)>0&&Number(job.progress)<100&&Number(job.started_at_ms)>0){const now=Date.now(),elapsed=now-Number(job.started_at_ms),remaining=elapsed*(100/Number(job.progress)-1);message+=`\nСтарт: ${exportDateTime(Number(job.started_at_ms))} · ожидаемое окончание: ${exportDateTime(now+remaining)} (оценка)`}
+    }else if(Number(job.started_at_ms)>0){message+=`\nСтарт: ${exportDateTime(Number(job.started_at_ms))} · завершено: ${exportDateTime(Number(job.finished_at_ms)||Date.now())}`}
+    if(Number.isFinite(Number(job.snapshots_inserted)))message+=`\nДобавлено минутных котировок в БД: ${Number(job.snapshots_inserted).toLocaleString('ru-RU')}`;
+    dataExportStatus.textContent=message;
+}
+async function pollDataExport(jobId,request){
+    dataExportJobId=jobId;dataExportButton.disabled=true;dataExportCancel.hidden=false;dataExportCancel.disabled=false;
+    try{
+        while(true){
+            await exportSleep(1200);
+            const response=await fetch('import-candles.php?job_id='+encodeURIComponent(jobId),{headers:{Accept:'application/json'},cache:'no-store'}),job=await response.json();
+            if(!response.ok||job.status==='error')throw new Error(job.message||'Не удалось получить состояние выгрузки.');
+            renderDataExportProgress(job);
+            if(job.status==='cancelled'){sessionStorage.removeItem(exportJobKey);dataExportStatus.dataset.status='cancelled';dataExportJobId='';dataExportButton.disabled=false;dataExportCancel.hidden=true;return}
+            if(job.status!=='ready'&&job.status!=='partial')continue;
+            dataExportJobId='';sessionStorage.removeItem(exportJobKey);dataExportCancel.hidden=true;dataExportButton.disabled=false;
+            const refreshBody=new URLSearchParams({start_day:request.start_day,end_day:request.end_day});
+            try{const refreshed=await fetch('refresh-current-day-snapshot.php',{method:'POST',body:refreshBody,headers:{Accept:'application/json'},cache:'no-store'}),result=await refreshed.json();if(!refreshed.ok||result.status!=='ready')throw new Error(result.message||'Не удалось обновить срез расчётов.');dataExportStatus.textContent+=(job.status==='partial'?'\nЧасть тикеров не загружена: '+(job.failures||[]).map(item=>item.symbol).join(', '):'\nДанные сохранены; срез расчётов обновлён.')}
+            catch(error){dataExportStatus.dataset.status='error';dataExportStatus.textContent+='\nСвечи загружены, но обновление среза не удалось: '+error.message}
+            return;
+        }
+    }catch(error){dataExportStatus.dataset.status='error';dataExportStatus.textContent=error.message||'Не удалось загрузить данные.';sessionStorage.removeItem(exportJobKey);dataExportJobId='';dataExportButton.disabled=false;dataExportCancel.hidden=true}
+}
+dataExportForm?.addEventListener('submit',async event=>{
+    event.preventDefault();dataExportStatus.classList.remove('error');
+    if(!dataExportForm.reportValidity())return;
+    const request={scope:'all',ticker_set:dataExportForm.elements.ticker_set.value,start_day:dataExportForm.elements.start_day.value,end_day:dataExportForm.elements.end_day.value};
+    if(request.end_day<request.start_day){dataExportStatus.dataset.status='error';dataExportStatus.textContent='Дата окончания должна быть не раньше даты начала.';return}
+    if(Number(dataExportForm.elements.ticker_set.selectedOptions[0]?.dataset.symbolCount||0)<1){dataExportStatus.dataset.status='error';dataExportStatus.textContent='В выбранном списке нет активных тикеров.';return}
+    dataExportButton.disabled=true;dataExportStatus.dataset.status='running';dataExportStatus.textContent='Запускаю выгрузку минутных свечей…';
+    try{const response=await fetch('import-candles.php',{method:'POST',body:new URLSearchParams(request),headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},cache:'no-store'}),result=await response.json();if(!response.ok||!result.job_id)throw new Error(result.message||'Не удалось запустить выгрузку.');sessionStorage.setItem(exportJobKey,JSON.stringify({job_id:result.job_id,request}));pollDataExport(result.job_id,request)}
+    catch(error){dataExportStatus.dataset.status='error';dataExportStatus.textContent=error.message||'Не удалось запустить выгрузку.';dataExportButton.disabled=false}
+});
+dataExportCancel?.addEventListener('click',async()=>{
+    if(!dataExportJobId)return;dataExportCancel.disabled=true;dataExportStatus.textContent='Останавливаю выгрузку…';
+    try{const response=await fetch('import-candles.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams({action:'cancel',job_id:dataExportJobId}),cache:'no-store'}),result=await response.json();if(!response.ok||result.status!=='cancelled')throw new Error(result.message||'Не удалось остановить выгрузку.');sessionStorage.removeItem(exportJobKey);dataExportJobId='';dataExportButton.disabled=false;dataExportCancel.hidden=true;dataExportStatus.dataset.status='cancelled';dataExportStatus.textContent=result.message||'Выгрузка остановлена.'}
+    catch(error){dataExportCancel.disabled=false;dataExportStatus.dataset.status='error';dataExportStatus.textContent=error.message||'Не удалось остановить выгрузку.'}
+});
+if(dataExportForm){
+    try{const saved=JSON.parse(sessionStorage.getItem(exportJobKey)||'null');if(saved?.job_id&&saved?.request)pollDataExport(saved.job_id,saved.request);else fetch('import-candles.php?active=1',{headers:{Accept:'application/json'},cache:'no-store'}).then(response=>response.json()).then(job=>{if(job.status==='running'&&job.job_id&&job.ticker_set===dataExportForm.elements.ticker_set.value){const request={scope:job.scope||'all',ticker_set:job.ticker_set,start_day:job.request_start_day||job.start_day,end_day:job.request_end_day||job.end_day};sessionStorage.setItem(exportJobKey,JSON.stringify({job_id:job.job_id,request}));pollDataExport(job.job_id,request)}}).catch(()=>{})}
+    catch(_){sessionStorage.removeItem(exportJobKey)}
+}
 const marketCapStatusNode=document.querySelector('#market-cap-status');
 const marketCapNumberFormat=new Intl.NumberFormat('ru-RU',{notation:'compact',maximumFractionDigits:1});
 function renderMarketCapRankings(data){

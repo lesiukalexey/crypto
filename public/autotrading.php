@@ -17,6 +17,11 @@ function decimalInput(mixed $value, string $label, bool $allowZero = true): stri
     }
     return $text;
 }
+function startingBalanceInput(mixed $value): string {
+    $text = decimalInput($value, 'Стартовый баланс', false);
+    if ((float) $text < 0.01) throw new RuntimeException('Стартовый баланс: минимальное значение — 0.01 USDT.');
+    return $text;
+}
 function signedDecimalInput(mixed $value, string $label): string {
     $text = trim((string) $value);
     if (!preg_match('/^-?\d{1,12}(?:\.\d{1,24})?$/', $text) || abs((float) $text) > 1000000000) throw new RuntimeException($label . ': неверный формат.');
@@ -189,7 +194,6 @@ foreach ($modeStatePaths as $modeKey => $modeStatePath) {
 $pidPath = $modePidPaths[$accountMode];
 $logPath = $runtime . '/autotrading-' . $accountMode . '.log';
 $activeReleasePath = $runtime . '/active-release.json';
-$favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
 $releaseDir = $runtime . '/releases';
 $python = getenv('BITGET_AUTOTRADING_PYTHON') ?: (is_executable($root . '/.venv/bin/python') ? $root . '/.venv/bin/python' : '/usr/bin/python3');
 if (!is_executable($python)) $python = 'python3';
@@ -217,7 +221,9 @@ $maxChainLoss = $params('max_chain_loss_usdt', '0');
 $strategyMaxDayLoss = $params('strategy_max_day_loss_usdt', '0');
 $exitConfirmationMode = $params('exit_confirmation_mode', 'immediate');
 $exitConfirmationSnapshots = $params('exit_confirmation_snapshots', '0');
-$balance = $params('balance', '100');
+$balance = $_SERVER['REQUEST_METHOD'] === 'POST' ? trim((string) ($_POST['balance'] ?? '')) : '';
+$hedgeFormBalance = $_SERVER['REQUEST_METHOD'] === 'POST' ? trim((string) ($_POST['hedge_balance'] ?? '')) : '';
+$riskBalanceDefault = $params('balance', '100');
 $feePercent = $params('fee', '0.06');
 $slippageBps = $params('slippage_bps', '0');
 $includeFunding = $params('include_funding', '1') === '1';
@@ -242,65 +248,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ? 'Выбран Bitget Demo: после запуска портфель будет выставлять Demo ордера и сверять их исполнения.'
                     : 'Выбран Bitget Real: запуск требует отдельного переключателя сервера и точного подтверждения каждого запуска.');
             $messageType = $requestedMode === 'paper' ? 'success' : 'warning';
-        } elseif ($action === 'add_favorite') {
-            [$currentCode, $currentOut] = runPython(array_merge(['status'], $argsBase), $root, $python);
-            $currentStatus = $currentCode === 0 ? json_decode($currentOut, true) : null;
-            if (is_array($currentStatus) && !empty($currentStatus['service']['running']) && ($currentStatus['service']['mode'] ?? '') !== 'portfolio') throw new RuntimeException('Сейчас работает старый одиночный paper процесс. Остановите его, добавьте избранное и запустите общий портфель.');
-            $favoriteId = trim((string) ($_POST['favorite_id'] ?? ''));
-            $favorites = is_file($favoritesPath) ? json_decode((string) file_get_contents($favoritesPath), true) : [];
-            $favorite = null;
-            foreach (is_array($favorites) ? $favorites : [] as $candidate) if (is_array($candidate) && (string) ($candidate['id'] ?? '') === $favoriteId) { $favorite = $candidate; break; }
-            if (!is_array($favorite)) throw new RuntimeException('Запись избранного не найдена. Обновите страницу и попробуйте снова.');
-            $favoriteParams = is_array($favorite['params'] ?? null) ? $favorite['params'] : [];
-            $kind = (string) ($favorite['type'] ?? 'strategy') === 'hedge' ? 'hedge' : 'strategy';
-            $symbols = $kind === 'hedge'
-                ? [strtoupper((string) ($favoriteParams['long_symbol'] ?? '')), strtoupper((string) ($favoriteParams['short_symbol'] ?? ''))]
-                : [strtoupper((string) ($favoriteParams['symbol'] ?? ''))];
-            $enabled = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
-            if (in_array('', $symbols, true) || count(array_unique($symbols)) !== count($symbols) || count(array_filter($symbols, static fn (string $value): bool => isset($enabled[$value]))) !== count($symbols)) throw new RuntimeException('В избранном есть тикер, который выключен или не поддерживается настройками.');
-            if ($accountMode === 'demo') assertDemoSymbolsAvailable($config, $symbols);
-            $starting = decimalInput($favoriteParams['balance'] ?? '100', 'Стартовый баланс', false);
-            $fee = decimalInput($favoriteParams['fee'] ?? '0.06', 'Комиссия');
-            $slippage = decimalInput($favoriteParams['slippage_bps'] ?? '0', 'Проскальзывание');
-            $martingaleMode = (string) ($favoriteParams['martingale_mode'] ?? 'none');
-            $martingaleTiming = (string) ($favoriteParams['martingale_timing'] ?? 'immediate');
-            $martingaleAttempts = (int) ($favoriteParams['martingale_attempts'] ?? 3);
-            $maxChainLoss = decimalInput($favoriteParams['martingale_max_chain_loss'] ?? '0', 'Максимальный убыток цепочки');
-            $maxDayLoss = decimalInput($favoriteParams['martingale_max_day_loss'] ?? $favoriteParams['strategy_max_day_loss_usdt'] ?? '0', 'Максимальный убыток за день');
-            $exitConfirmationMode = (string) ($favoriteParams['exit_confirmation_mode'] ?? 'immediate');
-            $exitConfirmationSnapshots = (int) ($favoriteParams['exit_confirmation_snapshots'] ?? 0);
-            $executorRunning = is_array($currentStatus) && !empty($currentStatus['service']['running']);
-            $entry = $kind === 'hedge' ? 'immediate:long' : (string) ($favoriteParams['entry_config'] ?? $favoriteParams['ranking_entry_config'] ?? '');
-            $exit = $kind === 'hedge' ? 'fixed:100:100' : (string) ($favoriteParams['exit_config'] ?? '');
-            if ($entry === '' || $exit === '') throw new RuntimeException('В избранном отсутствует условие входа или выхода для автоторговли.');
-            $releaseId = 'favorite-' . gmdate('Ymd-His') . '-' . bin2hex(random_bytes(3));
-            $release = [
-                'schema_version' => 1, 'release_id' => $releaseId, 'created_at_utc' => gmdate('Y-m-d\\TH:i:s\\Z'),
-                'market' => ['category' => 'USDT-FUTURES', 'symbols' => $symbols, 'margin_coin' => 'USDT'],
-                'strategy' => [
-                    'entry_config' => $entry, 'entry_signal_mode' => (string) ($favoriteParams['entry_signal_mode'] ?? 'exact'), 'entry_direction_mode' => (string) ($favoriteParams['entry_direction_mode'] ?? 'follow'),
-                    'exit_config' => $exit, 'martingale_mode' => $martingaleMode, 'martingale_timing' => $martingaleTiming, 'martingale_attempts' => $martingaleAttempts, 'martingale_target_policy' => (string) ($favoriteParams['martingale_target_policy'] ?? 'scaled'),
-                    'max_chain_loss_usdt' => $maxChainLoss, 'max_day_loss_usdt' => $maxDayLoss, 'exit_confirmation_mode' => $exitConfirmationMode, 'exit_confirmation_snapshots' => $exitConfirmationSnapshots,
-                ],
-                'execution' => ['starting_balance_usdt' => $starting, 'leverage' => '1', 'taker_fee_rate' => bcdiv($fee, '100', 24), 'slippage_bps' => $slippage, 'include_funding' => (string) ($favoriteParams['include_funding'] ?? '0') === '1'],
-                'risk' => ['max_order_notional_usdt' => $starting, 'max_total_exposure_usdt' => $starting, 'max_daily_loss_usdt' => decimalInput((string) max(0.01, (float) $maxDayLoss), 'Дневной лимит', false), 'max_open_positions' => 1],
-                'backtest' => ['start_date' => (string) ($favoriteParams['start_day'] ?? $favoriteParams['start_date'] ?? date('Y-m-d', strtotime('-30 days'))), 'end_date' => (string) ($favoriteParams['end_day'] ?? $favoriteParams['end_date'] ?? date('Y-m-d')), 'result_key' => hash('sha256', $favoriteId), 'net_result_usdt' => '0', 'trade_count' => 0],
-            ];
-            if ($kind === 'hedge') $release['risk']['max_order_notional_usdt'] = $starting;
-            if (!is_dir($releaseDir) && !mkdir($releaseDir, 0700, true) && !is_dir($releaseDir)) throw new RuntimeException('Не удалось создать каталог стратегий.');
-            if (is_link($releaseDir) || fileowner($releaseDir) !== $uid) throw new RuntimeException('Каталог стратегий имеет неподходящего владельца.');
-            $releasePath = $releaseDir . '/' . $releaseId . '.json';
-            if (file_put_contents($releasePath, json_encode($release, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", LOCK_EX) === false) throw new RuntimeException('Не удалось сохранить стратегию автоторговли.');
-            chmod($releasePath, 0600);
-            [$checkCode, $checkOut, $checkError] = runPython(['paper-check', $releasePath], $root, $python);
-            if ($checkCode !== 0) throw new RuntimeException('Параметры избранного не прошли проверку автоторговли: ' . ($checkError ?: $checkOut));
-            $addArgs = ['portfolio-add', '--state', $statePath, '--release', $releasePath, '--kind', $kind, '--name', (string) ($favorite['name'] ?? $releaseId)];
-            if ($executorRunning) $addArgs[] = '--disabled';
-            [$addCode, $addOut, $addError] = runPython($addArgs, $root, $python);
-            if ($addCode !== 0) throw new RuntimeException($addError ?: $addOut ?: 'Не удалось добавить избранное в портфель.');
-            $portfolioLabel = match ($accountMode) { 'paper' => 'Paper', 'demo' => 'Bitget Demo', default => 'Bitget Real' };
-            $message = ($kind === 'hedge' ? 'Хедж-пара' : 'Стратегия') . ' «' . (string) ($favorite['name'] ?? $releaseId) . '» добавлена в портфель ' . $portfolioLabel . ($executorRunning ? ' выключенной: исполнитель работает, новые сделки не откроются. Возобновите её в портфеле.' : '. Исполнитель не запускался.');
-            $messageType = 'success';
         } elseif ($action === 'add_hedge') {
             if (!in_array($accountMode, ['paper', 'demo', 'real'], true)) throw new RuntimeException('Выбранную хедж-пару можно добавить в портфель Paper, Demo или Real.');
             [$currentCode, $currentOut] = runPython(array_merge(['status'], $argsBase), $root, $python);
@@ -312,7 +259,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $enabled = array_fill_keys(array_map('strtoupper', $config['symbols'] ?? []), true);
             if ($longSymbol === $shortSymbol || !isset($enabled[$longSymbol], $enabled[$shortSymbol])) throw new RuntimeException('Проверьте выбранные тикеры: лонг и шорт должны быть разными активными тикерами.');
             if ($accountMode === 'demo') assertDemoSymbolsAvailable($config, [$longSymbol, $shortSymbol]);
-            $starting = decimalInput($_POST['hedge_balance'] ?? '', 'Стартовый баланс', false);
+            $starting = startingBalanceInput($_POST['hedge_balance'] ?? '');
             $fee = decimalInput($_POST['hedge_fee'] ?? '', 'Комиссия');
             foreach (($currentStatus['portfolio_strategies'] ?? []) as $existingStrategy) {
                 if (($existingStrategy['kind'] ?? '') === 'hedge' && array_values($existingStrategy['symbols'] ?? []) === [$longSymbol, $shortSymbol]) {
@@ -360,7 +307,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'martingale_attempts' => (int) ($_POST['martingale_attempts'] ?? 0), 'martingale_target_policy' => (string) ($_POST['martingale_target_policy'] ?? ''),
                 'max_chain_loss_usdt' => (string) ($_POST['max_chain_loss_usdt'] ?? ''), 'max_day_loss_usdt' => (string) ($_POST['strategy_max_day_loss_usdt'] ?? ''),
                 'exit_confirmation_mode' => (string) ($_POST['exit_confirmation_mode'] ?? ''), 'exit_confirmation_snapshots' => (int) ($_POST['exit_confirmation_snapshots'] ?? -1),
-                'starting_balance_usdt' => decimalInput($_POST['balance'] ?? '', 'Стартовый баланс', false),
+                'starting_balance_usdt' => startingBalanceInput($_POST['balance'] ?? ''),
                 'taker_fee_rate' => bcdiv(decimalInput($_POST['fee'] ?? '', 'Комиссия'), '100', 24),
                 'slippage_bps' => decimalInput($_POST['slippage_bps'] ?? '', 'Проскальзывание'),
                 'include_funding' => (string) ($_POST['include_funding'] ?? '') === '1',
@@ -431,7 +378,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'start') {
             $enableLive = false;
             if ($accountMode === 'real') {
-                if ((string) ($_POST['live_acknowledgement'] ?? '') !== 'I_ACKNOWLEDGE_LIVE_ORDERS') throw new RuntimeException('Для запуска Real введите подтверждение I_ACKNOWLEDGE_LIVE_ORDERS.');
                 if (getenv('BITGET_LIVE_TRADING_ENABLED') !== '1') throw new RuntimeException('В окружении исполнителя не включён BITGET_LIVE_TRADING_ENABLED=1.');
                 $enableLive = true;
             }
@@ -455,7 +401,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($demoPortfolioSymbols === []) throw new RuntimeException('Запуск Bitget Demo невозможен: в портфеле нет включённых стратегий. Добавьте или возобновите стратегию.');
                 assertDemoSymbolsAvailable($config, $demoPortfolioSymbols);
             }
-            $startArgs = ['portfolio-start', '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--risk-settings', $riskSettingsPath, '--interval', '30', '--stale-seconds', '90', '--mode', $accountMode];
+            // The UI calls the production account mode "real"; the executor CLI calls it "live".
+            $executionMode = $accountMode === 'real' ? 'live' : $accountMode;
+            $startArgs = ['portfolio-start', '--state', $statePath, '--control', $controlPath, '--pid-file', $pidPath, '--log', $logPath, '--risk-settings', $riskSettingsPath, '--interval', '30', '--stale-seconds', '90', '--mode', $executionMode];
             if ($enableLive) $startArgs[] = '--enable-live';
             [$code, $out, $err] = runPython($startArgs, $root, $python);
             if ($code !== 0) throw new RuntimeException($err ?: $out ?: 'Служба не запустилась.');
@@ -630,10 +578,6 @@ foreach ($activeRunByStrategy as $strategyId => $run) {
 }
 $positionStrategyIds = array_fill_keys(array_map(static fn (array $position): string => (string) ($position['strategy_id'] ?? ''), $status['positions'] ?? []), true);
 $published = is_file($activeReleasePath) ? json_decode((string) file_get_contents($activeReleasePath), true) : null;
-$savedFavorites = is_file($favoritesPath) ? json_decode((string) file_get_contents($favoritesPath), true) : [];
-$selectedFavoriteId = trim((string) ($_GET['favorite_id'] ?? ''));
-$selectedFavorite = null;
-foreach (is_array($savedFavorites) ? $savedFavorites : [] as $candidate) if (is_array($candidate) && (string) ($candidate['id'] ?? '') === $selectedFavoriteId) { $selectedFavorite = $candidate; break; }
 $hedgePreviewLong = strtoupper(trim((string) ($_GET['hedge_long'] ?? '')));
 $hedgePreviewShort = strtoupper(trim((string) ($_GET['hedge_short'] ?? '')));
 $hedgePreviewStartDay = (string) ($_GET['hedge_start_day'] ?? '');
@@ -651,7 +595,7 @@ $hedgeQuery = $hasHedgePreview ? [
     'hedge_balance' => $hedgePreviewBalance, 'hedge_fee' => $hedgePreviewFee,
 ] : [];
 $autotradingContextQuery = $hedgeQuery;
-foreach (['favorite_id', 'category', 'symbol', 'start_date', 'end_date', 'entry_config', 'entry_signal_mode', 'entry_direction_mode', 'exit_config', 'martingale_mode', 'martingale_timing', 'martingale_attempts', 'martingale_target_policy', 'max_chain_loss_usdt', 'strategy_max_day_loss_usdt', 'exit_confirmation_mode', 'exit_confirmation_snapshots', 'balance', 'fee', 'slippage_bps', 'include_funding', 'net_result_usdt', 'trade_count'] as $contextKey) {
+foreach (['category', 'symbol', 'start_date', 'end_date', 'entry_config', 'entry_signal_mode', 'entry_direction_mode', 'exit_config', 'martingale_mode', 'martingale_timing', 'martingale_attempts', 'martingale_target_policy', 'max_chain_loss_usdt', 'strategy_max_day_loss_usdt', 'exit_confirmation_mode', 'exit_confirmation_snapshots', 'balance', 'fee', 'slippage_bps', 'include_funding', 'net_result_usdt', 'trade_count'] as $contextKey) {
     if (isset($_GET[$contextKey]) && is_scalar($_GET[$contextKey])) $autotradingContextQuery[$contextKey] = (string) $_GET[$contextKey];
 }
 $autotradingViewUrl = static fn (string $view): string => 'autotrading.php?' . http_build_query(array_merge(['mode' => $accountMode, 'view' => $view], $autotradingContextQuery));
@@ -659,7 +603,6 @@ $autotradingModeViewUrl = static fn (string $mode): string => 'autotrading.php?'
 $selectedStrategyPresent = isset($_GET['symbol']);
 $paperStrategySupported = $category === 'USDT-FUTURES' && !$includeFunding && $martingaleMode === 'none';
 $hedgePreviewCanAdd = $hasHedgePreview
-    && preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $hedgePreviewBalance) === 1 && (float) $hedgePreviewBalance > 0 && (float) $hedgePreviewBalance <= 1000000000
     && preg_match('/^\d{1,12}(?:\.\d{1,12})?$/', $hedgePreviewFee) === 1 && (float) $hedgePreviewFee >= 0 && (float) $hedgePreviewFee <= 5;
 $selectedHedgeInPortfolio = false;
 if ($hasHedgePreview) foreach (($status['portfolio_strategies'] ?? []) as $portfolioStrategy) {
@@ -675,7 +618,7 @@ $postHidden = [
     'martingale_attempts' => $martingaleAttempts, 'martingale_target_policy' => $martingaleTargetPolicy,
     'max_chain_loss_usdt' => $maxChainLoss, 'strategy_max_day_loss_usdt' => $strategyMaxDayLoss,
     'exit_confirmation_mode' => $exitConfirmationMode, 'exit_confirmation_snapshots' => $exitConfirmationSnapshots,
-    'balance' => $balance, 'fee' => $feePercent, 'slippage_bps' => $slippageBps, 'include_funding' => $includeFunding ? '1' : '0',
+    'fee' => $feePercent, 'slippage_bps' => $slippageBps, 'include_funding' => $includeFunding ? '1' : '0',
     'net_result_usdt' => $netResult, 'trade_count' => $tradeCount,
 ];
 ?>
@@ -685,9 +628,9 @@ $postHidden = [
 :root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1300px;margin:auto;padding:30px 20px}h1{margin:12px 0;font-size:clamp(26px,4vw,38px)}h2{font-size:18px;margin:0 0 12px}.nav{display:flex;gap:6px;flex-wrap:wrap;margin:18px 0;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.nav a{color:#b7c1d5;text-decoration:none;padding:8px 12px;border-radius:8px}.nav a:hover,.nav a[aria-current=page]{background:#263968;color:#fff}.panel{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:18px;margin:14px 0}.status{padding:11px 14px;border:1px solid var(--line);border-radius:10px}.status.error{color:#ffb3bf;border-color:#733b49}.status.success{color:#a8f0cf;border-color:#28654f}.muted,.note{color:var(--muted);font-size:13px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px}.stat{padding:12px;border:1px solid var(--line);border-radius:10px;background:#0c1222}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.field{display:grid;gap:5px;color:var(--muted);font-size:13px}.field input{width:100%;padding:9px 10px;border:1px solid #34415e;border-radius:8px;color:var(--text);background:#0c1222;font:inherit}button{padding:10px 14px;border:0;border-radius:8px;background:#607df4;color:white;font:inherit;font-weight:700;cursor:pointer}button.secondary{background:#34415e}button.danger{background:#8f3949}button:disabled{opacity:.5;cursor:not-allowed}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:650px;font-size:13px}td,th{text-align:left;padding:8px 9px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted)}.inline{display:inline}.pill{display:inline-block;padding:3px 9px;border:1px solid #34415e;border-radius:99px;color:#b7c1d5}.pill.on{border-color:#28654f;color:#a8f0cf}.warning{color:#ffe0a1}.empty{color:var(--muted)}@media(max-width:600px){.wrap{padding:18px 12px}.panel{padding:14px}.nav{width:100%}.nav a{flex:1;text-align:center}.actions button{flex:1}}
  .published-summary{margin:16px 0;padding:14px;border:1px solid #3c527e;border-radius:12px;background:#101a30}.published-summary .stat strong,.selected-summary .stat strong{display:block;font-size:14px;line-height:1.45;overflow-wrap:anywhere}.subnav{margin-top:-8px}
 .history-filters{display:flex;align-items:end;gap:12px;flex-wrap:wrap}.history-filters .field{min-width:150px}.history-filters select,.history-filters input{width:100%;padding:9px 10px;border:1px solid #34415e;border-radius:8px;color:var(--text);background:#0c1222;font:inherit}.history-chart{display:block;width:100%;height:auto;min-height:260px;margin-top:12px;overflow:visible}.history-chart-modes{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.history-chart-modes button[aria-pressed="true"]{background:#263968}.history-chart-legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;color:#b7c1d5;font-size:13px}.history-chart-legend span{display:flex;align-items:center;gap:6px}.history-chart-legend i{display:inline-block;width:10px;height:10px;border-radius:50%}.history-chart text{fill:#8995ad;font:12px system-ui,sans-serif}.history-chart .grid-line{stroke:#273149;stroke-width:1}.history-chart .price-line{fill:none;stroke:#86a8ff;stroke-width:2}.history-chart .comparison-line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.history-chart .paper-trade{stroke:#f0bd65;fill:#f0bd65}.history-chart .actual-trade{stroke:#42d6a4;fill:#42d6a4}.history-chart .trade-link{fill:none;stroke-width:1.5;opacity:.6}.history-chart .trade-entry{stroke-width:2}.history-chart .trade-hover-line{stroke:#d9c6ff;stroke-width:1.5;stroke-dasharray:5 4;pointer-events:none}.history-chart .trade-crosshair-line{stroke:#d9c6ff;stroke-width:1;stroke-dasharray:4 4;pointer-events:none}.history-chart .trade-crosshair-label{font-size:11px;font-weight:800;fill:#e9eefb;paint-order:stroke;stroke:#0b1020;stroke-width:4;stroke-linejoin:round;pointer-events:none}.history-chart .trade-hover-arrow,.history-chart .trade-hover-price{font-weight:800;paint-order:stroke;stroke:#0b1020;stroke-width:4;stroke-linejoin:round;pointer-events:none}.history-chart .trade-hover-price{font-size:11px;fill:#e9eefb}.history-chart .trade-face{fill:#0b1020;stroke-width:1.8;pointer-events:none}.history-chart .trade-face-part{fill:none;stroke-width:1.5;stroke-linecap:round;pointer-events:none}.history-table{min-width:1000px;font-variant-numeric:tabular-nums}.history-table th{padding:11px 10px;color:#aab5cb;font-size:11px;text-transform:uppercase;letter-spacing:.04em;background:#0d1425;position:sticky;top:0}.history-table td{text-align:right;padding:11px 10px}.history-table th:first-child,.history-table td:first-child{text-align:left}.history-trade-positive td{background:#123126;color:#b9f2dc}.history-trade-negative td{background:#351e2a;color:#ffd0d5}.history-trade-open-positive td{background:#06291d;color:#83e8b8}.history-trade-open-negative td{background:#290810;color:#ff929d}.history-trade-flat td{background:#222b3d}.history-trade-positive td:first-child,.history-trade-open-positive td:first-child{box-shadow:inset 3px 0 #48d6a4}.history-trade-negative td:first-child,.history-trade-open-negative td:first-child{box-shadow:inset 3px 0 #ff7788}.history-trade-row{cursor:crosshair}.history-trade-row:hover td,.history-trade-row:focus td{filter:brightness(1.22)}.history-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:14px 0}.history-summary .stat strong{font-size:16px}.history-status{min-height:22px;color:var(--muted)}
-</style></head><body><main class="wrap">
+</style><style>#hedge-start-balance{max-width:180px}#add-hedge-form{margin-top:14px}</style></head><body><main class="wrap">
 <div class="muted">Bitget · локальный исполнитель</div><h1>Автоторговля</h1>
-<nav class="nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="basic-checks.php">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="<?= h($autotradingModeViewUrl('paper')) ?>" <?= $accountMode === 'paper' ? 'aria-current="page"' : '' ?>>Автоторговля (Paper)</a><a href="<?= h($autotradingModeViewUrl('demo')) ?>" <?= $accountMode === 'demo' ? 'aria-current="page"' : '' ?>>Автоторговля (Тест)</a><a href="<?= h($autotradingModeViewUrl('real')) ?>" <?= $accountMode === 'real' ? 'aria-current="page"' : '' ?>>Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<nav class="nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="basic-checks.php">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="settings.php">Настройки</a><a href="<?= h($autotradingModeViewUrl('paper')) ?>" <?= $accountMode === 'paper' ? 'aria-current="page"' : '' ?>>Автоторговля (Paper)</a><a href="<?= h($autotradingModeViewUrl('demo')) ?>" <?= $accountMode === 'demo' ? 'aria-current="page"' : '' ?>>Автотрейдинг (демо)</a><a href="<?= h($autotradingModeViewUrl('real')) ?>" <?= $accountMode === 'real' ? 'aria-current="page"' : '' ?>>Автотрейдинг (Live)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
 <nav class="nav subnav" aria-label="Подразделы автоторговли">
 <?php foreach (['setup' => 'Подготовка', 'portfolio' => 'Портфель', 'state' => 'Состояние исполнителя', 'deals' => 'История сделок', 'runs' => 'Запуски', 'events' => 'События'] as $viewKey => $viewLabel): ?><a href="<?= h($autotradingViewUrl($viewKey)) ?>" <?= $autotradingView === $viewKey ? 'aria-current="page"' : '' ?>><?= h($viewLabel) ?></a><?php endforeach; ?>
 </nav>
@@ -696,9 +639,9 @@ $postHidden = [
 <?php if ($autotradingView === 'setup'): ?>
 <?php if ($hasHedgePreview): ?><section class="panel selected-summary" aria-label="Параметры выбранной хедж-пары"><h2>Параметры из хеджирования</h2><div class="grid">
 <div class="stat"><span>Лонг</span><strong><?= h($hedgePreviewLong) ?></strong></div><div class="stat"><span>Шорт</span><strong><?= h($hedgePreviewShort) ?></strong></div>
-<div class="stat"><span>Стартовый баланс</span><strong><?= h($hedgePreviewBalance ?: '—') ?> USDT</strong></div><div class="stat"><span>Комиссия за сторону</span><strong><?= h($hedgePreviewFee ?: '—') ?>%</strong></div>
+<div class="stat"><label class="field">Стартовый баланс (USDT)<input id="hedge-start-balance" form="add-hedge-form" name="hedge_balance" type="number" min="0.01" max="1000000000" step="0.01" value="<?= h($hedgeFormBalance) ?>" required></label></div><div class="stat"><span>Комиссия за сторону</span><strong><?= h($hedgePreviewFee ?: '—') ?>%</strong></div>
 </div>
-<?php if (!$selectedHedgeInPortfolio): ?><?php if (!empty($status['service']['running'])): ?><p class="note">Исполнитель сейчас работает. Пара будет добавлена выключенной и не начнёт торговлю, пока вы отдельно не нажмёте «Возобновить» в портфеле.</p><?php else: ?><p class="note">После запуска откроется лонг <?= h($hedgePreviewLong) ?> и шорт <?= h($hedgePreviewShort) ?>. Сначала добавьте пару в портфель; запуск — отдельным действием.</p><?php endif; ?><?php if (!$hedgePreviewCanAdd): ?><p class="status warning">Проверьте баланс и комиссию на странице хеджирования.</p><?php endif; ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_hedge"><input type="hidden" name="mode" value="<?= h($accountMode) ?>"><input type="hidden" name="hedge_long" value="<?= h($hedgePreviewLong) ?>"><input type="hidden" name="hedge_short" value="<?= h($hedgePreviewShort) ?>"><input type="hidden" name="hedge_balance" value="<?= h($hedgePreviewBalance) ?>"><input type="hidden" name="hedge_fee" value="<?= h($hedgePreviewFee) ?>"><button <?= !$isLocal || !$hedgePreviewCanAdd ? 'disabled' : '' ?>>Добавить выбранную пару в портфель</button></form>
+<?php if (!$selectedHedgeInPortfolio): ?><?php if (!empty($status['service']['running'])): ?><p class="note">Исполнитель сейчас работает. Пара будет добавлена выключенной и не начнёт торговать, пока вы отдельно не нажмёте «Возобновить» в портфеле.</p><?php else: ?><p class="note">После запуска откроется лонг <?= h($hedgePreviewLong) ?> и шорт <?= h($hedgePreviewShort) ?>. Сначала добавьте пару в портфель; запуск — отдельное действие.</p><?php endif; ?><?php if (!$hedgePreviewCanAdd): ?><p class="status warning">Проверьте комиссию на странице хеджирования.</p><?php endif; ?><form id="add-hedge-form" method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_hedge"><input type="hidden" name="mode" value="<?= h($accountMode) ?>"><input type="hidden" name="hedge_long" value="<?= h($hedgePreviewLong) ?>"><input type="hidden" name="hedge_short" value="<?= h($hedgePreviewShort) ?>"><input type="hidden" name="hedge_fee" value="<?= h($hedgePreviewFee) ?>"><button <?= !$isLocal || !$hedgePreviewCanAdd ? 'disabled' : '' ?>>Добавить выбранную пару в портфель</button></form>
 <?php else: ?><p class="status success">Эта пара уже добавлена в портфель <?= $accountMode === 'demo' ? 'Bitget Demo' : 'Bitget Real' ?>. При запуске откроется лонг <?= h($hedgePreviewLong) ?> и шорт <?= h($hedgePreviewShort) ?>.</p><?php endif; ?></section>
 <?php elseif ($selectedStrategyPresent): ?><section class="panel selected-summary"><h2>Выбрано в «Базовых проверках»</h2><div class="grid"><div class="stat"><span>Тикер</span><strong><?= h($symbol) ?></strong></div><div class="stat"><span>Условие входа</span><strong><?= h(entryDescription(['entry_config' => $entryConfig, 'entry_signal_mode' => $entrySignalMode, 'entry_direction_mode' => $entryDirectionMode])) ?></strong></div><div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription($exitConfig)) ?></strong></div><div class="stat"><span>Период</span><strong><?= h($startDate) ?> — <?= h($endDate) ?></strong></div></div></section>
 <?php else: ?><section class="panel"><h2>Подготовка запуска</h2><p class="empty">Выберите конфигурацию в «Базовых проверках» или пару в «Хеджировании».</p><a href="hedging.php">Открыть хеджирование</a></section><?php endif; ?>
@@ -737,10 +680,8 @@ $postHidden = [
 <?php if ($accountMode === 'paper'): ?><p class="note">Paper использует виртуальные позиции и публичные котировки; ордера на Bitget не отправляются.</p>
 <?php elseif ($accountMode === 'demo'): ?><p class="note">Demo отправляет ордера только в Bitget Demo с paptrading: 1. Перед запуском проверьте, что у выбранного аккаунта нет посторонних позиций и ордеров по портфельным тикерам.</p>
 <?php if (is_array($demoTickerSnapshot)): ?><p class="status success">Доступно тикеров: <?= count($demoTickerSnapshot['available']) ?> из <?= count($demoTickerSnapshot['available']) + count($demoTickerSnapshot['unavailable']) ?> · проверка: <?= h((string) ($demoTickerSnapshot['checked_at'] ?? '—')) ?> UTC</p><p class="note"><strong>Можно использовать в Demo:</strong> <?= h(implode(', ', $demoTickerSnapshot['available'])) ?></p><?php if ($demoTickerSnapshot['unavailable'] !== []): ?><details><summary>Недоступны в Demo (<?= count($demoTickerSnapshot['unavailable']) ?>)</summary><p class="note"><?= h(implode(', ', $demoTickerSnapshot['unavailable'])) ?></p></details><?php endif; ?><?php else: ?><p class="status warning">Не удалось загрузить список доступности Demo. Запуск будет заблокирован, пока доступность тикеров нельзя подтвердить.</p><?php endif; ?>
-<?php else: ?><p class="status warning">Real отправляет реальные USDT futures ордера. Запуск требует производственный API ключ с правом торговли, BITGET_LIVE_TRADING_ENABLED=1 и ручное подтверждение запуска.</p><?php endif; ?></section><?php endif; ?>
-<?php if ($autotradingView === 'setup' && is_array($selectedFavorite)): $favoriteParams = is_array($selectedFavorite['params'] ?? null) ? $selectedFavorite['params'] : []; $favoriteName = (string) ($selectedFavorite['name'] ?? 'Избранное'); $favoriteKind = (string) ($selectedFavorite['type'] ?? '') === 'hedge' ? 'Хедж-пара' : 'Стратегия'; $favoriteTicker = $favoriteKind === 'Хедж-пара' ? 'Лонг ' . (string) ($favoriteParams['long_symbol'] ?? '—') . ' / шорт ' . (string) ($favoriteParams['short_symbol'] ?? '—') : (string) ($favoriteParams['symbol'] ?? '—'); ?>
-<section class="panel"><h2>Добавить запись из избранного</h2><p><strong><?= h($favoriteName) ?></strong> · <?= h($favoriteKind) ?> · <?= h($favoriteTicker) ?></p><p class="note">В выбранный портфель попадут сохранённые параметры стратегии. Добавление не запускает остановленный исполнитель. Если портфель уже работает, запись добавится выключенной, чтобы не открывать сделки без отдельного возобновления.</p><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="add_favorite"><input type="hidden" name="favorite_id" value="<?= h($selectedFavoriteId) ?>"><button <?= !$isLocal ? 'disabled' : '' ?>>Добавить в портфель <?= h(['paper' => 'Paper', 'demo' => 'Bitget Demo', 'real' => 'Bitget Real'][$accountMode] ?? 'автоторговли') ?></button></form></section>
-<?php endif; ?>
+<?php else: ?><p class="status warning">Real отправляет реальные USDT futures ордера. Запуск требует производственный API ключ с правом торговли и BITGET_LIVE_TRADING_ENABLED=1.</p><?php endif; ?></section><?php endif; ?>
+
 <?php if ($autotradingView === 'state'): ?><section class="panel"><h2>Состояние исполнителя</h2><div class="grid">
 <div class="stat"><span>Процесс</span><strong><?= ($status['service']['running'] ?? false) ? (($status['service']['mode'] ?? '') === 'portfolio' ? 'Портфель работает' : 'Старая одиночная служба') : 'Остановлен' ?></strong></div>
 <div class="stat"><span>Фактический режим</span><strong><?= h(['paper' => 'Paper', 'demo' => 'Bitget Demo', 'live' => 'Bitget Real', 'real' => 'Bitget Real'][$displayMode] ?? 'неизвестен') ?></strong></div><div class="stat"><span>Общий лимит портфеля</span><strong><?= h((string) ($status['initial_balance_usdt'] ?? ($published['execution']['starting_balance_usdt'] ?? '—'))) ?> USDT</strong></div>
@@ -755,7 +696,7 @@ $postHidden = [
 
 <?php if ($autotradingView === 'setup'): ?>
 <?php if (is_array($published) && !$hasHedgePreview): ?><section class="panel published-summary" aria-label="Последняя добавленная стратегия"><h2>Текущая конфигурация</h2><div class="grid"><div class="stat"><span>Тикеры</span><strong><?= h(implode(', ', array_map('strval', $published['market']['symbols'] ?? [])) ?: '—') ?></strong></div><div class="stat"><span>Условие входа</span><strong><?= h(entryDescription($published['strategy'] ?? [])) ?></strong></div><div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription((string) ($published['strategy']['exit_config'] ?? ''))) ?></strong></div><div class="stat"><span>Период</span><strong><?= h((string) ($published['backtest']['start_date'] ?? '—')) ?> — <?= h((string) ($published['backtest']['end_date'] ?? '—')) ?></strong></div><div class="stat"><span>Стартовый баланс</span><strong><?= h((string) ($published['execution']['starting_balance_usdt'] ?? '—')) ?> USDT</strong></div></div></section><?php endif; ?>
-<section class="panel"><h2>Запуск</h2><?php if ($accountMode === 'demo' && $demoStartBlockedSymbols !== []): ?><p class="status warning">Запуск Demo заблокирован: <?= h(implode(', ', $demoStartBlockedSymbols)) ?>.</p><?php endif; ?><?php if ($hasHedgePreview && !$selectedHedgeInPortfolio): ?><p class="note">Сначала добавьте выбранную пару в портфель выше. Ничего не запускается автоматически.</p><?php else: ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><?php if ($accountMode === 'real'): ?><label class="field">Подтвердите реальный запуск<input name="live_acknowledgement" autocomplete="off" required pattern="I_ACKNOWLEDGE_LIVE_ORDERS" placeholder="I_ACKNOWLEDGE_LIVE_ORDERS"></label><?php endif; ?><button <?= !$isLocal || ($hasHedgePreview ? !$selectedHedgeInPortfolio : (empty($status['portfolio_strategies']) && !is_array($published))) || ($accountMode === 'demo' && $demoStartBlockedSymbols !== []) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? 'Портфель уже запущен' : ($accountMode === 'paper' ? 'Запустить Paper портфель' : ($accountMode === 'demo' ? 'Запустить Bitget Demo' : 'Запустить Bitget Real')) ?></button></form><?php endif; ?></section>
+<section class="panel"><h2>Запуск</h2><?php if ($accountMode === 'demo' && $demoStartBlockedSymbols !== []): ?><p class="status warning">Запуск Demo заблокирован: <?= h(implode(', ', $demoStartBlockedSymbols)) ?>.</p><?php endif; ?><?php if ($hasHedgePreview && !$selectedHedgeInPortfolio): ?><p class="note">Сначала добавьте выбранную пару в портфель выше. Ничего не запускается автоматически.</p><?php else: ?><form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="start"><button <?= !$isLocal || ($hasHedgePreview ? !$selectedHedgeInPortfolio : (empty($status['portfolio_strategies']) && !is_array($published))) || ($accountMode === 'demo' && $demoStartBlockedSymbols !== []) || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>><?= ($status['service']['running'] ?? false) ? 'Портфель уже запущен' : ($accountMode === 'paper' ? 'Запустить Paper портфель' : ($accountMode === 'demo' ? 'Запустить Bitget Demo' : 'Запустить Bitget Real')) ?></button></form><?php endif; ?></section>
 <?php endif; ?>
 
 <?php if ($autotradingView === 'events' && $accountMode === 'demo'): ?><section class="panel"><h2>Сверка Bitget Demo</h2>
@@ -778,15 +719,16 @@ $postHidden = [
 <div class="stat"><span>Условие входа</span><strong><?= h(entryDescription(['entry_config' => $entryConfig, 'entry_signal_mode' => $entrySignalMode, 'entry_direction_mode' => $entryDirectionMode])) ?></strong></div>
 <div class="stat"><span>Условие выхода</span><strong><?= h(exitDescription($exitConfig)) ?></strong></div>
 <div class="stat"><span>Период бэктеста</span><strong><?= h($startDate) ?> — <?= h($endDate) ?></strong></div>
+<div class="stat"><label class="field">Стартовый баланс (USDT)<input id="strategy-starting-balance" form="publish-strategy-form" name="balance" type="number" min="0.01" max="1000000000" step="0.01" value="<?= h($balance) ?>" required></label></div>
 </div>
 <p class="note">Перед публикацией задайте ограничения. Для первой локальной paper версии нужны выключенный funding и режим без мартингейла. Выпущенный JSON хранится вне Git, рядом со SQLite состоянием.</p>
 <?php if (!$paperStrategySupported): ?><p class="status warning"><?= $includeFunding ? 'В выбранном расчёте включён funding. ' : '' ?><?= $martingaleMode !== 'none' ? 'Выбран режим мартингейла. ' : '' ?><?= $category !== 'USDT-FUTURES' ? 'Выбран неподдерживаемый рынок. ' : '' ?>Вернитесь в «Базовые проверки», отключите неподдерживаемые параметры и откройте эту страницу снова.</p><?php endif; ?>
-<form method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="publish">
+<form id="publish-strategy-form" method="post"><input type="hidden" name="csrf" value="<?= h($csrf) ?>"><input type="hidden" name="action" value="publish">
 <?php foreach ($postHidden as $name => $value): ?><input type="hidden" name="<?= h($name) ?>" value="<?= h((string) $value) ?>"><?php endforeach; ?>
 <div class="fields">
-<label class="field">Максимальный размер ордера (USDT)<input name="max_order_notional_usdt" type="number" min="0.01" step="0.01" value="<?= h($balance) ?>" required></label>
-<label class="field">Максимальная общая позиция (USDT)<input name="max_total_exposure_usdt" type="number" min="0.01" step="0.01" value="<?= h($balance) ?>" required></label>
-<label class="field">Максимальный убыток за день (USDT)<input name="max_daily_loss_usdt" type="number" min="0.01" step="0.01" value="<?= h((string) max(0.01, (float) $balance * 0.1)) ?>" required></label>
+<label class="field">Максимальный размер ордера (USDT)<input name="max_order_notional_usdt" type="number" min="0.01" step="0.01" value="<?= h($riskBalanceDefault) ?>" required></label>
+<label class="field">Максимальная общая позиция (USDT)<input name="max_total_exposure_usdt" type="number" min="0.01" step="0.01" value="<?= h($riskBalanceDefault) ?>" required></label>
+<label class="field">Максимальный убыток за день (USDT)<input name="max_daily_loss_usdt" type="number" min="0.01" step="0.01" value="<?= h((string) max(0.01, (float) $riskBalanceDefault * 0.1)) ?>" required></label>
 <label class="field">Максимум открытых позиций<input name="max_open_positions" type="number" min="1" max="100" step="1" value="1" required></label>
 </div><div class="actions"><button <?= !$isLocal || !$paperStrategySupported || ($status['service']['running'] ?? false) ? 'disabled' : '' ?>>Опубликовать эту выбранную стратегию</button></div>
 </form><?php endif; ?></section><?php endif; ?>

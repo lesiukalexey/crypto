@@ -77,6 +77,8 @@ $metadataFilePath = null;
 $workerLogPath = null;
 $workerProcess = null;
 $workerPipes = [];
+$pairSidecarTempPath = null;
+$pairSidecarHandle = null;
 try {
     // Large ticker sets can contain several million quote snapshots.
     set_time_limit(300);
@@ -84,11 +86,28 @@ try {
     $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     $tickerSetId = trim((string) ($_GET['ticker_set'] ?? ''));
     $symbols = selectedTickerSet($config, $tickerSetId)['symbols'];
+    if (isset($_GET['symbols']) && trim((string) $_GET['symbols']) !== '') {
+        $requestedSymbols = array_values(array_unique(array_filter(array_map('trim', explode(',', (string) $_GET['symbols'])))));
+        $allowedSymbols = array_fill_keys($symbols, true);
+        foreach ($requestedSymbols as $requestedSymbol) {
+            if (!isset($allowedSymbols[$requestedSymbol])) hedge_ranking_respond(['status'=>'error','message'=>'Список содержит тикер вне выбранного набора.'], 400);
+        }
+        sort($requestedSymbols, SORT_STRING);
+        $symbols = $requestedSymbols;
+    }
+    // Keep cache keys stable whether the symbols came from the set or from
+    // the selector page's explicit list.
+    sort($symbols, SORT_STRING);
     if (count($symbols) < 2) {
         hedge_ranking_respond(['status' => 'error', 'message' => 'Для рейтинга нужны минимум два тикера.'], 400);
     }
 
     $timezone = new DateTimeZone('Europe/Kyiv');
+    $intervalMode = (string) ($_GET['interval'] ?? 'none');
+    if (!in_array($intervalMode, ['none', 'week', 'two_weeks', 'month'], true)) $intervalMode = 'none';
+    $excludedIntervals = filter_var($_GET['exclude_last_intervals'] ?? '1', FILTER_VALIDATE_INT);
+    if ($excludedIntervals === false || $excludedIntervals < 0 || $excludedIntervals > 2) $excludedIntervals = 1;
+    if ($intervalMode === 'none') $excludedIntervals = 0;
     $startValue = (string) ($_GET['start_day'] ?? '2026-10-06');
     $endValue = (string) ($_GET['end_day'] ?? (new DateTimeImmutable('today', $timezone))->format('Y-m-d'));
     $startDay = DateTimeImmutable::createFromFormat('!Y-m-d', $startValue, $timezone);
@@ -106,6 +125,7 @@ try {
 
     $balance = (string) ($_GET['balance'] ?? '100');
     $feePercent = (string) ($_GET['fee'] ?? '0.06');
+    $includeAllPairs = (string) ($_GET['all_pairs'] ?? '') === '1';
     $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
     if (!preg_match($decimalPattern, $balance) || (float) $balance <= 0 || (float) $balance > 1000000000
         || !preg_match($decimalPattern, $feePercent) || (float) $feePercent < 0 || (float) $feePercent > 5) {
@@ -135,23 +155,38 @@ try {
         hedge_ranking_respond(['status' => 'error', 'message' => 'Не удалось подготовить кэш рейтинга пар.'], 500);
     }
     hedge_ranking_stream_start();
-    $revisionStatement = $pdo->prepare(
-        'SELECT symbol, MAX(id) AS max_id, COUNT(*) AS quote_count FROM quote_snapshots '
-        . 'WHERE category = ? AND symbol IN (' . implode(',', array_fill(0, count($symbols), '?')) . ') '
-        . 'AND received_at_utc >= ? AND received_at_utc < ? GROUP BY symbol ORDER BY symbol'
-    );
-    $revisionStatement->execute([$config['category'], ...$symbols, $startUtc, $endUtc]);
-    $quoteRevision = [];
-    $totalQuoteCount = 0;
-    foreach ($revisionStatement->fetchAll(PDO::FETCH_ASSOC) as $row) {
-        $quoteRevision[(string) $row['symbol']] = (int) $row['max_id'];
-        $totalQuoteCount += (int) $row['quote_count'];
+    $intervalWindows = [];
+    if ($intervalMode !== 'none') {
+        // Use the same calendar windows that the selected-pair table uses.
+        // Each pair then contributes only windows for which it has aligned quotes.
+        $firstDay = $startDay->setTime(0, 0);
+        $cursor = $endDay->setTime(0, 0);
+        $step = match ($intervalMode) { 'week'=>'P7D', 'two_weeks'=>'P14D', 'month'=>'P1M' };
+        while ($cursor > $firstDay) {
+            $previous = $cursor->sub(new DateInterval($step));
+            if ($previous < $firstDay) break;
+            $intervalWindows[] = ['start_ms'=>$previous->getTimestamp()*1000,'end_ms'=>$cursor->getTimestamp()*1000];
+            $cursor = $previous;
+        }
+        if ($intervalWindows === []) {
+            hedge_ranking_respond(['status'=>'error','message'=>'Для выбранного списка недостаточно общего периода котировок для этой разбивки.'], 422);
+        }
+    }
+    $rankingWindows = $intervalWindows;
+    if ($excludedIntervals > 0) {
+        if (count($intervalWindows) <= $excludedIntervals) {
+            hedge_ranking_respond(['status'=>'error','message'=>'После исключения последних интервалов не остаётся периода для рейтинга. Уменьшите число исключаемых интервалов.'], 422);
+        }
+        $rankingEndMs = (int) $intervalWindows[$excludedIntervals - 1]['start_ms'];
+        $rankingWindows = array_slice($intervalWindows, $excludedIntervals);
+        $endUtc = (new DateTimeImmutable('@' . intdiv($rankingEndMs, 1000)))->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v');
     }
     $cacheKey = hash('sha256', json_encode([
-        'hedge-ranking-numba-v2', $config['category'], $symbols, $startValue, $endValue,
-        (float) $balance, (float) $feePercent, $quoteRevision,
+        'hedge-ranking-numba-v14-ignore-recent-intervals', $config['category'], $tickerSetId, $symbols, $startValue, $endValue, $intervalMode, $excludedIntervals, $rankingWindows,
+        (float) $balance, (float) $feePercent,
     ], JSON_THROW_ON_ERROR));
     $cachePath = $cacheDir . '/hedge-' . $cacheKey . '.json';
+    $pairSidecarPath = $cachePath . '.pairs.json';
     $cacheLock = fopen($cachePath . '.lock', 'c');
     if ($cacheLock === false || !flock($cacheLock, LOCK_EX)) {
         if (is_resource($cacheLock)) fclose($cacheLock);
@@ -160,6 +195,13 @@ try {
     try {
         if (is_file($cachePath)) {
             $cached = json_decode((string) file_get_contents($cachePath), true);
+            if (is_array($cached) && ($cached['status'] ?? '') === 'ready') {
+                if ($includeAllPairs) {
+                    $cachedPairs = is_file($pairSidecarPath) ? json_decode((string) file_get_contents($pairSidecarPath), true) : null;
+                    if (is_array($cachedPairs)) $cached['pairs'] = $cachedPairs;
+                    else $cached = null;
+                }
+            }
             if (is_array($cached) && ($cached['status'] ?? '') === 'ready') {
                 $cached['cache_hit'] = true;
                 $cached['cached_at'] = gmdate(DATE_ATOM, (int) filemtime($cachePath));
@@ -172,7 +214,7 @@ try {
         fclose($cacheLock);
     }
     hedge_ranking_progress('В кэше рейтинга нет. В базе найдено '
-        . number_format($totalQuoteCount, 0, ',', ' ') . ' снимков котировок; загружаю их по тикерам через индекс.');
+        . 'снимки котировок; загружаю их по тикерам через индекс.');
     $quoteFilePath = tempnam($cacheDir, '.hedge-quotes-');
     if ($quoteFilePath === false) {
         throw new RuntimeException('Не удалось подготовить данные для Numba-расчёта.');
@@ -191,15 +233,11 @@ try {
     $symbolCount = count($symbols);
     $packedChunk = [];
     $loadedQuotes = 0;
-    $quoteLimitExceeded = false;
     try {
         foreach ($symbols as $symbolIndex => $symbol) {
             $statement->execute([$config['category'], $symbol, $startUtc, $endUtc]);
             while (($row = $statement->fetch()) !== false) {
-                if (++$quoteCounts[$symbol] > 100000) {
-                    $quoteLimitExceeded = true;
-                    break;
-                }
+                $quoteCounts[$symbol]++;
                 $date = new DateTimeImmutable((string) $row[0], new DateTimeZone('UTC'));
                 $packedChunk[] = pack(
                     'Pee',
@@ -213,9 +251,8 @@ try {
                 }
                 $loadedQuotes++;
                 if ($loadedQuotes % 10000 === 0) {
-                    $percent = $totalQuoteCount > 0 ? min(50, max(1, (int) ceil($loadedQuotes * 50 / $totalQuoteCount))) : 50;
                     hedge_ranking_progress('Загружены снимки котировок: ' . number_format($loadedQuotes, 0, ',', ' ')
-                        . ' / ' . number_format($totalQuoteCount, 0, ',', ' ') . " ({$percent}%).");
+                        . ' (' . (int) floor(($symbolIndex + 1) * 50 / $symbolCount) . '%).');
                     set_time_limit(300);
                 }
             }
@@ -225,23 +262,12 @@ try {
                 hedge_ranking_write_all($quoteFile, implode('', $packedChunk));
                 $packedChunk = [];
             }
-            if ($quoteLimitExceeded) break;
-            $loadedPercent = $totalQuoteCount > 0 ? min(50, max(1, (int) ceil($loadedQuotes * 50 / $totalQuoteCount))) : 50;
             hedge_ranking_progress('Загружен тикер ' . ($symbolIndex + 1) . ' / ' . $symbolCount
-                . '; снимков: ' . number_format($loadedQuotes, 0, ',', ' ') . ' / '
-                . number_format($totalQuoteCount, 0, ',', ' ') . " ({$loadedPercent}%).");
+                . '; снимков: ' . number_format($loadedQuotes, 0, ',', ' ') . '.');
         }
     } finally {
         $statement->closeCursor();
         fclose($quoteFile);
-    }
-    if ($quoteLimitExceeded) {
-        @unlink($quoteFilePath);
-        $quoteFilePath = null;
-        hedge_ranking_respond([
-            'status' => 'error',
-            'message' => 'Для ранжирования пар выбрано слишком много снимков. Сузьте диапазон дат и повторите расчёт.',
-        ], 400);
     }
     $pdo = null;
 
@@ -254,6 +280,7 @@ try {
         'counts' => array_values(array_map(static fn(string $symbol): int => $quoteCounts[$symbol], $symbols)),
         'balance' => (float) $balance,
         'fee_rate' => (float) $feePercent / 100.0,
+        'windows' => $rankingWindows,
     ];
     if (file_put_contents($metadataFilePath, json_encode($metadata, JSON_THROW_ON_ERROR)) === false) {
         throw new RuntimeException('Не удалось записать параметры Numba-расчёта.');
@@ -262,12 +289,20 @@ try {
     if ($workerLogPath === false) {
         throw new RuntimeException('Не удалось подготовить журнал Numba-расчёта.');
     }
+    $pairSidecarTempPath = tempnam($cacheDir, '.hedge-pair-metrics-');
+    if ($pairSidecarTempPath === false) throw new RuntimeException('Не удалось подготовить кэш метрик сочетаний.');
+    $pairSidecarHandle = fopen($pairSidecarTempPath, 'wb');
+    if ($pairSidecarHandle === false) throw new RuntimeException('Не удалось открыть кэш метрик сочетаний.');
+    hedge_ranking_write_all($pairSidecarHandle, '[');
+    $sidecarPairCount = 0;
 
     $pairs = [];
     $bestPair = null;
     $bestLongPairs = [];
     $bestShortPairs = [];
     $pairMatrix = array_fill(0, $symbolCount, array_fill(0, $symbolCount, null));
+    $ratioMatrix = $pairMatrix;
+    $maximumRatioMatrix = $pairMatrix;
     $orderedPairCount = $symbolCount * ($symbolCount - 1);
     $pairIndex = 0;
     $progressInterval = max(1, (int) ceil($orderedPairCount / 100));
@@ -304,8 +339,36 @@ try {
         $longIndex = (int) ($message['long_index'] ?? -1);
         $shortStart = (int) ($message['short_start'] ?? -1);
         $values = $message['values'] ?? null;
+        $maximums = $message['maximums'] ?? null;
+        $drawdowns = $message['drawdowns'] ?? null;
+        $worstIntervalValues = $message['worst_interval_values'] ?? null;
+        $worstIntervalMaximums = $message['worst_interval_maximums'] ?? null;
+        $worstIntervalDrawdowns = $message['worst_interval_drawdowns'] ?? null;
+        $worstIntervalIndices = $message['worst_interval_indices'] ?? null;
+        $minimumIntervalRatios = $message['minimum_interval_ratios'] ?? null;
+        $minimumIntervalRatioIndices = $message['minimum_interval_ratio_indices'] ?? null;
+        $maximumIntervalRatios = $message['maximum_interval_ratios'] ?? null;
+        $maximumIntervalRatioIndices = $message['maximum_interval_ratio_indices'] ?? null;
+        $maximumIntervalDrawdowns = $message['maximum_interval_drawdowns'] ?? null;
+        $maximumIntervalDrawdownIndices = $message['maximum_interval_drawdown_indices'] ?? null;
+        $drawdownPeaks = $message['drawdown_peaks'] ?? null;
+        $maximumIntervalDrawdownPeaks = $message['maximum_interval_drawdown_peaks'] ?? null;
         if ($longIndex < 0 || $longIndex >= $symbolCount || $shortStart < 0
-            || !is_array($values) || count($values) > $symbolCount - $shortStart) {
+            || !is_array($values) || !is_array($maximums) || !is_array($drawdowns)
+            || !is_array($worstIntervalValues) || !is_array($worstIntervalMaximums)
+            || !is_array($worstIntervalDrawdowns) || !is_array($worstIntervalIndices)
+            || !is_array($minimumIntervalRatios) || !is_array($minimumIntervalRatioIndices)
+            || !is_array($maximumIntervalRatios) || !is_array($maximumIntervalRatioIndices)
+            || !is_array($maximumIntervalDrawdowns) || !is_array($maximumIntervalDrawdownIndices)
+            || !is_array($drawdownPeaks) || !is_array($maximumIntervalDrawdownPeaks)
+            || count($maximums) !== count($values) || count($drawdowns) !== count($values)
+            || count($worstIntervalValues) !== count($values) || count($worstIntervalMaximums) !== count($values)
+            || count($worstIntervalDrawdowns) !== count($values) || count($worstIntervalIndices) !== count($values)
+            || count($minimumIntervalRatios) !== count($values) || count($minimumIntervalRatioIndices) !== count($values)
+            || count($maximumIntervalRatios) !== count($values) || count($maximumIntervalRatioIndices) !== count($values)
+            || count($maximumIntervalDrawdowns) !== count($values) || count($maximumIntervalDrawdownIndices) !== count($values)
+            || count($drawdownPeaks) !== count($values) || count($maximumIntervalDrawdownPeaks) !== count($values)
+            || count($values) > $symbolCount - $shortStart) {
             throw new RuntimeException('Numba-расчёт вернул некорректный блок пар.');
         }
         $longSymbol = $symbols[$longIndex];
@@ -314,21 +377,99 @@ try {
             if (!isset($symbols[$shortIndex]) || $longIndex === $shortIndex) continue;
             $shortSymbol = $symbols[$shortIndex];
             $netPnl = $value === null ? null : (float) $value;
+            $maximum = $maximums[$offset] === null ? null : (float) $maximums[$offset];
+            $drawdown = $drawdowns[$offset] === null ? null : (float) $drawdowns[$offset];
+            $drawdownPeak = $drawdownPeaks[$offset] === null ? null : (float) $drawdownPeaks[$offset];
+            $drawdownPercent = $drawdown !== null && $drawdownPeak !== null && (float) $balance + $drawdownPeak > 0
+                ? $drawdown / ((float) $balance + $drawdownPeak) * 100.0 : null;
+            $overallRatio = $maximum !== null && $drawdown !== null && $drawdown > 0 ? $maximum / $drawdown : null;
+            $worstIndex = (int) ($worstIntervalIndices[$offset] ?? -1);
+            $worstInterval = null;
+            if ($worstIndex >= 0 && isset($rankingWindows[$worstIndex]) && ($worstIntervalValues[$offset] ?? null) !== null) {
+                $worstNet = (float) $worstIntervalValues[$offset];
+                $worstMaximum = ($worstIntervalMaximums[$offset] ?? null) === null ? null : (float) $worstIntervalMaximums[$offset];
+                $worstDrawdown = ($worstIntervalDrawdowns[$offset] ?? null) === null ? null : (float) $worstIntervalDrawdowns[$offset];
+                $worstInterval = [
+                    'start_ms'=>(int) $rankingWindows[$worstIndex]['start_ms'],
+                    'end_ms'=>(int) $rankingWindows[$worstIndex]['end_ms'],
+                    'net_pnl'=>$worstNet,
+                    'maximum_net_pnl'=>$worstMaximum,
+                    'maximum_drawdown'=>$worstDrawdown,
+                    'peak_drawdown_ratio'=>$worstMaximum !== null && $worstDrawdown !== null && $worstDrawdown > 0 ? $worstMaximum / $worstDrawdown : null,
+                ];
+            }
+            $minimumRatioIndex = (int) ($minimumIntervalRatioIndices[$offset] ?? -1);
+            $minimumRatio = null;
+            if ($minimumRatioIndex >= 0 && isset($rankingWindows[$minimumRatioIndex]) && ($minimumIntervalRatios[$offset] ?? null) !== null) {
+                $minimumRatio = [
+                    'start_ms'=>(int) $rankingWindows[$minimumRatioIndex]['start_ms'],
+                    'end_ms'=>(int) $rankingWindows[$minimumRatioIndex]['end_ms'],
+                    'peak_drawdown_ratio'=>(float) $minimumIntervalRatios[$offset],
+                ];
+            }
+            $maximumRatioIndex = (int) ($maximumIntervalRatioIndices[$offset] ?? -1);
+            $maximumIntervalRatio = null;
+            if ($maximumRatioIndex >= 0 && isset($rankingWindows[$maximumRatioIndex]) && ($maximumIntervalRatios[$offset] ?? null) !== null) {
+                $maximumIntervalRatio = [
+                    'start_ms'=>(int) $rankingWindows[$maximumRatioIndex]['start_ms'],
+                    'end_ms'=>(int) $rankingWindows[$maximumRatioIndex]['end_ms'],
+                    'peak_drawdown_ratio'=>(float) $maximumIntervalRatios[$offset],
+                ];
+            }
+            $maximumDrawdownIndex = (int) ($maximumIntervalDrawdownIndices[$offset] ?? -1);
+            $maximumIntervalDrawdown = null;
+            if ($maximumDrawdownIndex >= 0 && isset($rankingWindows[$maximumDrawdownIndex]) && ($maximumIntervalDrawdowns[$offset] ?? null) !== null) {
+                $intervalDrawdown = (float) $maximumIntervalDrawdowns[$offset];
+                $intervalDrawdownPeak = ($maximumIntervalDrawdownPeaks[$offset] ?? null) === null ? null : (float) $maximumIntervalDrawdownPeaks[$offset];
+                $maximumIntervalDrawdown = [
+                    'start_ms'=>(int) $rankingWindows[$maximumDrawdownIndex]['start_ms'],
+                    'end_ms'=>(int) $rankingWindows[$maximumDrawdownIndex]['end_ms'],
+                    'maximum_drawdown'=>$intervalDrawdown,
+                    'maximum_drawdown_percent'=>$intervalDrawdownPeak !== null && (float) $balance + $intervalDrawdownPeak > 0
+                        ? $intervalDrawdown / ((float) $balance + $intervalDrawdownPeak) * 100.0 : null,
+                ];
+            }
+            $ratio = $intervalMode === 'none' ? $overallRatio : ($minimumRatio['peak_drawdown_ratio'] ?? null);
+            $maximumRatio = $intervalMode === 'none' ? $overallRatio : ($maximumIntervalRatio['peak_drawdown_ratio'] ?? null);
             $pair = [
                 'long_symbol' => $longSymbol,
                 'short_symbol' => $shortSymbol,
-                'net_pnl' => $netPnl,
+                'net_pnl' => $netPnl, 'maximum_net_pnl'=>$maximum, 'maximum_drawdown'=>$drawdown, 'peak_drawdown_ratio'=>$ratio,
+                'maximum_drawdown_percent'=>$drawdownPercent,
+                'maximum_interval_ratio'=>$maximumRatio,
+                'overall_peak_drawdown_ratio'=>$overallRatio,
+                'worst_interval'=>$worstInterval,
+                'minimum_ratio_interval'=>$minimumRatio,
+                'maximum_ratio_interval'=>$maximumIntervalRatio,
+                'maximum_drawdown_interval'=>$maximumIntervalDrawdown,
                 'return_percent' => $netPnl === null ? null : $netPnl / (float) $balance * 100.0,
             ];
             $pairMatrix[$longIndex][$shortIndex] = $netPnl;
+            $ratioMatrix[$longIndex][$shortIndex] = $ratio;
+            $maximumRatioMatrix[$longIndex][$shortIndex] = $maximumRatio;
             if (!isset($bestLongPairs[$longSymbol]) || hedge_ranking_pair_is_better($pair, $bestLongPairs[$longSymbol])) {
                 $bestLongPairs[$longSymbol] = $pair;
             }
             if (!isset($bestShortPairs[$shortSymbol]) || hedge_ranking_pair_is_better($pair, $bestShortPairs[$shortSymbol])) {
                 $bestShortPairs[$shortSymbol] = $pair;
             }
+            $compactPair = [
+                'long_symbol'=>$longSymbol,
+                'short_symbol'=>$shortSymbol,
+                'net_pnl'=>$netPnl,
+                'maximum_drawdown_percent'=>$drawdownPercent,
+                'overall_peak_drawdown_ratio'=>$overallRatio,
+                'peak_drawdown_ratio'=>$ratio,
+                'maximum_interval_ratio'=>$maximumRatio,
+                'worst_interval'=>$worstInterval === null ? null : ['net_pnl'=>$worstInterval['net_pnl']],
+                'maximum_drawdown_interval'=>$maximumIntervalDrawdown,
+                'return_percent'=>$netPnl === null ? null : $netPnl / (float) $balance * 100.0,
+            ];
+            $encodedCompactPair = json_encode($compactPair, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            hedge_ranking_write_all($pairSidecarHandle, ($sidecarPairCount > 0 ? ',' : '') . $encodedCompactPair);
+            $sidecarPairCount++;
             if ($orderedPairCount > 2000) {
-                if ($bestPair === null || ($netPnl !== null && ($bestPair['net_pnl'] === null || $netPnl > $bestPair['net_pnl']))) $bestPair = $pair;
+                if ($bestPair === null || hedge_ranking_pair_is_better($pair, $bestPair)) $bestPair = $pair;
             } else {
                 $pairs[] = $pair;
             }
@@ -348,21 +489,24 @@ try {
         $diagnostic = is_file($workerLogPath) ? trim((string) file_get_contents($workerLogPath)) : '';
         throw new RuntimeException('Numba-расчёт не завершился корректно.' . ($diagnostic === '' ? '' : ' ' . $diagnostic));
     }
+    $sidecarComplete = is_resource($pairSidecarHandle) && $sidecarPairCount === $orderedPairCount;
+    if ($sidecarComplete) {
+        try { hedge_ranking_write_all($pairSidecarHandle, ']'); }
+        catch (Throwable) { $sidecarComplete = false; }
+    }
+    if (is_resource($pairSidecarHandle) && !fclose($pairSidecarHandle)) $sidecarComplete = false;
+    $pairSidecarHandle = null;
+    if (!$sidecarComplete) {
+        throw new RuntimeException('Не удалось завершить кэш метрик сочетаний.');
+    }
+    if (!rename($pairSidecarTempPath, $pairSidecarPath)) throw new RuntimeException('Не удалось сохранить кэш метрик сочетаний.');
+    $pairSidecarTempPath = null;
     @unlink($quoteFilePath);
     @unlink($metadataFilePath);
     @unlink($workerLogPath);
     $quoteFilePath = $metadataFilePath = $workerLogPath = null;
     if ($orderedPairCount > 2000 && $bestPair !== null) $pairs[] = $bestPair;
-    $sortPairs = static function (array $left, array $right): int {
-        if ($left['net_pnl'] === null || $right['net_pnl'] === null) {
-            if ($left['net_pnl'] === null && $right['net_pnl'] !== null) return 1;
-            if ($left['net_pnl'] !== null && $right['net_pnl'] === null) return -1;
-        } elseif ($left['net_pnl'] !== $right['net_pnl']) {
-            return $right['net_pnl'] <=> $left['net_pnl'];
-        }
-        return [$left['long_symbol'], $left['short_symbol']]
-            <=> [$right['long_symbol'], $right['short_symbol']];
-    };
+    $sortPairs = 'hedge_ranking_compare_pairs';
     usort($pairs, $sortPairs);
     $bestLongPairs = array_values($bestLongPairs);
     $bestShortPairs = array_values($bestShortPairs);
@@ -378,6 +522,13 @@ try {
         'ordered_pair_count' => $orderedPairCount,
         'symbols' => $symbols,
         'pair_matrix' => $pairMatrix,
+        'pair_ratio_matrix' => $ratioMatrix,
+        'pair_maximum_ratio_matrix' => $maximumRatioMatrix,
+        'sort_metric' => 'maximum_interval_ratio',
+        'interval_mode' => $intervalMode,
+        'excluded_interval_count' => $excludedIntervals,
+        'ranking_end_day' => (new DateTimeImmutable($endUtc, new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d'),
+        'interval_windows' => $intervalWindows,
         'pairs' => $pairs,
         'best_long_pairs' => $bestLongPairs,
         'best_short_pairs' => $bestShortPairs,
@@ -396,6 +547,13 @@ try {
     } elseif (is_resource($writeLock)) {
         fclose($writeLock);
     }
+    if ($includeAllPairs) {
+        $allPairs = json_decode((string) file_get_contents($pairSidecarPath), true);
+        if (!is_array($allPairs) || count($allPairs) !== $orderedPairCount) {
+            throw new RuntimeException('Не удалось прочитать полный кэш метрик сочетаний.');
+        }
+        $result['pairs'] = $allPairs;
+    }
     hedge_ranking_result($result);
 } catch (Throwable $error) {
     if (is_resource($workerProcess)) @proc_terminate($workerProcess);
@@ -403,6 +561,7 @@ try {
         if (is_resource($pipe)) @fclose($pipe);
     }
     if (is_resource($workerProcess)) @proc_close($workerProcess);
+    if (is_resource($pairSidecarHandle)) @fclose($pairSidecarHandle);
     $diagnostic = is_string($workerLogPath) && is_file($workerLogPath)
         ? trim((string) file_get_contents($workerLogPath))
         : '';
@@ -410,15 +569,24 @@ try {
     foreach ([$quoteFilePath, $metadataFilePath, $workerLogPath] as $temporaryPath) {
         if (is_string($temporaryPath)) @unlink($temporaryPath);
     }
+    if (is_string($pairSidecarTempPath)) @unlink($pairSidecarTempPath);
     error_log('Hedge pair ranking failed: ' . $error->getMessage());
     hedge_ranking_respond(['status' => 'error', 'message' => 'Не удалось рассчитать доходность пар.'], 503);
 }
 
+function hedge_ranking_compare_pairs(array $left, array $right): int
+{
+    $a = $left['maximum_interval_ratio'] ?? $left['peak_drawdown_ratio']; $b = $right['maximum_interval_ratio'] ?? $right['peak_drawdown_ratio'];
+    if ($a === null && $b !== null) return 1;
+    if ($a !== null && $b === null) return -1;
+    if ($a !== null && $b !== null && $a !== $b) return $b <=> $a;
+    if ($left['net_pnl'] === null && $right['net_pnl'] !== null) return 1;
+    if ($left['net_pnl'] !== null && $right['net_pnl'] === null) return -1;
+    if ($left['net_pnl'] !== $right['net_pnl']) return $right['net_pnl'] <=> $left['net_pnl'];
+    return [$left['long_symbol'], $left['short_symbol']] <=> [$right['long_symbol'], $right['short_symbol']];
+}
+
 function hedge_ranking_pair_is_better(array $candidate, array $current): bool
 {
-    if ($candidate['net_pnl'] === null) return false;
-    if ($current['net_pnl'] === null) return true;
-    if ($candidate['net_pnl'] !== $current['net_pnl']) return $candidate['net_pnl'] > $current['net_pnl'];
-    return [$candidate['long_symbol'], $candidate['short_symbol']]
-        < [$current['long_symbol'], $current['short_symbol']];
+    return hedge_ranking_compare_pairs($candidate, $current) < 0;
 }

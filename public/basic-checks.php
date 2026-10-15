@@ -6,25 +6,6 @@ require_once __DIR__ . '/ranking-parameters.php';
 require_once __DIR__ . '/ranking-snapshot.php';
 require_once __DIR__ . '/ticker-settings-lib.php';
 $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
-$favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
-$favoriteView = false;
-$favorite = null;
-$favoriteId = trim((string) ($_GET['favorite_id'] ?? ''));
-if ($favoriteId !== '' && is_file($favoritesPath)) {
-    $storedFavorites = json_decode((string) file_get_contents($favoritesPath), true);
-    if (is_array($storedFavorites)) {
-        foreach ($storedFavorites as $storedFavorite) {
-            if (is_array($storedFavorite) && (string) ($storedFavorite['id'] ?? '') === $favoriteId
-                && in_array((string) ($storedFavorite['type'] ?? 'strategy'), ['strategy', 'global_top', 'ticker_leader'], true)
-                && is_array($storedFavorite['params'] ?? null)) {
-                $favorite = $storedFavorite;
-                $_GET = array_merge($_GET, $storedFavorite['params']);
-                $favoriteView = true;
-                break;
-            }
-        }
-    }
-}
 $tickerSetSelection = selectedTickerSet($config, trim((string) ($_GET['ticker_set'] ?? '')));
 $tickerSetId = $tickerSetSelection['id'];
 $tickerSetOptions = $tickerSetSelection['sets'];
@@ -39,13 +20,16 @@ $exitProfileConfig = json_decode((string) file_get_contents(dirname(__DIR__) . '
 $defaultRankingRanges = rankingParameters([], $entryProfileConfig, $exitProfileConfig)['ranges'];
 $rankingError = null;
 try {
-    $rankingParameters = rankingParameters($_GET, $entryProfileConfig, $exitProfileConfig);
-    $martingaleRiskLimits = rankingMartingaleRiskLimits($_GET);
-    $simulationCosts = rankingSimulationCosts($_GET);
+    $rankingRequest = $_GET;
+    $rankingRequest['entry_signal_mode'] = 'exact';
+    $rankingRequest['entry_direction_mode'] = 'follow';
+    $rankingRequest['exit_confirmation_mode'] = 'immediate';
+    $rankingRequest['exit_confirmation_snapshots'] = 60;
+    $rankingParameters = rankingParameters($rankingRequest, $entryProfileConfig, $exitProfileConfig);
+        $simulationCosts = rankingSimulationCosts($_GET);
 } catch (InvalidArgumentException $exception) {
     $rankingError = $exception->getMessage();
     $rankingParameters = rankingParameters([], $entryProfileConfig, $exitProfileConfig);
-    $martingaleRiskLimits = ['max_chain_loss' => '0', 'max_day_loss' => '0'];
     $simulationCosts = ['include_funding' => true, 'slippage_bps' => '0'];
 }
 $rankingRanges = $rankingParameters['ranges'];
@@ -111,16 +95,19 @@ if ($startDayAuto && $enabledSymbols !== []) {
         error_log('Unable to determine default Basic Checks start date: ' . $exception->getMessage());
     }
 }
+if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDayInput)
+    && preg_match('/^\d{4}-\d{2}-\d{2}$/', $endDayInput)
+    && $endDayInput < $startDayInput) {
+    $endDayInput = $startDayInput;
+}
 $defaultEntryConfig = in_array(10, $entryWindows, true) && in_array(1, $entryThresholdsTenthsPercent, true)
     ? 'entry:10:1' : 'entry:' . $entryWindows[0] . ':' . $entryThresholdsTenthsPercent[0];
-$entrySignalMode = $rankingParameters['worker']['entry_signal_mode'];
-$entryDirectionMode = $rankingParameters['worker']['entry_direction_mode'];
-$exitConfirmationMode = $rankingParameters['worker']['exit_confirmation_mode'];
-$exitConfirmationSnapshots = $rankingParameters['worker']['exit_confirmation_snapshots'];
-$takeConfirmationDelay = in_array($exitConfirmationMode, ['both_delayed', 'tp_delayed'], true) ? $exitConfirmationSnapshots : 0;
-$stopConfirmationDelay = in_array($exitConfirmationMode, ['both_delayed', 'sl_delayed'], true) ? $exitConfirmationSnapshots : 0;
-if ($entrySignalMode === 'within') $defaultEntryConfig .= ':within';
-if ($entryDirectionMode === 'reverse') $defaultEntryConfig .= ':reverse';
+$entrySignalMode = 'exact';
+$entryDirectionMode = 'follow';
+$exitConfirmationMode = 'immediate';
+$exitConfirmationSnapshots = 60;
+$takeConfirmationDelay = 0;
+$stopConfirmationDelay = 0;
 $entryConfig = (string) ($_GET['entry_config'] ?? $defaultEntryConfig);
 $saveMode = (string) ($_GET['save_mode'] ?? '1') !== '0';
 $balanceAutoManaged = (string) ($_GET['balance_auto'] ?? '0') === '1';
@@ -128,24 +115,12 @@ $startingBalance = trim((string) ($_GET['balance'] ?? '100'));
 $balanceAutoAdjustedFrom = null;
 $minimumOrderBudgetInfo = null;
 $feePercent = trim((string) ($_GET['fee'] ?? '0.06'));
-$martingaleMode = (string) ($_GET['martingale_mode'] ?? 'none');
-$martingaleContractRules = null;
-$martingaleOrderConstraintError = null;
-$martingaleTiming = (string) ($_GET['martingale_timing'] ?? 'immediate');
-$martingaleAttempts = filter_var($_GET['martingale_attempts'] ?? 3, FILTER_VALIDATE_INT);
-if (!in_array($martingaleMode, ['none', 'simple', 'reverse', 'simple_profit', 'reverse_profit'], true)) $martingaleMode = 'none';
-if (!in_array($martingaleTiming, ['immediate', 'rules'], true)) $martingaleTiming = 'immediate';
-if ($martingaleAttempts === false || $martingaleAttempts < 2 || $martingaleAttempts > 10) $martingaleAttempts = 3;
+$contractRules = null;
 $defaultFixedValue = (int) ($rankingRanges['fixed_tp']['values_basis_points'][0] ?? 10);
 $defaultExitConfig = 'fixed:' . $defaultFixedValue . ':' . $defaultFixedValue;
-$exitConfig = $exitConfirmationMode === 'none' ? 'none' : (string) ($_GET['exit_config'] ?? $defaultExitConfig);
-$selectTopRankedResult = $exitConfirmationMode !== 'none'
-    && (string) ($_GET['select_top_ranked_result'] ?? (!array_key_exists('entry_config', $_GET) ? '1' : '0')) === '1';
-$martingaleTargetPolicy = 'scaled';
-if (preg_match('/:(scaled|fixed)$/', $exitConfig, $policyMatch)) {
-    $martingaleTargetPolicy = $policyMatch[1];
-    $exitConfig = substr($exitConfig, 0, -strlen($policyMatch[0]));
-}
+$exitConfig = (string) ($_GET['exit_config'] ?? $defaultExitConfig);
+$selectTopRankedResult = (string) ($_GET['select_top_ranked_result'] ?? (!array_key_exists('entry_config', $_GET) ? '1' : '0')) === '1';
+$exitConfig = preg_replace('/:(scaled|fixed)$/', '', $exitConfig) ?? $exitConfig;
 $symbolSort = (string) ($_GET['symbol_sort'] ?? '') === 'profit' ? 'profit' : '';
 $combinationDetail = (string) ($_GET['combination_detail'] ?? '') === '1';
 $detailEntryLabel = trim((string) ($_GET['detail_entry_label'] ?? ''));
@@ -158,6 +133,7 @@ $detailUniverseSize = filter_var($_GET['detail_universe_size'] ?? null, FILTER_V
 $detailTradeCount = filter_var($_GET['detail_trade_count'] ?? null, FILTER_VALIDATE_INT);
 $viewParams = ['symbol' => $symbol, 'ticker_set' => $tickerSetId, 'start_day' => $startDayInput, 'start_day_auto' => $startDayAuto ? '1' : '0', 'end_day' => $endDayInput, 'balance' => $startingBalance, 'balance_auto' => $balanceAutoManaged ? '1' : '0', 'fee' => $feePercent, 'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'slippage_bps' => $simulationCosts['slippage_bps']];
 $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
+$dataExportUrl = 'settings.php?' . http_build_query(['page'=>'data-export','ticker_set'=>$tickerSetId,'start_day'=>$startDayInput,'end_day'=>$endDayInput]);
 $isCurrentDay = false;
 $decimalPattern = '/^\d{1,12}(?:\.\d{1,12})?$/';
 if (!preg_match($decimalPattern, $startingBalance) || (float) $startingBalance <= 0 || (float) $startingBalance > 1000000000) {
@@ -187,12 +163,8 @@ $entryFamilyPrefix = $entryDirection === 'both' ? '±' : ($entryDirection === 'l
 $entryLoadingLabel = 'Загружаю рейтинг порогов входа…';
 $profitTarget = bcdiv($startingBalance, '1000', 24);
 $lossThreshold = bcsub('0', $profitTarget, 24);
-$noExitSelected = $exitConfirmationMode === 'none';
-if ($noExitSelected) {
-    $profitTarget = null;
-    $lossThreshold = null;
-    $martingaleMode = 'none';
-} elseif (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
+if ($exitConfig === 'none') $exitConfig = $defaultExitConfig;
+if (preg_match('/^fixed:(\d+):(\d+)$/', $exitConfig, $matches)
     && rankingHasValue((int) $matches[1], $rankingRanges['fixed_tp'])
     && rankingHasValue((int) $matches[2], $rankingRanges['fixed_sl'])) {
     $profitTarget = bcdiv(bcmul($startingBalance, $matches[1], 24), '10000', 24);
@@ -212,15 +184,13 @@ $formatTargetPercent = static function (?string $amount, string $startingBalance
     if ($amount === null || bccomp($startingBalance, '0', 24) === 0) return '—';
     return rtrim(rtrim(number_format((float) bcmul(bcdiv($amount, $startingBalance, 24), '100', 12), 4, '.', ''), '0'), '.') . '%';
 };
-$selectedExitConfig = $exitConfig . ($martingaleMode !== 'none' ? ':' . $martingaleTargetPolicy : '');
+$selectedExitConfig = $exitConfig;
 $entrySelectorSeeds = [];
 foreach ($entryProfiles as $family => $profile) {
     foreach ($profile['windows'] as $window) {
         foreach ($profile['thresholds_tenths_percent'] as $threshold) {
             $prefix = $family === 'both' ? 'entry' : 'entry:' . $family;
             $id = $prefix . ':' . $window . ':' . $threshold;
-            if ($entrySignalMode === 'within') $id .= ':within';
-            if ($entryDirectionMode === 'reverse') $id .= ':reverse';
             $familyLabel = $family === 'both' ? '±' : ($family === 'long' ? '+' : '−');
             $entrySelectorSeeds[] = [
                 'id' => $id,
@@ -239,23 +209,19 @@ foreach ($rankingParameters['worker']['immediate_directions'] as $direction) {
 }
 $exitSelectorSeeds = [];
 $exitSelectorSeeds[] = ['id' => 'none', 'label' => 'Без выхода · удерживать до конца периода', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
-$exitPolicySuffix = $martingaleMode !== 'none' ? ':' . $martingaleTargetPolicy : '';
 foreach (rankingValues($rankingRanges['fixed_tp']) as $take) {
     foreach (rankingValues($rankingRanges['fixed_sl']) as $stop) {
         $takeLabel = number_format($take / 100, 2, ',', ' ');
         $stopLabel = number_format($stop / 100, 2, ',', ' ');
-        $exitSelectorSeeds[] = ['id' => 'fixed:' . $take . ':' . $stop . $exitPolicySuffix, 'label' => 'TP ' . $takeLabel . '% / SL ' . $stopLabel . '%', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
+        $exitSelectorSeeds[] = ['id' => 'fixed:' . $take . ':' . $stop, 'label' => 'TP ' . $takeLabel . '% / SL ' . $stopLabel . '%', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
     }
 }
 foreach (rankingValues($rankingRanges['profit']) as $take) {
-    $exitSelectorSeeds[] = ['id' => 'profit:' . $take . $exitPolicySuffix, 'label' => 'TP ' . number_format($take / 10, 1, ',', ' ') . '% · без SL', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
+    $exitSelectorSeeds[] = ['id' => 'profit:' . $take, 'label' => 'TP ' . number_format($take / 10, 1, ',', ' ') . '% · без SL', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
 }
 foreach (rankingValues($rankingRanges['loss']) as $stop) {
-    $exitSelectorSeeds[] = ['id' => 'loss:' . $stop . $exitPolicySuffix, 'label' => 'SL ' . number_format($stop / 10, 1, ',', ' ') . '% · без TP', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
+    $exitSelectorSeeds[] = ['id' => 'loss:' . $stop, 'label' => 'SL ' . number_format($stop / 10, 1, ',', ' ') . '% · без TP', 'pnl' => null, 'snapshots' => $exitConfirmationSnapshots];
 }
-$favoriteEntryLabel = $favoriteView ? trim((string) ($favorite['entry_label'] ?? $entryConfig)) : '';
-$favoriteExitLabel = $favoriteView ? trim((string) ($favorite['exit_label'] ?? $selectedExitConfig)) : '';
-$favoriteSymbolDisabled = $favoriteView && !in_array(strtoupper((string) ($favorite['params']['symbol'] ?? '')), $enabledSymbols, true);
 
 try {
     $startDay = DateTimeImmutable::createFromFormat('!Y-m-d', $startDayInput, $timezone);
@@ -280,9 +246,7 @@ try {
         $symbolWasSubmitted = false;
     }
 
-    if ($favoriteSymbolDisabled) {
-        $error = 'Этот тикер выключен в настройках и не участвует в расчётах.';
-    } elseif ($symbol !== '') {
+    if ($symbol !== '') {
         $password = getenv($db['password_env']) ?: '';
         if ($password === '') {
             throw new RuntimeException('Не задан пароль подключения к MySQL.');
@@ -294,7 +258,7 @@ try {
             [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_EMULATE_PREPARES => false]
         );
         $demoAvailableSymbols = array_fill_keys(loadDemoTickerAvailability($config, $pdo), true);
-            $martingaleContractRules = rankingCurrentBitgetContract($config['category'], $symbol);
+            $contractRules = rankingCurrentBitgetContract($config['category'], $symbol);
             $latestOrderQuoteStatement = $pdo->prepare(
                 'SELECT bid_price, ask_price FROM quote_snapshots '
                 . 'WHERE category = ? AND symbol = ? ORDER BY received_at_utc DESC, id DESC LIMIT 1'
@@ -305,7 +269,7 @@ try {
             if (is_array($latestOrderQuote)) {
                 $referencePrice = bccomp((string) $latestOrderQuote['ask_price'], (string) $latestOrderQuote['bid_price'], 24) >= 0
                     ? (string) $latestOrderQuote['ask_price'] : (string) $latestOrderQuote['bid_price'];
-                $minimumOrderBudgetInfo = rankingMinimumOrderBudget($martingaleContractRules, $referencePrice, bcdiv($feePercent, '100', 24));
+                $minimumOrderBudgetInfo = rankingMinimumOrderBudget($contractRules, $referencePrice, bcdiv($feePercent, '100', 24));
                 $balanceFloor = $minimumOrderBudgetInfo['minimum_balance_usdt'];
                 if ($balanceAutoManaged || bccomp($startingBalance, $balanceFloor, 2) < 0) {
                     $balanceAutoAdjustedFrom = $startingBalance;
@@ -315,9 +279,9 @@ try {
                     $hedgingUrl = './hedging.php?' . http_build_query($viewParams);
                 }
             }
-            if ($martingaleContractRules['symbolStatus'] !== 'normal'
-                || bccomp((string) $martingaleContractRules['minLever'], '1', 12) > 0
-                || bccomp((string) $martingaleContractRules['maxLever'], '1', 12) < 0) {
+            if ($contractRules['symbolStatus'] !== 'normal'
+                || bccomp((string) $contractRules['minLever'], '1', 12) > 0
+                || bccomp((string) $contractRules['maxLever'], '1', 12) < 0) {
                 throw new RuntimeException('Текущие правила Bitget не разрешают открыть эту пару с плечом 1×.');
             }
             if (!is_dir($rankingCacheDir) && !mkdir($rankingCacheDir, 0700, true) && !is_dir($rankingCacheDir)) {
@@ -329,13 +293,8 @@ try {
             );
             $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config, $tickerSetId);
             $maxQuoteId = (int) ($snapshotIds[$symbol] ?? 0);
-            if ($martingaleMode === 'none') {
-                $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc < ? ORDER BY received_at_utc, id");
-                $stmt->execute([$config['category'], $symbol, $maxQuoteId, $endUtc]);
-            } else {
-                $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc >= ? AND received_at_utc < ? ORDER BY received_at_utc, id");
-                $stmt->execute([$config['category'], $symbol, $maxQuoteId, $startUtc, $endUtc]);
-            }
+            $stmt = $pdo->prepare("SELECT id, received_at_utc, bid_price, ask_price, last_price, quote_source FROM quote_snapshots WHERE category = ? AND symbol = ? AND (id <= ? OR quote_source = 'historical_candle_close') AND received_at_utc < ? ORDER BY received_at_utc, id");
+            $stmt->execute([$config['category'], $symbol, $maxQuoteId, $endUtc]);
             $rows = $stmt->fetchAll();
     }
 } catch (Throwable $e) {
@@ -351,11 +310,11 @@ $ledgerFingerprints = [];
 $ledgerQuoteCounts = [];
 $ledgerLastQuotes = [];
 $ledgerSourceDay = null;
-if ($martingaleMode === 'none' && $rows !== [] && $error === null) {
+if ($rows !== [] && $error === null) {
     $closedTradeLedgerKey = hash('sha256', json_encode([
         'closed-trade-ledger-v6-range-reset-at-start', $config['category'], $symbol, $startDayInput, $startingBalance,
         $feePercent, $entryConfig, $selectedExitConfig, $exitConfirmationMode, $exitConfirmationSnapshots,
-        ...rankingSimulationCostsIdentity($simulationCosts), $martingaleContractRules,
+        ...rankingSimulationCostsIdentity($simulationCosts), $contractRules,
     ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
     $prefixContext = hash_init('sha256');
     $quoteCount = 0;
@@ -598,47 +557,18 @@ $hasContinuousWindow = static function (int $index) use ($rows, $momentumLookbac
     }
     return true;
 };
-$findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $momentumLookback, $momentumThreshold, $entryDirection, $entrySignalMode, $entryDirectionMode, $hasContinuousWindow): ?array {
+$findMomentumEntry = static function (int $fromIndex) use ($rows, $rowCount, $momentumLookback, $momentumThreshold, $entryDirection, $hasContinuousWindow): ?array {
     for ($i = max($fromIndex, $momentumLookback + 1); $i < $rowCount - 1; $i++) {
         if (!$hasContinuousWindow($i) || !$hasContinuousWindow($i - 1)) continue;
         $priceNow = (float) $rows[$i]['last_price'];
         $pricePrevious = (float) $rows[$i - 1]['last_price'];
-        if ($entrySignalMode === 'within') {
-            $move = -INF;
-            $previousMove = -INF;
-            $negativeMove = INF;
-            $previousNegativeMove = INF;
-            for ($offset = 1; $offset <= $momentumLookback; $offset++) {
-                $base = (float) $rows[$i - $offset]['last_price'];
-                $previousBase = (float) $rows[$i - 1 - $offset]['last_price'];
-                if ($base <= 0 || $previousBase <= 0) continue;
-                $relative = ($priceNow / $base - 1) * 100;
-                $previousRelative = ($pricePrevious / $previousBase - 1) * 100;
-                $move = max($move, $relative);
-                $previousMove = max($previousMove, $previousRelative);
-                $negativeMove = min($negativeMove, $relative);
-                $previousNegativeMove = min($previousNegativeMove, $previousRelative);
-            }
-        } else {
-            $priceBefore = (float) $rows[$i - $momentumLookback]['last_price'];
-            $pricePreviousBefore = (float) $rows[$i - $momentumLookback - 1]['last_price'];
-            if ($priceBefore <= 0 || $pricePreviousBefore <= 0) continue;
-            $move = ($priceNow / $priceBefore - 1) * 100;
-            $previousMove = ($pricePrevious / $pricePreviousBefore - 1) * 100;
-            $negativeMove = $move;
-            $previousNegativeMove = $previousMove;
-        }
-        if ($entryDirection !== 'short' && $move >= $momentumThreshold && $previousMove < $momentumThreshold) return [$i, $entryDirectionMode === 'reverse'];
-        if ($entryDirection !== 'long' && $negativeMove <= -$momentumThreshold && $previousNegativeMove > -$momentumThreshold) return [$i, $entryDirectionMode !== 'reverse'];
-    }
-    return null;
-};
-$findCompatibleEntry = static function (int $fromIndex, bool $wantedShort) use ($findMomentumEntry, $isImmediateEntry, $immediateDirection): ?array {
-    if ($isImmediateEntry) return null;
-    $cursor = $fromIndex;
-    while (($candidate = $findMomentumEntry($cursor)) !== null) {
-        if ($candidate[1] === $wantedShort) return $candidate;
-        $cursor = $candidate[0] + 1;
+        $priceBefore = (float) $rows[$i - $momentumLookback]['last_price'];
+        $pricePreviousBefore = (float) $rows[$i - $momentumLookback - 1]['last_price'];
+        if ($priceBefore <= 0 || $pricePreviousBefore <= 0) continue;
+        $move = ($priceNow / $priceBefore - 1) * 100;
+        $previousMove = ($pricePrevious / $pricePreviousBefore - 1) * 100;
+        if ($entryDirection !== 'short' && $move >= $momentumThreshold && $previousMove < $momentumThreshold) return [$i, false];
+        if ($entryDirection !== 'long' && $move <= -$momentumThreshold && $previousMove > -$momentumThreshold) return [$i, true];
     }
     return null;
 };
@@ -648,311 +578,6 @@ if ($error !== null) {
 } elseif ($cachedStandardTradeEvents !== null) {
     $trades = $cachedStandardTradeEvents;
     $balance = $startingBalance;
-} elseif ($martingaleMode !== 'none') {
-    $chainAttempt = 0;
-    $appendLegTrades = static function (array $legs, int $exitIndex, string $reason, string &$currentBalance) use (&$trades, &$chainAttempt, $executionRows, $feeRate, $martingaleMode): void {
-        $exit = $executionRows[$exitIndex];
-        foreach ($legs as $leg) {
-            $short = $leg['is_short'];
-            $exitPrice = $short ? $exit['ask_price'] : $exit['bid_price'];
-            $move = $short ? bcsub($leg['entry_price'], $exitPrice, 24) : bcsub($exitPrice, $leg['entry_price'], 24);
-            $gross = bcmul($leg['quantity'], $move, 24);
-            $exitFee = bcmul(bcmul($leg['quantity'], $exitPrice, 24), $feeRate, 24);
-            $net = bcadd(bcsub(bcsub($gross, $leg['entry_fee'], 24), $exitFee, 24), $leg['funding_paid'], 24);
-            $currentBalance = bcadd($currentBalance, $net, 24);
-            $trades[] = ['entry' => $leg['entry'], 'exit' => $exit, 'quantity' => $leg['quantity'], 'entry_price' => $leg['entry_price'], 'exit_price' => $exitPrice, 'entry_fee' => $leg['entry_fee'], 'exit_fee' => $exitFee, 'gross' => $gross, 'funding' => $leg['funding_paid'], 'net' => $net, 'balance' => $currentBalance, 'reason' => $reason, 'is_short' => $short, 'chain_id' => $chainAttempt];
-        }
-    };
-    $finalScale = (string) (2 ** ($martingaleAttempts - 1));
-    if (str_ends_with($martingaleMode, '_profit') || $lossThreshold === null) {
-        $baseStake = bcdiv($startingBalance, $finalScale, 24);
-    } else {
-        $risk = bcmul(bccomp($lossThreshold, '0', 24) < 0 ? bcsub('0', $lossThreshold, 24) : $lossThreshold, '1', 24);
-        if ($martingaleMode === 'simple') {
-            $previousScale = (string) (2 ** ($martingaleAttempts - 2));
-            $reservedLoss = bcmul($risk, $martingaleTargetPolicy === 'scaled' ? $previousScale : '1', 24);
-            $requiredPerBase = bcadd($finalScale, bcmul($feeRate, $previousScale, 24), 24);
-        } else {
-            $lossSteps = $martingaleTargetPolicy === 'scaled'
-                ? bcsub($finalScale, '1', 24)
-                : (string) ($martingaleAttempts - 1);
-            $reservedLoss = bcmul($risk, $lossSteps, 24);
-            $requiredPerBase = bcmul($finalScale, bcadd('1', $feeRate, 24), 24);
-        }
-        $availableForStakes = bcsub($startingBalance, $reservedLoss, 24);
-        $baseStake = bccomp($availableForStakes, '0', 24) > 0 ? bcdiv($availableForStakes, $requiredPerBase, 24) : '0';
-    }
-    $dailyRealizedByDay = [];
-    while (bccomp($balance, '0', 24) > 0 && $chainAttempt < 100000 && $martingaleOrderConstraintError === null) {
-        $signal = $isImmediateEntry
-            ? ($chainAttempt === 0 && $rangeStartQuoteIndex < $rowCount - 1 ? [$rangeStartQuoteIndex, $immediateDirection === 'short'] : null)
-            : $findMomentumEntry($tradeEntryIndex);
-        if ($signal === null) break;
-        [$tradeEntryIndex, $tradeIsShort] = $signal;
-        $entryDay = (new DateTimeImmutable($executionRows[$tradeEntryIndex]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
-        if ((float) $martingaleRiskLimits['max_day_loss'] > 0
-            && isset($dailyRealizedByDay[$entryDay])
-            && bccomp($dailyRealizedByDay[$entryDay], bcsub('0', $martingaleRiskLimits['max_day_loss'], 24), 24) <= 0) {
-            $tradeEntryIndex++;
-            continue;
-        }
-        $entryPrice = $tradeIsShort ? $executionRows[$tradeEntryIndex]['bid_price'] : $executionRows[$tradeEntryIndex]['ask_price'];
-        if (bccomp($entryPrice, '0', 24) <= 0) { $tradeEntryIndex++; continue; }
-        $availableInitialStake = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
-        $stake = bccomp($baseStake, $availableInitialStake, 24) < 0 ? $baseStake : $availableInitialStake;
-        $chainBaseStake = $stake;
-        $chainRealizedPnl = '0';
-        $legs = [];
-        $positionNotional = '0';
-        $stage = 1;
-        $addLeg = static function (int $index, bool $short, string &$notional) use (&$legs, &$positionNotional, &$martingaleOrderConstraintError, $executionRows, $feeRate, $martingaleContractRules): bool {
-            $entry = $executionRows[$index];
-            $price = $short ? $entry['bid_price'] : $entry['ask_price'];
-            if (bccomp($price, '0', 24) <= 0 || bccomp($notional, '0', 24) <= 0) return false;
-            $reservedBalance = bcadd($notional, bcmul($notional, $feeRate, 24), 24);
-            $order = rankingQuantizeBitgetMarketOrder($notional, $price, $martingaleContractRules ?? [], $feeRate, $reservedBalance);
-            if ($order === null) {
-                $martingaleOrderConstraintError = 'Один из ордеров мартингейла не проходит текущие правила Bitget или не помещается в доступный баланс. Вариант исключён.';
-                return false;
-            }
-            $notional = $order['notional'];
-            $qty = $order['quantity'];
-            $entryFee = bcmul($notional, $feeRate, 24);
-            $legs[] = ['entry' => $entry, 'entry_price' => $price, 'quantity' => $qty, 'entry_fee' => $entryFee, 'notional' => $notional, 'is_short' => $short, 'entry_timestamp' => (new DateTimeImmutable($entry['received_at_utc'], new DateTimeZone('UTC')))->getTimestamp(), 'funding_paid' => '0'];
-            $positionNotional = bcadd($positionNotional, $notional, 24);
-            return true;
-        };
-        if (!$addLeg($tradeEntryIndex, $tradeIsShort, $stake)) break;
-        $chainBaseStake = $stake;
-        $fundingCursor = 0;
-        while ($fundingCursor < count($fundingEvents) && $fundingEvents[$fundingCursor]['quote_index'] <= $tradeEntryIndex) $fundingCursor++;
-
-        while ($legs !== []) {
-            $exitIndex = $rowCount - 1;
-            $exitReason = $isCurrentDay ? 'Последний доступный снимок' : 'Конец выбранного периода';
-            $stageScale = bcdiv($positionNotional, $chainBaseStake, 24);
-            $targetScale = $martingaleTargetPolicy === 'scaled' ? $stageScale : '1';
-            $stageTarget = $profitTarget === null ? null : bcmul($profitTarget, $targetScale, 24);
-            $stageLoss = $lossThreshold === null ? null : bcmul($lossThreshold, $targetScale, 24);
-            $takeConfirmationIndex = null;
-            $stopConfirmationIndex = null;
-            $foundStop = false;
-            $hitRiskLimit = false;
-            for ($i = $tradeEntryIndex + 1; $i < $rowCount; $i++) {
-                while ($fundingCursor < count($fundingEvents) && $fundingEvents[$fundingCursor]['quote_index'] <= $i) {
-                    $event = $fundingEvents[$fundingCursor];
-                    foreach ($legs as &$fundingLeg) {
-                        if ($fundingLeg['entry_timestamp'] < $event['timestamp']) {
-                            $fundingLeg['funding_paid'] = bcadd($fundingLeg['funding_paid'], $fundingCashflowAtEvent($fundingLeg['quantity'], $tradeIsShort, $event), 24);
-                        }
-                    }
-                    unset($fundingLeg);
-                    $fundingCursor++;
-                }
-                $exitQuote = $tradeIsShort ? $executionRows[$i]['ask_price'] : $executionRows[$i]['bid_price'];
-                $grossNow = '0'; $entryFeesNow = '0'; $totalQty = '0';
-                $fundingNetNow = '0';
-                foreach ($legs as $leg) {
-                    $move = $tradeIsShort ? bcsub($leg['entry_price'], $exitQuote, 24) : bcsub($exitQuote, $leg['entry_price'], 24);
-                    $grossNow = bcadd($grossNow, bcmul($leg['quantity'], $move, 24), 24);
-                    $entryFeesNow = bcadd($entryFeesNow, $leg['entry_fee'], 24);
-                    $totalQty = bcadd($totalQty, $leg['quantity'], 24);
-                    $fundingNetNow = bcadd($fundingNetNow, $leg['funding_paid'], 24);
-                }
-                $exitFeeNow = bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24);
-                $netNow = bcadd(bcsub(bcsub($grossNow, $entryFeesNow, 24), $exitFeeNow, 24), $fundingNetNow, 24);
-                $quoteDay = (new DateTimeImmutable($executionRows[$i]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
-                $projectedChainPnl = bcadd($chainRealizedPnl, $netNow, 24);
-                $projectedDayPnl = bcadd((string) ($dailyRealizedByDay[$quoteDay] ?? '0'), $projectedChainPnl, 24);
-                if ((float) $martingaleRiskLimits['max_chain_loss'] > 0
-                    && bccomp($projectedChainPnl, bcsub('0', $martingaleRiskLimits['max_chain_loss'], 24), 24) <= 0) {
-                    $exitIndex = $i;
-                    $exitReason = 'Мартингейл · лимит убытка цепочки';
-                    $hitRiskLimit = true;
-                    break;
-                }
-                if ((float) $martingaleRiskLimits['max_day_loss'] > 0
-                    && bccomp($projectedDayPnl, bcsub('0', $martingaleRiskLimits['max_day_loss'], 24), 24) <= 0) {
-                    $exitIndex = $i;
-                    $exitReason = 'Мартингейл · дневной лимит убытка';
-                    $hitRiskLimit = true;
-                    break;
-                }
-                $takeCondition = $stageTarget !== null && bccomp($netNow, $stageTarget, 24) >= 0;
-                $stopCondition = $stageLoss !== null && bccomp($netNow, $stageLoss, 24) <= 0;
-                if ($takeCondition && $takeConfirmationIndex === null) $takeConfirmationIndex = $i + $takeConfirmationDelay;
-                if ($stopCondition && $stopConfirmationIndex === null) $stopConfirmationIndex = $i + $stopConfirmationDelay;
-                if ($takeConfirmationDelay === 0 && $takeCondition) {
-                    $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $formatTargetPercent($stageTarget, $startingBalance) . ' от стартового баланса';
-                    $foundStop = str_ends_with($martingaleMode, '_profit');
-                    break;
-                }
-                if ($stopConfirmationDelay === 0 && $stopCondition) {
-                    $exitIndex = $i; $exitReason = 'Мартингейл · стоп чистого убытка ' . $formatTargetPercent(ltrim($stageLoss, '-'), $startingBalance) . ' от стартового баланса';
-                    $foundStop = !str_ends_with($martingaleMode, '_profit');
-                    break;
-                }
-                if ($takeConfirmationIndex !== null && $i >= $takeConfirmationIndex) {
-                    if ($takeCondition) {
-                        $exitIndex = $i; $exitReason = 'Мартингейл · цель чистой прибыли ' . $formatTargetPercent($stageTarget, $startingBalance) . ' от стартового баланса';
-                        $foundStop = str_ends_with($martingaleMode, '_profit');
-                        break;
-                    }
-                    $takeConfirmationIndex = null;
-                }
-                if ($stopConfirmationIndex !== null && $i >= $stopConfirmationIndex) {
-                    if ($stopCondition) {
-                        $exitIndex = $i; $exitReason = 'Мартингейл · стоп чистого убытка ' . $formatTargetPercent(ltrim($stageLoss, '-'), $startingBalance) . ' от стартового баланса';
-                        $foundStop = !str_ends_with($martingaleMode, '_profit');
-                        break;
-                    }
-                    $stopConfirmationIndex = null;
-                }
-            }
-            if ($hitRiskLimit || !$foundStop || $stage >= $martingaleAttempts) {
-                $balanceBeforeClose = $balance;
-                $appendLegTrades($legs, $exitIndex, $exitReason, $balance);
-                $closedNet = bcsub($balance, $balanceBeforeClose, 24);
-                $exitDay = (new DateTimeImmutable($executionRows[$exitIndex]['received_at_utc'], new DateTimeZone('UTC')))->setTimezone($timezone)->format('Y-m-d');
-                $dailyRealizedByDay[$exitDay] = bcadd(
-                    (string) ($dailyRealizedByDay[$exitDay] ?? '0'),
-                    bcadd($chainRealizedPnl, $closedNet, 24),
-                    24,
-                );
-                $legs = [];
-                $tradeEntryIndex = $exitIndex + 1;
-                break;
-            }
-
-            $exitQuote = $tradeIsShort ? $executionRows[$exitIndex]['ask_price'] : $executionRows[$exitIndex]['bid_price'];
-            $grossNow = '0'; $entryFeesNow = '0'; $totalQty = '0'; $fundingNetNow = '0';
-            foreach ($legs as $leg) {
-                $move = $tradeIsShort ? bcsub($leg['entry_price'], $exitQuote, 24) : bcsub($exitQuote, $leg['entry_price'], 24);
-                $grossNow = bcadd($grossNow, bcmul($leg['quantity'], $move, 24), 24);
-                $entryFeesNow = bcadd($entryFeesNow, $leg['entry_fee'], 24);
-                $totalQty = bcadd($totalQty, $leg['quantity'], 24);
-                $fundingNetNow = bcadd($fundingNetNow, $leg['funding_paid'], 24);
-            }
-            $unrealized = bcadd(bcsub(bcsub($grossNow, $entryFeesNow, 24), bcmul(bcmul($totalQty, $exitQuote, 24), $feeRate, 24), 24), $fundingNetNow, 24);
-            if ($martingaleMode === 'simple_profit') {
-                $closedNotional = $positionNotional;
-                $appendLegTrades($legs, $exitIndex, $exitReason, $balance);
-                $legs = [];
-                $nextIndex = $exitIndex;
-                if ($martingaleTiming === 'rules') {
-                    $nextSignal = $findCompatibleEntry($exitIndex + 1, $tradeIsShort);
-                    if ($nextSignal === null) { $tradeEntryIndex = $rowCount; break; }
-                    [$nextIndex] = $nextSignal;
-                }
-                $nextStake = bcmul($closedNotional, '2', 24);
-                $availableStake = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
-                if (bccomp($nextStake, $availableStake, 24) > 0) $nextStake = $availableStake;
-                if (!$addLeg($nextIndex, $tradeIsShort, $nextStake)) { $tradeEntryIndex = $exitIndex + 1; break; }
-                $positionNotional = $nextStake;
-                $stage++;
-                $tradeEntryIndex = $nextIndex;
-                continue;
-            }
-
-            if ($martingaleMode === 'simple') {
-                $equity = bcadd($balance, $unrealized, 24);
-                $freeMargin = bcsub($equity, $positionNotional, 24);
-                $maxAffordable = bcdiv($freeMargin, bcadd('1', $feeRate, 24), 24);
-                $addNotional = bccomp($maxAffordable, $positionNotional, 24) < 0 ? $maxAffordable : $positionNotional;
-                if ($martingaleTiming === 'rules') {
-                    $nextSignal = $findCompatibleEntry($exitIndex + 1, $tradeIsShort);
-                    $nextIndex = $nextSignal === null ? $rowCount : $nextSignal[0];
-                    $takeBeforeSignal = null;
-                    if ($stageTarget !== null) {
-                        for ($i = $exitIndex + 1; $i < min($nextIndex, $rowCount); $i++) {
-                            while ($fundingCursor < count($fundingEvents) && $fundingEvents[$fundingCursor]['quote_index'] <= $i) {
-                                $event = $fundingEvents[$fundingCursor];
-                                foreach ($legs as &$fundingLeg) {
-                                    if ($fundingLeg['entry_timestamp'] < $event['timestamp']) {
-                                        $fundingLeg['funding_paid'] = bcadd($fundingLeg['funding_paid'], $fundingCashflowAtEvent($fundingLeg['quantity'], $tradeIsShort, $event), 24);
-                                    }
-                                }
-                                unset($fundingLeg);
-                                $fundingCursor++;
-                            }
-                            $waitQuote = $tradeIsShort ? $executionRows[$i]['ask_price'] : $executionRows[$i]['bid_price'];
-                            $waitGross = '0'; $waitEntryFees = '0'; $waitQuantity = '0';
-                            foreach ($legs as $leg) {
-                                $waitMove = $tradeIsShort ? bcsub($leg['entry_price'], $waitQuote, 24) : bcsub($waitQuote, $leg['entry_price'], 24);
-                                $waitGross = bcadd($waitGross, bcmul($leg['quantity'], $waitMove, 24), 24);
-                                $waitEntryFees = bcadd($waitEntryFees, $leg['entry_fee'], 24);
-                                $waitQuantity = bcadd($waitQuantity, $leg['quantity'], 24);
-                            }
-                            $waitNet = bcsub(
-                                bcsub($waitGross, $waitEntryFees, 24),
-                                bcmul(bcmul($waitQuantity, $waitQuote, 24), $feeRate, 24),
-                                24,
-                            );
-                            foreach ($legs as $leg) $waitNet = bcadd($waitNet, $leg['funding_paid'], 24);
-                            if (bccomp($waitNet, $stageTarget, 24) >= 0) {
-                                $takeBeforeSignal = $i;
-                                break;
-                            }
-                        }
-                    }
-                    if ($takeBeforeSignal !== null) {
-                        $appendLegTrades($legs, $takeBeforeSignal, 'Мартингейл · цель прибыли при ожидании сигнала', $balance);
-                        $legs = [];
-                        $tradeEntryIndex = $takeBeforeSignal + 1;
-                        break;
-                    }
-                    if ($nextSignal === null) {
-                        $appendLegTrades($legs, $rowCount - 1, $isCurrentDay ? 'Мартингейл · ожидание сигнала · последний снимок' : 'Мартингейл · ожидание сигнала · конец периода', $balance);
-                        $legs = []; $tradeEntryIndex = $rowCount; break;
-                    }
-                    $signalQuote = $tradeIsShort ? $executionRows[$nextIndex]['ask_price'] : $executionRows[$nextIndex]['bid_price'];
-                    $signalGross = '0'; $signalFees = '0'; $signalQty = '0';
-                    foreach ($legs as $leg) {
-                        $signalMove = $tradeIsShort ? bcsub($leg['entry_price'], $signalQuote, 24) : bcsub($signalQuote, $leg['entry_price'], 24);
-                        $signalGross = bcadd($signalGross, bcmul($leg['quantity'], $signalMove, 24), 24);
-                        $signalFees = bcadd($signalFees, $leg['entry_fee'], 24);
-                        $signalQty = bcadd($signalQty, $leg['quantity'], 24);
-                    }
-                    $signalNet = bcsub(bcsub($signalGross, $signalFees, 24), bcmul(bcmul($signalQty, $signalQuote, 24), $feeRate, 24), 24);
-                    foreach ($legs as $leg) $signalNet = bcadd($signalNet, $leg['funding_paid'], 24);
-                    $signalEquity = bcadd($balance, $signalNet, 24);
-                    $signalFreeMargin = bcsub($signalEquity, $positionNotional, 24);
-                    $maxSignalAffordable = bcdiv($signalFreeMargin, bcadd('1', $feeRate, 24), 24);
-                    $addNotional = bccomp($maxSignalAffordable, $positionNotional, 24) < 0 ? $maxSignalAffordable : $positionNotional;
-                } else $nextIndex = $exitIndex;
-                if (bccomp($addNotional, '0', 24) <= 0 || !$addLeg($nextIndex, $tradeIsShort, $addNotional)) {
-                    $appendLegTrades($legs, $exitIndex, 'Недостаточно свободного баланса для следующего шага мартингейла', $balance);
-                    $legs = []; $tradeEntryIndex = $exitIndex + 1; break;
-                }
-                $stage++;
-                $tradeEntryIndex = $nextIndex;
-                continue;
-            }
-
-            $closedNotional = $positionNotional;
-            $appendLegTrades($legs, $exitIndex, $exitReason, $balance);
-            $legs = [];
-            $positionNotional = '0';
-            $reverseSide = !$tradeIsShort;
-            if ($martingaleTiming === 'rules') {
-                $nextSignal = $findCompatibleEntry($exitIndex + 1, $reverseSide);
-                if ($nextSignal === null) { $tradeEntryIndex = $rowCount; break; }
-                [$nextIndex] = $nextSignal;
-            } else $nextIndex = $exitIndex;
-            $nextStake = bcmul($closedNotional, '2', 24);
-            $availableStake = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
-            if (bccomp($nextStake, $availableStake, 24) > 0) $nextStake = $availableStake;
-            if (!$addLeg($nextIndex, $reverseSide, $nextStake)) { $tradeEntryIndex = $exitIndex + 1; break; }
-            $tradeIsShort = $reverseSide;
-            $stage++;
-            $tradeEntryIndex = $nextIndex;
-        }
-        $chainAttempt++;
-    }
-    if ($martingaleOrderConstraintError !== null) {
-        $trades = [];
-        $balance = $startingBalance;
-    }
 } else {
 $ordinaryOrderConstraintError = null;
 while (bccomp($balance, '0', 24) > 0) {
@@ -969,7 +594,7 @@ while (bccomp($balance, '0', 24) > 0) {
     $entryPrice = $tradeIsShort ? $entry['bid_price'] : $entry['ask_price'];
     $requestedNotional = bcdiv($balance, bcadd('1', $feeRate, 24), 24);
     if (bccomp($requestedNotional, $startingBalance, 24) > 0) $requestedNotional = $startingBalance;
-    $order = rankingCheckBitgetMarketOrder($requestedNotional, $entryPrice, $martingaleContractRules ?? [], $feeRate, $balance);
+    $order = rankingCheckBitgetMarketOrder($requestedNotional, $entryPrice, $contractRules ?? [], $feeRate, $balance);
     if (isset($order['error'])) {
         $ordinaryOrderConstraintError = 'В симуляции заявка ' . $symbol . ' на ' . $entry['received_at_utc'] . ' UTC не проходит проверку: ' . $order['error'] . '. Вариант исключён.';
         break;
@@ -1035,35 +660,7 @@ if ($ordinaryOrderConstraintError !== null) {
     $error = $ordinaryOrderConstraintError;
 }
 }
-$martingaleChainResults = [];
-if ($martingaleMode !== 'none') {
-    foreach ($trades as $trade) {
-        $chainId = (int) ($trade['chain_id'] ?? 0);
-        $martingaleChainResults[$chainId] = bcadd($martingaleChainResults[$chainId] ?? '0', $trade['net'], 24);
-    }
-    ksort($martingaleChainResults, SORT_NUMERIC);
-}
-$martingaleChainCount = count($martingaleChainResults);
-$martingaleWorstChain = $martingaleChainCount > 0 ? min($martingaleChainResults) : null;
-$martingaleMedianChain = null;
-$martingaleMaxDrawdown = '0';
-if ($martingaleChainCount > 0) {
-    $sortedChainResults = array_values($martingaleChainResults);
-    usort($sortedChainResults, static fn (string $a, string $b): int => bccomp($a, $b, 24));
-    $middle = intdiv($martingaleChainCount, 2);
-    $martingaleMedianChain = $martingaleChainCount % 2 === 1
-        ? $sortedChainResults[$middle]
-        : bcdiv(bcadd($sortedChainResults[$middle - 1], $sortedChainResults[$middle], 24), '2', 24);
-    $chainEquity = $startingBalance;
-    $chainPeak = $startingBalance;
-    foreach ($martingaleChainResults as $chainResult) {
-        $chainEquity = bcadd($chainEquity, $chainResult, 24);
-        if (bccomp($chainEquity, $chainPeak, 24) > 0) $chainPeak = $chainEquity;
-        $drawdown = bcsub($chainPeak, $chainEquity, 24);
-        if (bccomp($drawdown, $martingaleMaxDrawdown, 24) > 0) $martingaleMaxDrawdown = $drawdown;
-    }
-}
-if ($martingaleMode === 'none' && $cachedStandardTradeEvents === null
+if ($cachedStandardTradeEvents === null
     && $closedTradeLedgerKey !== null && $ledgerSourceDay !== null) {
     try {
         $closedByDay = [];
@@ -1112,8 +709,7 @@ if ($martingaleMode === 'none' && $cachedStandardTradeEvents === null
         error_log('Closed trade ledger write failed: ' . $ledgerWriteError->getMessage());
     }
 }
-if ($martingaleMode === 'none') {
-    $rangeTrades = [];
+$rangeTrades = [];
     $rangeBalance = $startingBalance;
     $rangeStartAt = new DateTimeImmutable($startUtc, new DateTimeZone('UTC'));
     $rangeEndAt = new DateTimeImmutable($endUtc, new DateTimeZone('UTC'));
@@ -1130,21 +726,34 @@ if ($martingaleMode === 'none') {
     }
     $trades = $rangeTrades;
     $balance = $rangeBalance;
-}
 $totalPnl = bcsub($balance, $startingBalance, 24);
 $isOpenTrade = static fn (array $trade): bool => str_starts_with($trade['reason'], 'Открыта ·');
 $openTradeCount = count(array_filter($trades, $isOpenTrade));
 $closedTradeCount = count($trades) - $openTradeCount;
+$freshReturnPoints = [];
+foreach ($trades as $trade) {
+    $before = (float) $trade['balance'] - (float) $trade['net'];
+    $freshReturnPoints[] = ['entry_at_utc' => $trade['entry']['received_at_utc'],
+        'exit_at_utc' => $trade['exit']['received_at_utc'],
+        'return_percent' => $before > 0 ? (float) $trade['net'] / $before * 100 : 0,
+        'cumulative_return_percent' => ((float) $trade['balance'] / (float) $startingBalance - 1) * 100,
+        'point_type' => $isOpenTrade($trade) ? 'provisional' : 'closed'];
+}
+$freshReturnData = ['status'=>'ready','selected'=>['symbol'=>$symbol,'entry_id'=>$entryConfig,'entry_label'=>array_column($entrySelectorSeeds,'label','id')[$entryConfig] ?? $entryConfig,'exit_id'=>$selectedExitConfig,'exit_label'=>array_column($exitSelectorSeeds,'label','id')[$selectedExitConfig] ?? $selectedExitConfig],
+    'chart_range'=>['start_day'=>$startDayInput,'end_day'=>$endDayInput],
+    'context'=>['balance'=>(float)$startingBalance,'fee'=>(float)$feePercent,'entry_signal_mode'=>$entrySignalMode,'entry_direction_mode'=>$entryDirectionMode,'exit_confirmation_mode'=>$exitConfirmationMode,'exit_confirmation_snapshots'=>$exitConfirmationSnapshots,'slippage_bps'=>$simulationCosts['slippage_bps'],'include_funding'=>$simulationCosts['include_funding']?'1':'0'],
+    'points'=>$freshReturnPoints];
+foreach ($freshReturnData['points'] as &$point) {
+    foreach (['entry_at_utc','exit_at_utc'] as $field) $point[$field] = (new DateTimeImmutable($point[$field], new DateTimeZone('UTC')))->format('c');
+}
+unset($point);
 $entrySideLabel = 'Сторона · цена';
 $exitSideLabel = 'Сторона · цена';
 $dateRangeLabel = $startDayInput === $endDayInput ? $startDayInput : $startDayInput . ' — ' . $endDayInput;
 $autotradingUrl = 'autotrading.php?' . http_build_query([
     'category' => $config['category'], 'symbol' => $symbol, 'start_date' => $startDayInput, 'end_date' => $endDayInput,
     'entry_config' => $entryConfig, 'entry_signal_mode' => $entrySignalMode, 'entry_direction_mode' => $entryDirectionMode,
-    'exit_config' => $exitConfig, 'martingale_mode' => $martingaleMode, 'martingale_timing' => $martingaleTiming,
-    'martingale_attempts' => $martingaleAttempts, 'martingale_target_policy' => $martingaleTargetPolicy,
-    'max_chain_loss_usdt' => $martingaleRiskLimits['max_chain_loss'], 'strategy_max_day_loss_usdt' => $martingaleRiskLimits['max_day_loss'],
-    'exit_confirmation_mode' => $exitConfirmationMode, 'exit_confirmation_snapshots' => $exitConfirmationSnapshots,
+    'exit_config' => $exitConfig,     'exit_confirmation_mode' => $exitConfirmationMode, 'exit_confirmation_snapshots' => $exitConfirmationSnapshots,
     'balance' => $startingBalance, 'fee' => $feePercent, 'slippage_bps' => $simulationCosts['slippage_bps'],
     'include_funding' => $simulationCosts['include_funding'] ? '1' : '0', 'net_result_usdt' => $totalPnl, 'trade_count' => $closedTradeCount,
 ]);
@@ -1170,17 +779,17 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 .combination-detail h1{margin-top:0}.combination-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 0}.combination-detail dl>div{padding:12px;border:1px solid var(--line);border-radius:9px}.combination-detail dt{color:var(--muted);font-size:13px}.combination-detail dd{margin:6px 0 0;font-weight:700;font-variant-numeric:tabular-nums}.ranking-detail-link{color:#b8c7ff;text-decoration:underline;text-decoration-color:#6576ad;text-underline-offset:3px}.ranking-detail-link:hover{color:#fff}
 #portfolio-ranking-panel .small-note{font-size:15px;margin:0 0 12px}
 .calculation-queue-heading{display:flex;align-items:flex-start;gap:12px}.calculation-queue{flex:1;min-width:0}.calculation-queue>summary{cursor:pointer;font-weight:700}.calculation-queue-count{margin-left:8px;color:var(--muted);font-weight:400}.calculation-queue-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin-top:12px}.calculation-queue-columns h3{margin:8px 0}.calculation-queue-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}.calculation-queue-list li{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:9px}.calculation-queue-list span,.calculation-queue-note{color:var(--muted);font-size:13px}.calculation-queue-empty{color:var(--muted)}.reset-calculation-queue{flex:0 0 38px;width:38px;height:38px;min-width:38px;padding:0;background:transparent;color:var(--muted);font-size:20px;line-height:1}.reset-calculation-queue:hover{background:#273653;color:var(--text)}.reset-calculation-queue:disabled{cursor:progress;opacity:.65}.stop-history-import{flex:0 0 auto;width:auto;min-width:0;padding:8px 12px;background:#7c4149;color:#ffd0d0;font-size:13px}.stop-history-import:hover{background:#96535b}.stop-history-import[hidden]{display:none}.stop-history-import:disabled{cursor:progress;opacity:.65}@media(max-width:600px){.calculation-queue-columns{grid-template-columns:minmax(0,1fr)}.history-import-progress>.stop-history-import{width:auto;flex:0 0 auto}}
-.ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}.ranking-favorite-button{width:34px;min-width:34px;padding:6px 4px;background:#263968;color:#fff}.ranking-favorite-button:hover{background:#405bad}
+.ranking-table th.sortable{padding:0 10px}.ranking-sort-button{width:100%;min-width:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}.ranking-sort-button:hover{background:transparent;color:var(--text)}.ranking-sort-button:focus-visible{outline:2px solid #8ea5ff;outline-offset:-2px}
 .portfolio-ranking-head{margin-bottom:0}.portfolio-ranking-head .ranking-title-toggle{display:flex;align-items:center;gap:9px;flex:1;min-width:0;padding:0;border:0;border-radius:0;background:transparent;color:var(--text);font-size:17px;font-weight:700;text-align:left;cursor:pointer}.portfolio-ranking-head .ranking-title-toggle:hover{background:transparent;color:#b9c7ff}.ranking-disclosure-arrow{display:inline-block;flex:0 0 auto;font-size:13px;line-height:1;transform:rotate(90deg);transition:transform .16s ease}.ranking-title-toggle[aria-expanded="false"] .ranking-disclosure-arrow{transform:rotate(0deg)}.portfolio-ranking-head .refresh-symbols{margin-left:0}@media(max-width:600px){.portfolio-ranking-head{align-items:center;flex-direction:row}}
 .ranking-timer{flex-basis:100%;margin:0;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
 .portfolio-ranking-diagnostics{margin:0 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#0c1222;color:var(--muted);font-size:13px;white-space:pre-line;font-variant-numeric:tabular-nums}
 .symbol-date-row{display:flex;align-items:end;gap:14px;flex:0 0 100%;width:100%;min-width:0}.symbol-date-row .symbol-select-block{flex:1 1 360px;min-width:220px}.symbol-date-row>.date-field{flex:0 0 190px;width:190px}.symbol-date-row>.history-import-button{flex:0 1 auto}.symbol-date-row .field select,.symbol-date-row .field input{width:100%}.symbol-select-block{display:grid;gap:6px}.symbol-select-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.symbol-select-heading label{color:var(--muted);font-size:13px}.symbol-select-heading button{padding:5px 10px;font-size:12px;white-space:nowrap}@media(max-width:700px){.symbol-date-row{flex-wrap:wrap;gap:8px}.symbol-date-row .symbol-select-block{flex:0 0 100%;width:100%}.symbol-date-row>.date-field{flex:1 1 calc(50% - 4px);width:auto;min-width:0}.symbol-date-row>.date-field input{min-width:0;padding-left:8px;padding-right:8px}.symbol-date-row>.history-import-button{flex:1 1 auto}}
 .ranking-parameters{position:relative;--ranking-label-column:260px;--ranking-column-gap:8px;flex-basis:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px}.ranking-parameters summary{padding-right:44px;cursor:pointer;color:var(--text);font-weight:700}.reset-ranking-parameters{position:absolute;top:7px;right:12px;flex:0 0 36px;width:36px;height:36px;min-width:36px;padding:0;background:transparent;color:var(--muted);font-size:21px;line-height:1}.reset-ranking-parameters:hover{background:#273653;color:var(--text)}.ranking-parameters h3{margin:16px 0 8px;font-size:14px}.ranking-range-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px));justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-range-row>span{padding-bottom:11px}.ranking-range-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-range-row input{width:100%;min-width:0}.ranking-segment-editor{margin:10px 0}.ranking-segment-row{display:grid;grid-template-columns:var(--ranking-label-column) repeat(3,minmax(90px,130px)) 36px;justify-content:start;gap:var(--ranking-column-gap);align-items:end;margin:8px 0}.ranking-segment-row>span{padding-bottom:11px;color:#b7c1d5;font-size:12px}.ranking-segment-row label{display:grid;gap:4px;color:var(--muted);font-size:12px}.ranking-segment-row input{width:100%;min-width:0}.ranking-segment-row button,.add-range-segment{min-width:36px;width:36px;padding:7px;background:#263653;color:#dce5ff}.ranking-segment-row button:disabled{opacity:.45;cursor:not-allowed}.add-range-segment{width:auto;min-width:0;margin:2px 0 10px}.ranking-parameters .small-note{margin:8px 0}@media(max-width:650px){.ranking-range-row{grid-template-columns:repeat(3,minmax(0,120px));justify-content:start}.ranking-range-row>span{grid-column:1/-1;padding:0}.ranking-range-row input{padding:9px 6px}.ranking-segment-row{grid-template-columns:repeat(3,minmax(0,120px)) 36px}.ranking-segment-row>span{grid-column:1/-1;padding:0}.ranking-segment-row input{padding:9px 6px}}
-.martingale-block{flex-basis:100%;min-width:0;margin:4px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px}.martingale-block>summary{color:var(--text);font-weight:700;cursor:pointer}.martingale-controls{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin-top:12px}.martingale-block .field select{min-width:190px}.martingale-block #apply-martingale-settings{align-self:end;margin-bottom:1px}@media(max-width:600px){.martingale-block,.martingale-block .field{width:100%}.martingale-controls,.martingale-block .field{width:100%}.martingale-block .field select{width:100%}}
+
 .ranking-mode-group{display:grid;grid-template-columns:var(--ranking-label-column) max-content;align-items:center;column-gap:var(--ranking-column-gap)}.ranking-mode-group .ranking-range-heading{display:contents}.ranking-mode-group>.small-note,.ranking-mode-group>.ranking-custom{grid-column:1/-1}.ranking-mode-label{display:grid;gap:5px;width:auto;color:var(--muted);font-size:12px}.ranking-mode-label select{min-width:0}.ranking-custom[hidden]{display:none}
 .ranking-parameters select{justify-self:start;margin-right:auto;width:auto;max-width:100%}
 .ranking-mode-group h3{margin:16px 0 8px}@media(max-width:480px){.ranking-mode-group{grid-template-columns:minmax(0,1fr);align-items:start}.ranking-mode-group .ranking-mode-label{width:100%;margin-bottom:8px}}
-.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.favorite-readonly-note{margin:0 0 16px;padding:10px 12px;border:1px solid #53659b;border-radius:10px;background:#172343;color:#dce5ff}.favorite-readonly select,.favorite-readonly input,.favorite-readonly button{opacity:.72}.favorite-readonly .refresh-today-snapshot,.favorite-readonly .reset-ranking-parameters,.favorite-readonly .apply-ranking-ranges,.favorite-readonly #apply-martingale-settings,.favorite-readonly .collector-status{display:none}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
+.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}@media(max-width:600px){.view-nav{width:100%}.view-nav a{flex:1;text-align:center}}
 .ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}
 
 .strategy-return-actions,.strategy-return-selectors{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin:10px 0}.strategy-return-actions button{padding:9px 13px}.strategy-return-selectors .field{min-width:180px}.strategy-return-selectors select{width:100%}.strategy-return-chart-wrap{width:100%;height:340px;overflow:hidden}.strategy-return-chart-wrap svg{display:block;width:100%;height:100%;background:#0c1222;border:1px solid var(--line);border-radius:10px}.return-chart-placeholder{display:grid;place-items:center;width:100%;min-height:200px;padding:20px;border:1px dashed var(--line);border-radius:10px;color:var(--muted);text-align:center}.return-chart-placeholder[hidden]{display:none}.strategy-return-panel[hidden]{display:none}.chart-mode-switch{display:flex;gap:4px;padding:3px;background:#0c1222;border:1px solid var(--line);border-radius:9px}.chart-mode-switch button{padding:7px 11px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:inherit;cursor:pointer}.chart-mode-switch button[aria-pressed="true"]{background:#263968;color:#fff}.chart-panel-sticky .chart-mode-switch{position:sticky}.return-point-provisional td{background:#3a2d18;color:#ffe0a3}.return-point-positive td:last-child{color:#48d6a4}.return-point-negative td:last-child{color:#ff7788}
@@ -1195,9 +804,8 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 </style>
 </head><body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= h($config['category']) ?></div><div class="header-actions"><label class="save-mode-toggle" for="save-mode-toggle"><input type="checkbox" id="save-mode-toggle" <?= $saveMode ? 'checked' : '' ?>><span class="save-mode-switch" aria-hidden="true"></span><span>SAVE MODE</span><span class="save-mode-detail" id="save-mode-detail"><?= $saveMode ? 'минимум 3 сделки' : 'от 1 сделки' ?></span></label><button class="collector-status" id="collector-status" type="button" data-status="unknown" aria-label="Загрузить последние данные для активных тикеров выбранного списка" title="Нажмите, чтобы загрузить минутные данные активных тикеров выбранного списка от последних сохранённых котировок до последней доступной минуты">Загружаю последнюю котировку…</button></div></header>
-<nav class="view-nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="<?= h('basic-checks.php?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a href="<?= h($autotradingUrl . '&mode=paper') ?>">Автоторговля (Paper)</a><a href="<?= h($autotradingUrl . '&mode=demo') ?>">Автоторговля (Тест)</a><a href="<?= h($autotradingUrl . '&mode=real') ?>">Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
-<section class="panel ticker-set-panel" aria-label="Выбранный список тикеров"><label for="ticker-set-select">Выбранный список тикеров</label><select id="ticker-set-select" <?= $favoriteView ? 'disabled' : '' ?>><?php foreach ($tickerSetOptions as $tickerSet): ?><option value="<?= h((string) ($tickerSet['id'] ?? '')) ?>" <?= ($tickerSet['id'] ?? '') === $tickerSetId ? 'selected' : '' ?>><?= h((string) ($tickerSet['name'] ?? '')) ?></option><?php endforeach; ?></select><span class="small-note"><?= count($enabledSymbols) ?> активных тикеров в списке</span></section>
-<?php if ($favoriteView): ?><p class="favorite-readonly-note">Просмотр сохранённой стратегии «<?= h((string) ($favorite['name'] ?? $favoriteId)) ?>». Параметры доступны только для чтения. <a class="strategy-link" href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
+<nav class="view-nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="<?= h('basic-checks.php?' . http_build_query($viewParams)) ?>" aria-current="page">Базовые проверки</a><a href="<?= h($hedgingUrl) ?>">Хеджирование</a><a href="<?= h($dataExportUrl) ?>">Настройки · выгрузка данных</a><a href="<?= h($autotradingUrl . '&mode=paper') ?>">Автоторговля (Paper)</a><a href="<?= h($autotradingUrl . '&mode=demo') ?>">Автотрейдинг (демо)</a><a href="<?= h($autotradingUrl . '&mode=real') ?>">Автотрейдинг (real)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<section class="panel ticker-set-panel" aria-label="Выбранный список тикеров"><label for="ticker-set-select">Выбранный список тикеров</label><select id="ticker-set-select"><?php foreach ($tickerSetOptions as $tickerSet): ?><option value="<?= h((string) ($tickerSet['id'] ?? '')) ?>" <?= ($tickerSet['id'] ?? '') === $tickerSetId ? 'selected' : '' ?>><?= h((string) ($tickerSet['name'] ?? '')) ?></option><?php endforeach; ?></select><span class="small-note"><?= count($enabledSymbols) ?> активных тикеров в списке</span></section>
 <?php if ($combinationDetail): ?>
 <section class="panel combination-detail" aria-labelledby="combination-detail-heading">
 <h1 id="combination-detail-heading">Детальный результат · <?= h($symbol !== '' ? $symbol : 'тикер') ?></h1>
@@ -1214,8 +822,7 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 </section>
 <?php endif; ?>
 <?php if ($error !== null): ?><section class="panel error"><?= h($error) ?></section><?php endif; ?>
-<?php if ($martingaleOrderConstraintError !== null): ?><section class="panel error"><?= h($martingaleOrderConstraintError) ?></section><?php endif; ?>
-<section class="panel"><form class="filters<?= $favoriteView ? ' favorite-readonly' : '' ?>" method="get">
+<section class="panel"><form class="filters" method="get">
 <input type="hidden" name="ticker_set" value="<?= h($tickerSetId) ?>">
 <input type="hidden" name="balance_auto" value="<?= $balanceAutoManaged ? '1' : '0' ?>">
 <input type="hidden" name="ranking_balance" value="<?= h($rankingStartingBalance) ?>">
@@ -1227,25 +834,19 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 <input type="hidden" name="symbol_sort" id="symbol-sort-mode" value="<?= h($symbolSort) ?>">
 <input type="hidden" name="save_mode" id="save-mode-value" value="<?= $saveMode ? '1' : '0' ?>">
 <input type="hidden" name="select_top_ranked_result" id="select-top-ranked-result" value="<?= $selectTopRankedResult ? '1' : '0' ?>">
-<input type="hidden" name="martingale_mode" value="<?= h($martingaleMode) ?>">
-<input type="hidden" name="martingale_timing" value="<?= h($martingaleTiming) ?>">
-<input type="hidden" name="martingale_attempts" value="<?= h((string) $martingaleAttempts) ?>">
-<input type="hidden" name="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>">
-<input type="hidden" name="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>">
-<div class="symbol-date-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label><?php if (!$favoriteView): ?><button type="button" id="add-favorite">☆ В избранное</button><?php endif; ?></div><div class="symbol-select-control"><select name="symbol" id="symbol-select"><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php else: ?><option value="" <?= !$symbolWasSubmitted ? 'selected' : '' ?>>Выберите торговую пару</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" class="<?= isset($demoAvailableSymbols[$option]) ? 'demo-available-ticker' : '' ?>" <?= $symbolWasSubmitted && $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select><span class="ticker-sort-indicator" id="ticker-sort-indicator" role="status" aria-label="Сортирую торговые пары по доходности" aria-live="polite" title="Сортирую торговые пары по доходности" hidden>Сортирую<span id="ticker-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div><label class="field date-field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label><label class="field date-field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label><button class="history-import-button" type="button" id="import-selected-symbol" data-import-scope="symbol" title="Скачать минутные свечи выбранной пары из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>Выгрузить сырые данные по <?= h($symbol) ?></button><button class="history-import-button" type="button" id="import-all-active-symbols" data-import-scope="all" data-symbol-count="<?= count($enabledSymbols) ?>" title="Скачать минутные свечи всех активных пар из Bitget за выбранный диапазон, сохранить в БД и обновить график и расчёты" hidden>Выгрузить сырые данные по выбранному списку тикеров</button></div><p class="small-note" id="ticker-return-sort-status" aria-live="polite"></p><?php if (!$favoriteView): ?><p class="small-note" id="favorite-status" aria-live="polite"></p><?php endif; ?>
+<div class="symbol-date-row"><div class="field symbol-select-block"><div class="symbol-select-heading"><label for="symbol-select">Торговая пара</label></div><div class="symbol-select-control"><select name="symbol" id="symbol-select"><?php if ($symbols === []): ?><option value="">Нет включённых тикеров — откройте «Настройки»</option><?php else: ?><option value="" <?= !$symbolWasSubmitted ? 'selected' : '' ?>>Выберите торговую пару</option><?php endif; ?><?php foreach ($symbols as $option): ?><option value="<?= h($option) ?>" class="<?= isset($demoAvailableSymbols[$option]) ? 'demo-available-ticker' : '' ?>" <?= $symbolWasSubmitted && $option === $symbol ? 'selected' : '' ?>><?= h($option) ?></option><?php endforeach; ?></select><span class="ticker-sort-indicator" id="ticker-sort-indicator" role="status" aria-label="Сортирую торговые пары по доходности" aria-live="polite" title="Сортирую торговые пары по доходности" hidden>Сортирую<span id="ticker-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div><label class="field date-field">С даты<input type="date" lang="en-GB" name="start_day" value="<?= h($startDayInput) ?>" required></label><label class="field date-field">По дату<input type="date" lang="en-GB" name="end_day" value="<?= h($endDayInput) ?>" required></label></div><p class="small-note" id="ticker-return-sort-status" aria-live="polite"></p>
 <div class="history-import-actions"><div class="history-import-progress"><p class="history-import-status" id="history-import-status" data-status="" role="status" aria-live="polite"></p><button class="stop-history-import" type="button" id="stop-history-import" hidden>■ Остановить загрузку</button></div></div>
 
 <section class="entry-strategy-group" aria-labelledby="entry-strategy-heading"><h2 class="entry-strategy-heading" id="entry-strategy-heading">Стратегия входа</h2><div class="entry-strategy-fields">
-<label class="field">Тип входа<select name="entry_signal_mode" id="entry-signal-mode"><option value="exact" <?= $entrySignalMode === 'exact' ? 'selected' : '' ?>>За X снимков назад</option><option value="within" <?= $entrySignalMode === 'within' ? 'selected' : '' ?>>За X снимков внутри</option></select></label>
-<label class="field">Направление входа<select name="entry_direction_mode" id="entry-direction-mode"><option value="follow" <?= $entryDirectionMode === 'follow' ? 'selected' : '' ?>>По направлению движения</option><option value="reverse" <?= $entryDirectionMode === 'reverse' ? 'selected' : '' ?>>Против направления</option></select></label>
-<div class="field"><div class="ranked-select-heading"><label for="entry-config">Порог входа</label><button class="selector-order-lock" id="entry-order-lock" type="button" aria-pressed="true"><span class="selector-sort-dot" aria-hidden="true"></span><span>Сортировка по максимальной доходности</span></button></div><div class="ranked-select-control"><select name="entry_config" id="entry-config" <?= !$symbolWasSubmitted ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $entryConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару' : ($favoriteView ? $favoriteEntryLabel : $entryLoadingLabel)) ?></option></select><span class="ranked-select-indicator" id="entry-sort-indicator" role="status" aria-label="Сортирую пороги входа по доходности" aria-live="polite" hidden>Сортирую<span class="ranked-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div>
-<p class="small-note">«Назад» сравнивает цену с ровно X снимками до текущего. «Внутри» открывает позицию при первом пересечении порога относительно любого из последних X снимков.</p>
+<input type="hidden" name="entry_signal_mode" value="exact"><input type="hidden" name="entry_direction_mode" value="follow">
+<div class="field"><div class="ranked-select-heading"><label for="entry-config">Порог входа</label><button class="selector-order-lock" id="entry-order-lock" type="button" aria-pressed="true"><span class="selector-sort-dot" aria-hidden="true"></span><span>Сортировка по максимальной доходности</span></button></div><div class="ranked-select-control"><select name="entry_config" id="entry-config" <?= !$symbolWasSubmitted ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $entryConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару' : $entryLoadingLabel) ?></option></select><span class="ranked-select-indicator" id="entry-sort-indicator" role="status" aria-label="Сортирую пороги входа по доходности" aria-live="polite" hidden>Сортирую<span class="ranked-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div>
+<p class="small-note">Сигнал входа сравнивает цену с ценой ровно X снимков до текущего; позиция открывается по направлению движения порога.</p>
 </div></section>
 <section class="exit-strategy-group" aria-labelledby="exit-strategy-heading"><h2 class="exit-strategy-heading" id="exit-strategy-heading">Стратегия выхода</h2><div class="exit-strategy-fields">
-<label class="field">Тип выхода<select name="exit_confirmation_mode" id="exit-confirmation-mode"><option value="immediate" <?= $exitConfirmationMode === 'immediate' ? 'selected' : '' ?>>TP&amp;SL (сразу)</option><option value="both_delayed" <?= $exitConfirmationMode === 'both_delayed' ? 'selected' : '' ?>>TP&amp;SL с учетом интервалов</option><option value="tp_delayed" <?= $exitConfirmationMode === 'tp_delayed' ? 'selected' : '' ?>>TP с учетом интервалов, SL сразу</option><option value="sl_delayed" <?= $exitConfirmationMode === 'sl_delayed' ? 'selected' : '' ?>>TP сразу, SL с учетом интервалов</option><option value="none" <?= $exitConfirmationMode === 'none' ? 'selected' : '' ?>>Без выхода</option></select></label>
-<div class="field" id="exit-config-field" <?= $noExitSelected ? 'hidden' : '' ?>><div class="ranked-select-heading"><label for="exit-config">TakeProfit &amp; StopLoss</label><button class="selector-order-lock" id="exit-order-lock" type="button" aria-pressed="true"><span class="selector-sort-dot" aria-hidden="true"></span><span>Сортировка по максимальной доходности</span></button></div><div class="ranked-select-control"><select name="exit_config" id="exit-config" <?= (!$symbolWasSubmitted || $noExitSelected) ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $selectedExitConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару' : ($noExitSelected ? 'Не применяется · позиция удерживается до конца периода' : ($favoriteView ? $favoriteExitLabel : 'Загружаю варианты…'))) ?></option></select><span class="ranked-select-indicator" id="exit-sort-indicator" role="status" aria-label="Сортирую варианты TakeProfit и StopLoss по доходности" aria-live="polite" hidden>Сортирую<span class="ranked-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div>
-<input type="hidden" name="exit_confirmation_snapshots" id="exit-confirmation-snapshots" value="<?= h((string) $exitConfirmationSnapshots) ?>">
-<p class="small-note"><?= $noExitSelected ? 'Без TP и SL позиция остаётся открытой до последней котировки периода; результат показывается как предварительный, незакрытая сделка.' : 'Варианты TP/SL сгруппированы по числу интервалов проверки. При достижении TP или SL позиция закроется, если порог всё ещё достигнут через указанное число интервалов.' ?></p>
+<input type="hidden" name="exit_confirmation_mode" value="immediate">
+<div class="field" id="exit-config-field"><div class="ranked-select-heading"><label for="exit-config">TakeProfit &amp; StopLoss</label><button class="selector-order-lock" id="exit-order-lock" type="button" aria-pressed="true"><span class="selector-sort-dot" aria-hidden="true"></span><span>Сортировка по максимальной доходности</span></button></div><div class="ranked-select-control"><select name="exit_config" id="exit-config" <?= !$symbolWasSubmitted ? 'disabled' : '' ?>><option value="<?= h($symbolWasSubmitted ? $selectedExitConfig : '') ?>" <?= !$symbolWasSubmitted ? 'disabled selected' : 'selected' ?>><?= h(!$symbolWasSubmitted ? 'Выберите торговую пару' : 'Загружаю варианты…') ?></option></select><span class="ranked-select-indicator" id="exit-sort-indicator" role="status" aria-label="Сортирую варианты TakeProfit и StopLoss по доходности" aria-live="polite" hidden>Сортирую<span class="ranked-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></div>
+<input type="hidden" name="exit_confirmation_snapshots" id="exit-confirmation-snapshots" value="60">
+<p class="small-note">Take Profit и Stop Loss срабатывают сразу при достижении заданного значения.</p>
 </div></section>
 <p class="ranking-timer" id="strategy-ranking-timer" aria-live="polite" hidden></p>
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= h($startingBalance) ?>" required></label>
@@ -1255,7 +856,6 @@ $autotradingUrl = 'autotrading.php?' . http_build_query([
 <label class="field">Проскальзывание (б.п.)<input type="number" name="slippage_bps" min="0" max="9999.9999" step="0.1" value="<?= h($simulationCosts['slippage_bps']) ?>" required></label>
 <label class="save-mode-toggle"><input type="hidden" name="include_funding" value="0"><input type="checkbox" name="include_funding" value="1" <?= $simulationCosts['include_funding'] ? 'checked' : '' ?>><span class="save-mode-detail">Учитывать funding</span></label>
 <p class="small-note">Проскальзывание ухудшает цену исполнения каждой стороны: покупка дороже, продажа дешевле. Сигналы строятся по сохранённой Last.</p>
-<details class="martingale-block" <?= $martingaleMode !== 'none' ? 'open' : '' ?>><summary>Мартингейл</summary><div class="martingale-controls"><label class="field">Режим<select data-martingale-setting="martingale_mode"><option value="none" <?= $martingaleMode === 'none' ? 'selected' : '' ?>>Без мартингейла</option><option value="simple" <?= $martingaleMode === 'simple' ? 'selected' : '' ?>>Простой по лоссу</option><option value="reverse" <?= $martingaleMode === 'reverse' ? 'selected' : '' ?>>Обратный по лоссу</option><option value="simple_profit" <?= $martingaleMode === 'simple_profit' ? 'selected' : '' ?>>Простой по профиту</option><option value="reverse_profit" <?= $martingaleMode === 'reverse_profit' ? 'selected' : '' ?>>Обратный по профиту</option></select></label><label class="field">Следующий шаг<select data-martingale-setting="martingale_timing"><option value="immediate" <?= $martingaleTiming === 'immediate' ? 'selected' : '' ?>>Сразу</option><option value="rules" <?= $martingaleTiming === 'rules' ? 'selected' : '' ?>>По порогу входа</option></select></label><label class="field">Количество попыток<select data-martingale-setting="martingale_attempts"><?php for ($attempt = 2; $attempt <= 10; $attempt++): ?><option value="<?= $attempt ?>" <?= $martingaleAttempts === $attempt ? 'selected' : '' ?>><?= $attempt ?></option><?php endfor; ?></select></label><label class="field">Макс. убыток цепочки (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_chain_loss" value="<?= h($martingaleRiskLimits['max_chain_loss']) ?>"></label><label class="field">Макс. убыток за день (USDT)<input type="number" min="0" max="1000000000" step="0.01" data-martingale-setting="martingale_max_day_loss" value="<?= h($martingaleRiskLimits['max_day_loss']) ?>"></label><button type="button" id="apply-martingale-settings" disabled>Применить</button><p class="small-note">Ноль отключает лимит. Лимит цепочки закрывает её на первом снимке, где чистый убыток достигает суммы. Дневной лимит учитывает результат закрытых цепочек по дате закрытия и запрещает новые цепочки до следующего дня; лимит цепочки ограничивает текущую позицию.</p><p class="small-note">По лоссу следующий шаг запускается после Stop Loss, по профиту — после Take Profit. Простой режим продолжает в ту же сторону (при лоссе усредняет открытую позицию); обратный закрывает позицию и меняет сторону. TP/SL задаются от стартового баланса или масштабируются вместе с позицией.</p><p class="small-note">Перед расчётом каждый ордер сверяется с актуальными правилами контракта Bitget: минимумом суммы и количества, шагом количества, максимальным размером рыночного ордера и доступным балансом.</p><p class="small-note">Предварительная сумма первого ордера по выбранным параметрам: <strong id="martingale-initial-notional">Рассчитываю…</strong></p><p class="small-note" id="martingale-draft-status" aria-live="polite" hidden></p><p class="small-note" id="martingale-cache-status" aria-live="polite" hidden></p></div></details>
 <details class="ranking-parameters"><summary>Параметры расчёта · диапазоны от / до / шаг</summary><button class="reset-ranking-parameters" type="button" id="reset-ranking-parameters" aria-label="Сбросить параметры расчёта по умолчанию" title="Сбросить параметры расчёта по умолчанию">↺</button>
 <div class="ranking-mode-group">
 <?php
@@ -1287,23 +887,16 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 <?= rankingSegmentEditor('Только Take Profit (%)', 'profit', $rankingRanges['profit'], $defaultRankingRanges['profit'], true) ?>
 <?= rankingSegmentEditor('Только Stop Loss (%)', 'loss', $rankingRanges['loss'], $defaultRankingRanges['loss'], true) ?>
 <p class="small-note">Для каждого параметра можно добавить несколько диапазонов. Внутри каждого задайте «от», «до» и шаг; граничные значения включаются.</p><button class="apply-ranking-ranges" type="submit" id="apply-ranking-ranges">Применить диапазоны</button>
-<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. В обычном режиме вход привязан к первому сохраненному снимку тикера, а диапазон дат отбирает сделки по дню закрытия; в мартингейле вход остается привязан к началу выбранного периода.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Для исполнения используются действующие правила контракта Bitget (плечо 1×, шаг количества, минимумы и максимум рыночной заявки), комиссия за market/taker и указанное проскальзывание. К историческим сделкам применяются текущие правила контракта. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
+<p class="hint">Фильтры применяются автоматически после изменения. Время на графике указано по Киеву; загружаются только сохраненные записи.</p><p class="hint"><strong>Пороги входа:</strong> общий набор порогов <?= h($entryThresholdSummary) ?>% от баланса и окна снимков <?= h(implode(', ', array_map('strval', $entryWindows))) ?> для режимов ±, + и −. Каждый порог проверяется на каждом общем окне.</p><p class="hint"><strong>Дополнительные варианты входа:</strong> <?= h($immediateEntryText) ?>. Для каждого сигнала вход выполняется по направлению движения; дата периода ограничивает сделки по времени.</p><p class="hint">Список «Порог входа» отсортирован по лучшему чистому результату с учетом списка «TakeProfit &amp; StopLoss». Симметричные пороги ± работают в обе стороны; + открывает покупки только при росте, а − открывает продажи только при падении. Take Profit и Stop Loss выбираются во втором списке. Для исполнения используются действующие правила контракта Bitget (плечо 1×, шаг количества, минимумы и максимум рыночной заявки), комиссия за market/taker и указанное проскальзывание. К историческим сделкам применяются текущие правила контракта. <a class="strategy-link" href="strategies.php">Описание Пользовательской Стратегии №1 →</a></p><p class="hint"><strong>Сетка совместного TP/SL:</strong> TP и SL проверяются с шагами 0,1% от 0,1% до 1%; 0,2% от 1% до 2%; 0,25% от 2% до 3%; 0,5% от 3% до 10%; 1% от 10% до 20%; 2,5% от 20% до 50%. Общие границы входят один раз; конечные значения диапазонов включаются. Значения проверяются с точностью до 0,01%. Одиночные TP и SL используют прежние диапазоны.</p><p class="hint"><strong>Одиночные диапазоны TakeProfit &amp; StopLoss:</strong></p><ul class="hint"><li>Только Take Profit: <?= h($exitRangeText($rankingRanges['profit'])) ?>, без фиксации убытка.</li><li>Только Stop Loss: <?= h($exitRangeText($rankingRanges['loss'])) ?>, без фиксации прибыли.</li></ul></details></form></section>
 <p class="panel empty" id="strategy-results-placeholder" <?= $symbolWasSubmitted ? '' : 'hidden' ?>><?= $symbolWasSubmitted ? 'Загружаю «Порог входа» и «TakeProfit &amp; StopLoss»…' : 'Выберите торговую пару — график и расчёт стратегии появятся после загрузки данных.' ?></p>
 <section class="panel"><div class="calculation-queue-heading"><details class="calculation-queue" id="calculation-queue"><summary>Очередь расчётов <span class="calculation-queue-count" id="calculation-queue-count">Загружаю…</span></summary><p class="calculation-queue-note">↻ останавливает текущие расчёты рейтинга и очищает очередь. В «Настройках» можно дополнительно сбросить кэш рейтингов.</p><div class="calculation-queue-columns"><div><h3>Выполняется</h3><ul class="calculation-queue-list" id="calculation-queue-active"></ul></div><div><h3>Ожидают</h3><ul class="calculation-queue-list" id="calculation-queue-waiting"></ul></div></div><p class="calculation-queue-note" id="calculation-queue-updated" aria-live="polite"></p></details><button class="reset-calculation-queue" type="button" id="stop-calculation-queue" aria-label="Остановить текущие расчёты и очистить очередь" title="Остановить текущие расчёты и очистить очередь">↻</button></div></section>
-<section class="panel" id="strategy-range-comparison" hidden>
-<div class="chart-head"><h3>Доходность выбранной стратегии по соседним диапазонам</h3></div>
-<p class="small-note" id="strategy-range-comparison-selection"></p>
-<p class="small-note" id="strategy-range-comparison-status" role="status" aria-live="polite"></p>
-<div class="table-wrap" id="strategy-range-comparison-table"></div>
-<p class="small-note">Текущий диапазон — (0). До пяти диапазонов назад и вперёд, той же длины, без пересечения дат. Будущие даты исключены. Итог — накопленная доходность по сохранённым закрытиям сделок; отсутствие закрытий не означает нулевую доходность.</p>
-</section>
-<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="calculate-return-history" type="button" id="calculate-return-history" <?= $favoriteView ? 'disabled' : '' ?>>Рассчитать доходность для «<?= h($tickerSetSelection['name']) ?>»</button><button class="refresh-symbols" type="button" id="refresh-symbols" hidden aria-label="Составить общий рейтинг по таблице доходности" title="Составить общий рейтинг из уже рассчитанной доходности">Составить рейтинг</button><button class="compare-portfolio-rankings" type="button" id="compare-portfolio-rankings" hidden>Сравнить готовые рейтинги</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><section class="ranking-history" id="portfolio-ranking-history" aria-live="polite" hidden><div class="ranking-history-header"><h3 class="ranking-history-title">Сохранённые общие рейтинги</h3><button class="ranking-history-delete" type="button" id="delete-portfolio-ranking-history" hidden>Удалить все</button></div><p class="ranking-history-status">Откройте вкладку, чтобы загрузить список расчётов для выбранного списка тикеров.</p></section><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><section class="ranking-comparison" id="ranking-comparison" hidden><h3>Сравнение сохранённых рейтингов · <span id="ranking-comparison-period"></span></h3><p class="ranking-comparison-note">Столбцы показывают полный сценарий запуска. В ячейке — лучший результат пары и комбинация, которая его дала. Таблица использует только завершённые рейтинги с одинаковым списком, периодом и прочими фильтрами.</p><div class="table-wrap" id="ranking-comparison-table"></div></section><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">Сначала рассчитайте доходность списка. Рейтинг ниже строится из сохранённых результатов и не запускает симуляцию повторно. TP/SL с масштабированием и фиксированные TP/SL остаются отдельными вариантами.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
+<section class="panel" id="portfolio-ranking-panel"><div class="chart-head portfolio-ranking-head"><button class="ranking-title-toggle" type="button" id="ranking-collapse-toggle" aria-expanded="true" aria-controls="portfolio-ranking-content" aria-label="Свернуть общий рейтинг" title="Нажмите, чтобы свернуть рейтинг"><span class="ranking-disclosure-arrow" aria-hidden="true">▸</span>Общий рейтинг порогов входа и TakeProfit &amp; StopLoss</button><button class="calculate-return-history" type="button" id="calculate-return-history" >Рассчитать доходность для «<?= h($tickerSetSelection['name']) ?>»</button><button class="refresh-symbols" type="button" id="refresh-symbols" hidden aria-label="Составить общий рейтинг по таблице доходности" title="Составить общий рейтинг из уже рассчитанной доходности">Составить рейтинг</button><button class="compare-portfolio-rankings" type="button" id="compare-portfolio-rankings" hidden>Сравнить готовые рейтинги</button></div><p class="ranking-timer" id="portfolio-ranking-timer" aria-live="polite" hidden></p><div id="portfolio-ranking-content" hidden><section class="ranking-history" id="portfolio-ranking-history" aria-live="polite" hidden><div class="ranking-history-header"><h3 class="ranking-history-title">Сохранённые общие рейтинги</h3><button class="ranking-history-delete" type="button" id="delete-portfolio-ranking-history" hidden>Удалить все</button></div><p class="ranking-history-status">Откройте вкладку, чтобы загрузить список расчётов для выбранного списка тикеров.</p></section><p class="ranking-status" id="portfolio-ranking-status" aria-live="polite"></p><p class="portfolio-ranking-diagnostics" id="portfolio-ranking-diagnostics" aria-live="polite" hidden></p><section class="ranking-comparison" id="ranking-comparison" hidden><h3>Сравнение сохранённых рейтингов · <span id="ranking-comparison-period"></span></h3><p class="ranking-comparison-note">Столбцы показывают полный сценарий запуска. В ячейке — лучший результат пары и комбинация, которая его дала. Таблица использует только завершённые рейтинги с одинаковым списком, периодом и прочими фильтрами.</p><div class="table-wrap" id="ranking-comparison-table"></div></section><div class="table-wrap" id="portfolio-global-table"></div><h3 class="ranking-subheading">Лучшая комбинация каждого тикера</h3><p class="small-note">Сначала рассчитайте доходность списка. Рейтинг ниже строится из сохранённых результатов и не запускает симуляцию повторно. TP/SL с масштабированием и фиксированные TP/SL остаются отдельными вариантами.</p><div class="table-wrap" id="portfolio-ticker-table"></div></div></section>
 <section class="panel<?= $trades !== [] ? ' chart-panel-sticky' : '' ?>" id="chart-panel" data-rendered-entry="<?= h($entryConfig) ?>" data-rendered-exit="<?= h($selectedExitConfig) ?>" data-rendered-exit-snapshots="<?= h((string) $exitConfirmationSnapshots) ?>" <?= $symbolWasSubmitted ? 'hidden' : '' ?>><div class="chart-head chart-info-line"><h2 id="active-chart-title"><?= $symbol !== '' ? h($symbol) : 'Котировки' ?> · <?= h($dateRangeLabel) ?></h2><div class="chart-mode-switch" role="group" aria-label="Режим нижнего графика"><button type="button" id="show-quote-chart" aria-pressed="true">Котировки</button><button type="button" id="show-return-chart" aria-pressed="false">Доходность</button></div><span class="count quote-chart-info" title="<?= $visibleQuoteCount ?> исходных снимков; <?= $chartPointCount ?> точек в графике"><?= $visibleQuoteCount ?> снимков<?php if ($chartPointCount < $visibleQuoteCount): ?> · график <?= $chartPointCount ?><?php endif; ?></span><span class="chart-info-item quote-chart-info"><i class="dot" style="background:#86a8ff"></i>Last · цвет по дням</span><span class="chart-info-item quote-chart-info"><i class="session-marker"></i>Биржевые часы США · 16:30–23:00 Киев</span></div>
-<div id="return-history-controls" hidden><p class="small-note">График и таблица используют выбранные выше пару, порог входа и TakeProfit &amp; StopLoss. Доходность сохраняется при расчёте вариантов стратегии и показывает результат по закрытым сделкам; открытая позиция отмечена как временная.</p><p class="history-import-status" id="strategy-return-status" role="status" aria-live="polite"></p></div>
+<div id="return-history-controls" hidden><p class="small-note">График и таблица используют выбранные выше пару, порог входа и TakeProfit &amp; StopLoss. График показывает результат текущей таблицы сделок; открытая позиция учитывается по последнему снимку и отмечена как временная.</p><p class="history-import-status" id="strategy-return-status" role="status" aria-live="polite"></p></div>
 <?php if ($hasHistoricalCandles): ?><p class="hint quote-chart-info">Исторические минутные свечи: Bid, Ask и Last восстановлены по цене Close; биржевой спред в этих данных отсутствует.</p><?php endif; ?>
 <div id="quote-chart-view"><?php if ($rows === []): ?><div class="empty">За выбранный период сохраненных данных пока нет.</div><?php else: ?>
 <div class="chart-display"><div class="chart-wrap"><svg id="chart" role="img" aria-label="График bid, ask и last для <?= h($symbol) ?>"></svg><div id="tooltip" aria-hidden="true"></div></div><nav class="chart-day-controls" id="chart-day-controls" aria-label="День на графике"><button class="chart-day-button" type="button" data-chart-day="" aria-pressed="true">Весь график</button></nav></div>
-<?php endif; ?></div><div id="return-chart-view" hidden><div class="return-chart-placeholder" id="return-chart-placeholder" hidden></div><div class="strategy-return-chart-wrap" id="return-chart-plot" hidden><svg id="strategy-return-chart" role="img" aria-label="График накопленной доходности стратегии"></svg></div><p class="small-note" id="strategy-return-summary">Доходность для выбранного списка и периода ещё не сохранена. Нажмите «Рассчитать доходность» в блоке общего рейтинга.</p></div></section>
+<?php endif; ?></div><script type="application/json" id="fresh-return-data"><?= json_encode($freshReturnData, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR) ?></script><div id="return-chart-view" hidden><div class="return-chart-placeholder" id="return-chart-placeholder" hidden></div><div class="strategy-return-chart-wrap" id="return-chart-plot" hidden><svg id="strategy-return-chart" role="img" aria-label="График накопленной доходности стратегии"></svg></div><p class="small-note" id="strategy-return-summary">Доходность для выбранного списка и периода ещё не сохранена. Нажмите «Рассчитать доходность» в блоке общего рейтинга.</p></div></section>
 <script>
 (() => {
     const key = 'bitget-basic-checks-date-range-v1';
@@ -1328,8 +921,8 @@ $windowValuesText = implode(', ', array_map('strval', $entryWindows));
 </script>
 <section class="panel" id="results" <?= $symbolWasSubmitted ? 'hidden' : '' ?>><div class="chart-head"><h2 id="results-title">Сделки стратегии</h2><span class="count" id="ticker-results-count"><?= $closedTradeCount ?> закрытых сделок<?php if ($openTradeCount > 0): ?> · <?= $openTradeCount ?> открыто на последнем снимке<?php endif; ?></span></div>
 <div id="ticker-results-view">
-<div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div><?php if ($martingaleMode !== 'none'): ?><div class="stat"><span>Цепочки в расчёте</span><strong><?= $martingaleChainCount ?></strong></div><div class="stat"><span>Медианный результат цепочки</span><strong><?= $martingaleMedianChain === null ? '—' : (($martingaleMedianChain[0] === '-' ? '' : '+') . money($martingaleMedianChain)) ?> USDT</strong></div><div class="stat"><span>Худшая цепочка</span><strong class="<?= $martingaleWorstChain !== null && bccomp($martingaleWorstChain, '0', 24) < 0 ? 'loss' : '' ?>"><?= $martingaleWorstChain === null ? '—' : money($martingaleWorstChain) ?> USDT</strong></div><div class="stat"><span>Просадка по результатам цепочек</span><strong><?= money($martingaleMaxDrawdown) ?> USDT</strong></div><?php endif; ?></div>
-<?php if ($simulationCosts['include_funding'] || (float) $simulationCosts['slippage_bps'] > 0): ?><p class="small-note">В расчёте: funding <?= $simulationCosts['include_funding'] ? 'учтён по истории Bitget; mark price заменён midpoint первой доступной котировки после settlement' : 'отключён' ?> · проскальзывание <?= h($simulationCosts['slippage_bps']) ?> б.п. в неблагоприятную сторону. Применены действующие правила контракта Bitget.</p><?php endif; ?><?php if ($martingaleMode !== 'none' && $martingaleChainCount > 0): ?><p class="small-note">Метрики сгруппированы по одной мартингейл-попытке. Просадка рассчитана по балансу после каждой цепочки; позиция, оставшаяся открытой на последнем снимке, учитывается по этому снимку.</p><?php endif; ?>
+<div class="summary"><div class="stat"><span>Стартовый баланс</span><strong><?= money($startingBalance) ?> USDT</strong></div><div class="stat"><span>Итог за период</span><strong class="<?= bccomp($totalPnl, '0', 24) > 0 ? 'gain' : (bccomp($totalPnl, '0', 24) < 0 ? 'loss' : '') ?>"><?= bccomp($totalPnl, '0', 24) > 0 ? '+' : '' ?><?= money($totalPnl) ?> USDT</strong></div><div class="stat"><span>Текущий баланс</span><strong><?= money($balance) ?> USDT</strong></div></div>
+<?php if ($simulationCosts['include_funding'] || (float) $simulationCosts['slippage_bps'] > 0): ?><p class="small-note">В расчёте: funding <?= $simulationCosts['include_funding'] ? 'учтён по истории Bitget; mark price заменён midpoint первой доступной котировки после settlement' : 'отключён' ?> · проскальзывание <?= h($simulationCosts['slippage_bps']) ?> б.п. в неблагоприятную сторону. Применены действующие правила контракта Bitget.</p><?php endif; ?>
 <?php if (count($rows) < 2): ?><div class="empty">Нужно минимум два снимка в выбранном периоде, чтобы выполнить симуляцию.</div>
 <?php elseif ($trades === []): ?><div class="empty"><?= $isImmediateEntry ? 'Для немедленной заявки нужны минимум два снимка в выбранном периоде.' : 'В выбранном периоде не было сигнала на движение ' . ($entryDirection === 'both' ? '±' : ($entryDirection === 'long' ? '+' : '−')) . number_format($momentumThreshold, 1, ',', ' ') . '% ' . ($entrySignalMode === 'within' ? 'в пределах ' : 'за ') . $momentumLookback . ' снимков.' ?></div>
 <?php else: ?><div class="table-wrap"><table><thead><tr><th>#</th><th>Вход · Киев</th><th><?= h($entrySideLabel) ?></th><th>Выход · Киев</th><th><?= h($exitSideLabel) ?></th><th>Количество</th><th>Сумма входа</th><th>Валовая прибыль</th><th>Комиссия вход + выход</th><th>Funding</th><th>Итог сделки</th><th>Баланс после</th><th>Причина выхода</th></tr></thead><tbody>
@@ -1407,16 +1000,27 @@ function persistBasicChecksDateRange() {
         }));
     } catch (_) {}
 }
+function normalizeBasicChecksDates() {
+    const start = filtersForm?.elements.namedItem('start_day');
+    const end = filtersForm?.elements.namedItem('end_day');
+    if (start?.value && end?.value && end.value < start.value) end.value = start.value;
+    const url = new URL(location.href);
+    if (end?.value && url.searchParams.has('end_day') && url.searchParams.get('end_day') < start.value) {
+        url.searchParams.set('end_day', end.value);
+        history.replaceState(null, '', url);
+    }
+}
+normalizeBasicChecksDates();
 if (new URLSearchParams(location.search).has('start_day') || new URLSearchParams(location.search).has('end_day')) {
     persistBasicChecksDateRange();
 }
 filtersForm?.addEventListener('input', event => {
     if (event.target.name === 'start_day') filtersForm.elements.namedItem('start_day_auto').value = '0';
-    if (event.target.name === 'start_day' || event.target.name === 'end_day') persistBasicChecksDateRange();
+    if (event.target.name === 'start_day' || event.target.name === 'end_day') { normalizeBasicChecksDates(); persistBasicChecksDateRange(); }
 }, true);
 filtersForm?.addEventListener('change', event => {
     if (event.target.name === 'start_day') filtersForm.elements.namedItem('start_day_auto').value = '0';
-    if (event.target.name === 'start_day' || event.target.name === 'end_day') persistBasicChecksDateRange();
+    if (event.target.name === 'start_day' || event.target.name === 'end_day') { normalizeBasicChecksDates(); persistBasicChecksDateRange(); }
 }, true);
 
 const get_returnStatus=()=>document.querySelector('#strategy-return-status');
@@ -1455,6 +1059,7 @@ function setChartMode(mode){
         chartTitle.textContent=symbol&&entry?.value&&exit?.value?`${symbol} · ${entry.selectedOptions[0]?.textContent||entry.value} · ${exit.selectedOptions[0]?.textContent||exit.value}`:'Доходность стратегии';
     }
     if(returns){
+        if(showFreshReturnChart())return;
         if(activeReturnRunKey){
             setReturnStatus('Загружаю доходность выбранной стратегии…');
             if(get_returnSummary())get_returnSummary().textContent='Загружаю сохранённые точки доходности…';
@@ -1484,7 +1089,7 @@ filtersForm?.addEventListener('change',event=>{
 let returnChartLoadVersion = 0;
 const returnStorageKey = scope => {
     const params = new URLSearchParams(new FormData(filtersForm));
-    params.delete('end_day');
+    // A return run is specific to both date boundaries.
     params.delete('symbol');
     params.delete('entry_config');
     params.delete('exit_config');
@@ -1493,7 +1098,7 @@ const returnStorageKey = scope => {
 };
 function setReturnStatus(text){ if(get_returnStatus()) get_returnStatus().textContent=text; }
 async function requestReturnData(runKey, symbol='', entryId='', exitId=''){
-    const query = new URLSearchParams({run_key:runKey});
+    const query = new URLSearchParams(new FormData(filtersForm));query.set('run_key',runKey);
     const startDay=filtersForm?.elements.namedItem('start_day')?.value||'';
     const endDay=filtersForm?.elements.namedItem('end_day')?.value||'';
     if(startDay)query.set('start_day',startDay);
@@ -1512,6 +1117,7 @@ async function refreshSelectorsFromReturnHistory(runKey, preferredEntry='', sele
     const selectedEntry=preferredEntry||document.querySelector('#entry-config')?.value||'';
     if(!symbol)return false;
     const query=new URLSearchParams({run_key:runKey,symbol,entry_id:selectedEntry,rank_options:'1',min_trades:filtersForm.querySelector('[name="save_mode"]')?.value==='0'?'1':'3'});
+    const context=new URLSearchParams(new FormData(filtersForm));for(const key of ['balance','fee','slippage_bps','include_funding','entry_signal_mode','entry_direction_mode'])query.set(key,context.getAll(key).at(-1)||'');
     query.set('start_day',filtersForm.elements.namedItem('start_day')?.value||'');
     query.set('end_day',filtersForm.elements.namedItem('end_day')?.value||'');
     query.set('exit_confirmation_mode',filtersForm.elements.namedItem('exit_confirmation_mode')?.value||'immediate');
@@ -1602,7 +1208,7 @@ function drawReturnChart(data){
     });
     const points=(data.points||[]).map(point=>{const day=String(point.point_day).slice(0,10),timestamp=point.exit_at_utc?Date.parse(point.exit_at_utc):pointTimes.get(day);return {...point,day,value:Number(point.cumulative_return_percent??point.cumulative_pnl),timestamp:Number.isFinite(timestamp)?timestamp:Date.parse(day+'T12:00:00Z'),hasTradeTime:Boolean(point.exit_at_utc||timestamp)};}).filter(point=>Number.isFinite(point.value));
     renderReturnPointsTable(data.points||[],pointTimes);
-    if(!points.length){if(get_returnChartPlot())get_returnChartPlot().hidden=true;if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Для этой пары и стратегии в выбранном периоде нет закрытых сделок или открытой позиции.';get_returnChartPlaceholder().hidden=false;}get_returnSummary().textContent='Сохранённых точек доходности нет.';return;}
+    if(!points.length){if(get_returnChartPlot())get_returnChartPlot().hidden=true;if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Для этой пары и стратегии в выбранном периоде нет закрытых сделок или открытой позиции.';get_returnChartPlaceholder().hidden=false;}get_returnSummary().textContent='В текущем расчёте нет сделок.';return;}
     if(get_returnChartPlaceholder())get_returnChartPlaceholder().hidden=true;
     if(get_returnChartPlot())get_returnChartPlot().hidden=false;
     const chartRange=data.chart_range||data.run;
@@ -1631,7 +1237,7 @@ function drawReturnChart(data){
         const time=minX+(maxX-minX)*index/xTickCount,px=x(time);
         chart.append(el('text',{x:px,y:height-p.b+17,'text-anchor':index===0?'start':index===xTickCount?'end':'middle',fill:'#b7c1d5','font-size':11},tickFormatter.format(new Date(time))));
     }
-    const coords=[{day:String(data.run.start_day),value:0,point_type:'baseline',timestamp:minX,hasTradeTime:false},...points].map(point=>({point,...{x:x(point.timestamp),y:y(point.value)}}));
+    const coords=[{day:String(chartRange.start_day),value:0,point_type:'baseline',timestamp:minX,hasTradeTime:false},...points].map(point=>({point,...{x:x(point.timestamp),y:y(point.value)}}));
     const closedCoords=coords.filter(item=>item.point.point_type!=='provisional');
     if(closedCoords.length>1){let path=`M ${closedCoords[0].x} ${closedCoords[0].y}`;for(const item of closedCoords.slice(1))path+=` H ${item.x} V ${item.y}`;get_returnChart().append(el('path',{d:path,fill:'none',stroke:'#86a8ff','stroke-width':2.5,'stroke-linejoin':'round'}));}
     const provisionalCoords=coords.filter(item=>item.point.point_type==='provisional');
@@ -1700,8 +1306,18 @@ function drawReturnChart(data){
     const last=points.at(-1), provisional=last.point_type==='provisional';
     get_returnSummary().textContent=`${data.selected.symbol} · ${data.selected.entry_label||data.selected.entry_id} · ${data.selected.exit_label||data.selected.exit_id} · накопленная доходность ${preciseMoney(last.value)}${provisional?` · предварительная сделка ${Number(last.return_percent)>=0?'+':''}${Number(last.return_percent).toFixed(4)}%, позиция открыта`:''}`;
 }
+function showFreshReturnChart(){
+    const node=document.querySelector('#fresh-return-data');if(!node)return false;
+    const data=JSON.parse(node.textContent);
+    if(data.selected.symbol!==document.querySelector('#symbol-select')?.value||data.selected.entry_id!==document.querySelector('#entry-config')?.value||data.selected.exit_id!==document.querySelector('#exit-config')?.value)return false;
+    if(data.chart_range.start_day!==filtersForm.elements.namedItem('start_day')?.value||data.chart_range.end_day!==filtersForm.elements.namedItem('end_day')?.value)return false;
+    const params=new URLSearchParams(new FormData(filtersForm));
+    for(const [key,value]of Object.entries(data.context||{})){if(key==='exit_confirmation_snapshots'&&data.context.exit_confirmation_mode==='immediate')continue;const current=params.getAll(key).at(-1);if(current!==undefined&&String(current)!==String(value)&&!(Number.isFinite(Number(value))&&Number(current)===Number(value)))return false;}
+    drawReturnChart(data);setReturnStatus('Доходность из текущей таблицы сделок, включая открытую позицию.');return true;
+}
 async function loadReturnChart(runKey, preferSymbol=''){
     const loadVersion=++returnChartLoadVersion;
+    if(showFreshReturnChart())return true;
     let data;
     setReturnStatus('Загружаю сохранённые точки выбранной стратегии…');
     if(get_returnChartPlaceholder()){get_returnChartPlaceholder().textContent='Загружаю сохранённые точки доходности…';get_returnChartPlaceholder().hidden=false;}
@@ -1739,6 +1355,7 @@ function rememberPortfolioReturnHistory(ranking, scope='set'){
     loadReturnChart(runKey,document.querySelector('#symbol-select')?.value||'').catch(error=>setReturnStatus(error instanceof Error?error.message:'Не удалось загрузить историю доходности.'));
 }
 async function refreshReturnSelection(){
+    if(showFreshReturnChart())return;
     if(!activeReturnRunKey)return;
     try{
         const symbol=document.querySelector('#symbol-select')?.value||'';
@@ -1750,76 +1367,13 @@ async function refreshReturnSelection(){
     }catch(error){setReturnStatus(error instanceof Error?error.message:'Не удалось обновить график.');}
 }
 window.addEventListener('resize',()=>{if(activeReturnRunKey)refreshReturnSelection();});
-let strategyRangeComparisonVersion = 0;
-let strategyRangeComparisonTimer = null;
-let strategyRangeComparisonRequest = null;
-function scheduleStrategyRangeComparison() {
-    ++strategyRangeComparisonVersion;
-    window.clearTimeout(strategyRangeComparisonTimer);
-    strategyRangeComparisonRequest?.abort();
-    const panel = document.querySelector('#strategy-range-comparison');
-    if (!panel) return;
-    panel.hidden = !document.querySelector('#symbol-select')?.value;
-    if (panel.hidden) return;
-    document.querySelector('#strategy-range-comparison-table').replaceChildren();
-    document.querySelector('#strategy-range-comparison-status').textContent = 'Загружаю доходность соседних диапазонов…';
-    strategyRangeComparisonTimer = window.setTimeout(loadStrategyRangeComparison, 300);
-}
-async function loadStrategyRangeComparison() {
-    const version = strategyRangeComparisonVersion;
-    const params = new URLSearchParams(new FormData(filtersForm));
-    const status = document.querySelector('#strategy-range-comparison-status');
-    const tableWrap = document.querySelector('#strategy-range-comparison-table');
-    const selection = document.querySelector('#strategy-range-comparison-selection');
-    selection.textContent = [params.get('symbol'), document.querySelector('#entry-config')?.selectedOptions[0]?.textContent,
-        document.querySelector('#exit-config')?.selectedOptions[0]?.textContent].filter(Boolean).join(' · ');
-    if (!params.get('entry_config') || !params.get('exit_config')) {
-        status.textContent = 'Выберите порог входа и TakeProfit & StopLoss.';
-        return;
-    }
-    strategyRangeComparisonRequest = new AbortController();
-    try {
-        const response = await fetch('strategy-range-comparison.php?' + params.toString(), {
-            headers:{Accept:'application/json'}, cache:'no-store', signal:strategyRangeComparisonRequest.signal,
-        });
-        const data = await response.json();
-        if (version !== strategyRangeComparisonVersion) return;
-        if (!response.ok || data.status !== 'ready') throw new Error(data.message || 'Не удалось загрузить сравнение диапазонов.');
-        const table = document.createElement('table');
-        table.innerHTML = '<thead><tr><th>Диапазон</th><th>С даты</th><th>По дату</th><th>Дней</th><th>Доходность</th><th>Закрытых сделок</th></tr></thead>';
-        const body = document.createElement('tbody');
-        const dateText = value => new Date(value + 'T12:00:00Z').toLocaleDateString('ru-RU', {day:'2-digit',month:'short',year:'numeric',timeZone:'UTC'});
-        for (const range of data.ranges) {
-            const row = document.createElement('tr');
-            if (range.offset === 0) { row.style.background = '#263968'; row.setAttribute('aria-current', 'true'); }
-            const cells = [`(${range.offset > 0 ? '+' : ''}${range.offset})${range.offset === 0 ? ' · текущий' : ''}`,
-                dateText(range.start_day),dateText(range.end_day),String(range.days) + (range.partial ? ' · до сегодня' : ''),
-                range.return_percent === null ? 'Нет сохранённых закрытий' : optionPercent(Number(range.return_percent)),
-                Number(range.trade_count).toLocaleString('ru-RU')];
-            cells.forEach((text, index) => {
-                const cell = document.createElement('td');
-                cell.textContent = text;
-                if (index === 4 && range.return_percent !== null) cell.style.color = Number(range.return_percent) >= 0 ? '#3bd286' : '#f36c78';
-                row.append(cell);
-            });
-            body.append(row);
-        }
-        table.append(body);
-        tableWrap.replaceChildren(table);
-        status.textContent = `Длина выбранного диапазона: ${data.range_days} дн. · диапазонов: ${data.ranges.length} из 11`;
-    } catch (error) {
-        if (version !== strategyRangeComparisonVersion || error.name === 'AbortError') return;
-        status.textContent = error.message || 'Не удалось загрузить сравнение диапазонов.';
-    }
-}
-filtersForm?.addEventListener('change', scheduleStrategyRangeComparison);
-scheduleStrategyRangeComparison();
 async function restoreReturnChart(){
     const symbol=document.querySelector('#symbol-select')?.value||'', scopes=symbol?['ticker:'+symbol,'set']:['set'];
     try{const last=JSON.parse(localStorage.getItem(returnStorageKey('last'))||'null');if(last?.runKey){const restored=await loadReturnChart(last.runKey,symbol);if(restored)return;}}catch{}
     for(const scope of scopes){const key=localStorage.getItem(returnStorageKey(scope));if(!key)continue;try{const restored=await loadReturnChart(key,symbol);if(restored)return;}catch{} }
 }
 restoreReturnChart();
+showFreshReturnChart();
 
 filtersForm.elements.namedItem('balance').addEventListener('input', event => {
     filtersForm.elements.namedItem('balance_auto').value = '0';
@@ -1833,43 +1387,6 @@ tickerSetSelect?.addEventListener('change', () => {
     params.set('ticker_set', tickerSetSelect.value);
     params.delete('symbol');
     location.href = location.pathname + '?' + params.toString();
-});
-const favoriteView = <?= $favoriteView ? 'true' : 'false' ?>;
-if (favoriteView && filtersForm) {
-    filtersForm.querySelectorAll('select, input, button').forEach(control => { control.disabled = true; });
-}
-async function postFavorite(params, button, status = null) {
-    if (!button) return;
-    button.disabled = true;
-    const originalText = button.textContent;
-    if (status) status.textContent = 'Сохраняю в избранное…';
-    const body = new URLSearchParams(params);
-    try {
-        const response = await fetch('favorites.php', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'}, body});
-        const result = await response.json();
-        if (!response.ok || result.status !== 'ok') throw new Error(result.error || 'Не удалось сохранить стратегию');
-        if (status) status.textContent = 'Добавлено в избранное.';
-        button.textContent = '✓ Добавлено';
-        button.title = 'Сохранено в избранном';
-    } catch (error) {
-        if (status) status.textContent = error.message || 'Не удалось сохранить стратегию';
-        button.title = error.message || 'Не удалось сохранить стратегию';
-        button.textContent = originalText;
-        button.disabled = false;
-    }
-}
-document.querySelector('#add-favorite')?.addEventListener('click', () => {
-    if (!filtersForm) return;
-    const params = new URLSearchParams(new FormData(filtersForm));
-    params.set('favorite_type', 'strategy');
-    params.set('favorite_entry_label', document.querySelector('#entry-config')?.selectedOptions[0]?.textContent || '');
-    const exitLabel = document.querySelector('#exit-config')?.selectedOptions[0]?.textContent || '';
-    params.set('favorite_exit_label', exitLabel);
-    const resultMatch = exitLabel.match(/итог\s+([+-]?\d+(?:[.,]\d+)?)\s*USDT/i);
-    if (resultMatch) params.set('favorite_result', resultMatch[1].replace(',', '.'));
-    params.set('favorite_result_label', 'Итог');
-    params.set('favorite_name', symbolSelect.value + ' · текущая стратегия');
-    postFavorite(params, document.querySelector('#add-favorite'), document.querySelector('#favorite-status'));
 });
 function syncViewNavigation() {
     if (!filtersForm) return;
@@ -1988,7 +1505,6 @@ async function loadCachedTickerBestResults() {
     } catch (_) {}
 }
 async function loadTickerReturnSummary(runKey) {
-    if (favoriteView) return;
     const params = new URLSearchParams(new FormData(filtersForm));
     const symbols = [...symbolSelect.options].map(option => option.value).filter(Boolean);
     const summaryIdentity = JSON.stringify([runKey, params.get('start_day'), params.get('end_day'), params.get('save_mode'), params.get('exit_confirmation_mode'), params.get('exit_confirmation_snapshots'), symbols]);
@@ -2127,16 +1643,15 @@ comparePortfolioRankingsButton?.addEventListener('click', () => {
 });
 function setReturnHistoryActionState(state) {
     const ready = state === 'ready';
-    refreshSymbolsButton.hidden = !ready || favoriteView;
-    calculateReturnHistoryButton.hidden = ready || favoriteView;
-    calculateReturnHistoryButton.disabled = favoriteView || state === 'running';
+    refreshSymbolsButton.hidden = !ready;
+    calculateReturnHistoryButton.hidden = ready;
+    calculateReturnHistoryButton.disabled = state === 'running';
     calculateReturnHistoryButton.textContent = state === 'running'
         ? 'Доходность рассчитывается…'
         : `Рассчитать доходность для «${tickerSetSelect?.selectedOptions[0]?.textContent || 'списка'}»`;
 }
 async function checkReturnHistoryActionState() {
     const version = ++returnActionCheckVersion;
-    if (favoriteView) { setReturnHistoryActionState('missing'); return; }
     setTickerReturnSortPending(true);
     if (tickerReturnSortStatus) tickerReturnSortStatus.textContent = 'Проверяю доходность перед сортировкой торговых пар…';
     const params = new URLSearchParams(new FormData(filtersForm));
@@ -2192,7 +1707,7 @@ async function checkReturnHistoryActionState() {
                 if (result.run_key) void loadTickerReturnSummary(result.run_key);
                 else setTickerReturnSortPending(false);
             } else if (result.status === 'missing') {
-                if (!activeReturnRunKey) {
+                if (!activeReturnRunKey && !showFreshReturnChart()) {
                     setReturnStatus('Доходность для выбранного списка и дат ещё не рассчитана. Нажмите «Рассчитать доходность» выше.');
                     const summary = document.querySelector('#strategy-return-summary');
                     if (summary) summary.textContent = 'Точки доходности появятся здесь после отдельного расчёта истории для выбранного списка и периода.';
@@ -2217,7 +1732,7 @@ async function checkTickerReturnHistory() {
     const version=++tickerReturnCheckVersion;
     const params=new URLSearchParams(new FormData(filtersForm));
     const symbol=params.get('symbol')||'',entry=params.get('entry_config')||'',exit=params.get('exit_config')||'';
-    if(!symbol||!entry||!exit||params.get('martingale_mode')!=='none')return;
+    if(!symbol||!entry||!exit)return;
     params.set('return_history_status','1');
     try{
         const response=await fetch('strategy-ranking.php?'+params.toString(),{headers:{Accept:'application/json'},cache:'no-store'});
@@ -2313,8 +1828,9 @@ async function refreshCandleImportVisibility() {
     const start = filtersForm.elements.namedItem('start_day').value;
     const end = endDayInput.value;
     const symbol = symbolSelect.value;
-    selectedSymbolImportButton.hidden = true;
-    allSymbolsImportButton.hidden = true;
+    if (selectedSymbolImportButton) selectedSymbolImportButton.hidden = true;
+    if (allSymbolsImportButton) allSymbolsImportButton.hidden = true;
+    if (!selectedSymbolImportButton && !allSymbolsImportButton) return;
     if (!start || !end || end < start) return;
     const tickerSet = filtersForm.querySelector('[name="ticker_set"]')?.value || '';
     const query = new URLSearchParams({start_day:start, end_day:end, symbol, ticker_set:tickerSet});
@@ -2322,8 +1838,8 @@ async function refreshCandleImportVisibility() {
         const response = await fetch('candle-completeness.php?' + query.toString(), {headers:{Accept:'application/json'}, cache:'no-store'});
         const result = await response.json();
         if (!response.ok || result.status !== 'ready' || version !== candleCompletenessVersion) return;
-        selectedSymbolImportButton.hidden = !symbol || !result.symbol_incomplete;
-        allSymbolsImportButton.hidden = !result.all_incomplete;
+        if (selectedSymbolImportButton) selectedSymbolImportButton.hidden = !symbol || !result.symbol_incomplete;
+        if (allSymbolsImportButton) allSymbolsImportButton.hidden = !result.all_incomplete;
     } catch (_) {
         // Keep import controls hidden if completeness cannot be checked.
     }
@@ -2663,81 +2179,6 @@ const strategyRankingTimer = createElapsedTimer(document.querySelector('#strateg
 const portfolioRankingTimer = createElapsedTimer(document.querySelector('#portfolio-ranking-timer'), 'Время общего рейтинга');
 let portfolioRankingRequestVersion = 0;
 let portfolioRankingStatusPolling = false;
-const martingaleCacheStatus = document.querySelector('#martingale-cache-status');
-const martingaleDraftStatus = document.querySelector('#martingale-draft-status');
-const martingaleInitialNotional = document.querySelector('#martingale-initial-notional');
-const martingaleApplyButton = document.querySelector('#apply-martingale-settings');
-const martingaleControls = [...filtersForm.querySelectorAll('[data-martingale-setting]')];
-const martingaleAppliedControls = ['martingale_mode', 'martingale_timing', 'martingale_attempts', 'martingale_max_chain_loss', 'martingale_max_day_loss']
-    .map(name => filtersForm.elements.namedItem(name));
-function readMartingaleSettings() {
-    return Object.fromEntries(martingaleControls.map(control => [control.dataset.martingaleSetting, control.value]));
-}
-function readAppliedMartingaleSettings() {
-    return Object.fromEntries(martingaleAppliedControls.map(control => [control.name, control.value]));
-}
-function writeAppliedMartingaleSettings(settings) {
-    martingaleAppliedControls.forEach(control => { control.value = settings[control.name]; });
-}
-function updateMartingaleDraftState() {
-    const hasDraftChanges = JSON.stringify(readMartingaleSettings()) !== JSON.stringify(lastMartingaleSettings);
-    martingaleApplyButton.disabled = !hasDraftChanges || martingaleSettingsResetPending;
-    martingaleDraftStatus.hidden = !hasDraftChanges;
-    martingaleDraftStatus.textContent = hasDraftChanges ? 'Есть неприменённые настройки мартингейла. Расчёты используют последние применённые параметры.' : '';
-}
-let lastMartingaleSettings = readAppliedMartingaleSettings();
-let martingaleSettingsResetPending = false;
-function updateMartingaleInitialNotional() {
-    if (!martingaleInitialNotional) return;
-    const settings = readMartingaleSettings();
-    if (settings.martingale_mode === 'none') {
-        martingaleInitialNotional.textContent = 'Мартингейл выключен';
-        return;
-    }
-    const balance = Number(filtersForm.elements.namedItem('balance').value);
-    const fee = Number(filtersForm.elements.namedItem('fee').value) / 100;
-    const attempts = Number(settings.martingale_attempts);
-    const selectedExit = exitConfigSelect.value;
-    const policyMatch = selectedExit.match(/:(scaled|fixed)$/);
-    const policy = policyMatch?.[1] || 'scaled';
-    const exitId = selectedExit.replace(/:(scaled|fixed)$/, '');
-    let stopLoss = null;
-    let fixedMatch = exitId.match(/^fixed:\d+:(\d+)$/);
-    let lossMatch = exitId.match(/^loss:(\d+)$/);
-    if (fixedMatch) stopLoss = balance * Number(fixedMatch[1]) / 10000;
-    else if (lossMatch) stopLoss = balance * Number(lossMatch[1]) / 1000;
-
-    if (!(balance > 0) || !(attempts >= 2) || !Number.isFinite(fee)) {
-        martingaleInitialNotional.textContent = 'Проверьте баланс и комиссию';
-        return;
-    }
-    const finalScale = 2 ** (attempts - 1);
-    const previousScale = 2 ** (attempts - 2);
-    let reservedLoss = 0;
-    let requiredPerInitialDollar = finalScale;
-    if (settings.martingale_mode.endsWith('_profit')) {
-        // Profit-triggered progressions are sized to fit the planned geometric
-        // sequence from the starting balance.
-    } else if (stopLoss !== null) {
-        if (settings.martingale_mode === 'simple') {
-            reservedLoss = stopLoss * (policy === 'scaled' ? previousScale : 1);
-            requiredPerInitialDollar += fee * previousScale;
-        } else {
-            reservedLoss = stopLoss * (policy === 'scaled' ? finalScale - 1 : attempts - 1);
-            requiredPerInitialDollar *= 1 + fee;
-        }
-    }
-    let initialNotional = Math.max(0, (balance - reservedLoss) / requiredPerInitialDollar);
-    initialNotional = Math.min(initialNotional, balance / (1 + fee));
-    if (initialNotional <= 0) {
-        martingaleInitialNotional.textContent = '0,00 USDT · баланса не хватает на всю серию';
-        return;
-    }
-    martingaleInitialNotional.textContent = new Intl.NumberFormat('ru-RU', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6,
-    }).format(initialNotional) + ' USDT';
-}
 function setRefreshProgress(progress, title) {
     const progressKnown = progress !== null && progress !== undefined && Number.isFinite(Number(progress));
     const percent = progressKnown ? Math.max(0, Math.min(100, Math.round(Number(progress)))) : null;
@@ -2887,22 +2328,6 @@ saveModeToggle.addEventListener('change', () => {
 });
 let filterSubmitTimer;
 let replayRequest;
-document.querySelector('#exit-confirmation-mode')?.addEventListener('change', event => {
-    const noExit = event.target.value === 'none';
-    const exitConfigField = document.querySelector('#exit-config-field');
-    if (exitConfigField) exitConfigField.hidden = noExit;
-    if (exitConfigSelect) {
-        if (noExit) {
-            exitConfigSelect.replaceChildren(new Option('Не применяется · позиция удерживается до конца периода', 'none', true, true));
-        } else if (exitConfigSelect.value === 'none') {
-            exitConfigSelect.replaceChildren(...initialExitOptions.filter(item => item.id !== 'none').map(item => new Option(item.label, item.id)));
-            if (exitConfigSelect.options.length) exitConfigSelect.selectedIndex = 0;
-        }
-        exitConfigSelect.disabled = noExit || !symbolSelect?.value;
-    }
-    if (noExit && selectTopRankedResultInput) selectTopRankedResultInput.value = '0';
-    filtersForm.requestSubmit();
-});
 function revealStrategyResults() {
     document.querySelector('#chart-panel')?.removeAttribute('hidden');
     document.querySelector('#results')?.removeAttribute('hidden');
@@ -2952,6 +2377,7 @@ async function refreshStrategyResults() {
         if (placeholder) placeholder.hidden = true;
         const chartScript = [...updatedPage.scripts].find(script => script.textContent.includes('const datasets ='));
         if (chartScript) new Function(chartScript.textContent)();
+        showFreshReturnChart();
         if (restoreReturnMode) setChartMode('returns');
     } catch (error) {
         if (error.name !== 'AbortError') {
@@ -2964,13 +2390,7 @@ async function refreshStrategyResults() {
 filtersForm.querySelectorAll('select, input').forEach(control => {
     control.addEventListener('change', () => {
         if (control.classList.contains('ranking-range-input') || control.classList.contains('ranking-mode-input')) return;
-        if (martingaleControls.includes(control)) {
-            updateMartingaleInitialNotional();
-            updateMartingaleDraftState();
-            return;
-        }
         if (control.id === 'entry-config') {
-            updateMartingaleInitialNotional();
             refreshAfterExitRanking = true;
             const selectedExit = exitConfigSelect.value;
             exitRankingRequestVersion++;
@@ -2978,15 +2398,11 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
             loadExitRanking(selectedExit);
             return;
         }
-        if (control.id === 'entry-signal-mode' || control.id === 'entry-direction-mode') {
-            selectTopRankedResultInput.value = '1';
-        }
         if (control.id === 'exit-config') {
             const selectedOption = control.selectedOptions[0];
             if (selectedOption?.dataset.confirmationSnapshots) {
                 document.querySelector('#exit-confirmation-snapshots').value = selectedOption.dataset.confirmationSnapshots;
             }
-            updateMartingaleInitialNotional();
             refreshStrategyResults();
             return;
         }
@@ -3002,11 +2418,6 @@ filtersForm.querySelectorAll('select, input').forEach(control => {
     });
     if (control.type === 'number' && !control.classList.contains('ranking-range-input')) {
         control.addEventListener('input', () => {
-            updateMartingaleInitialNotional();
-            if (martingaleControls.includes(control)) {
-                updateMartingaleDraftState();
-                return;
-            }
             clearTimeout(filterSubmitTimer);
             filterSubmitTimer = setTimeout(() => {
                 if (control.value !== '' && control.checkValidity()) {
@@ -3112,11 +2523,6 @@ function renderEntryOptions(entries, selected, resultUnit='USDT') {
     }
 }
 function renderExitOptions(items, selected, selectedSnapshots=null) {
-    if (document.querySelector('#exit-confirmation-mode')?.value === 'none') {
-        exitConfigSelect.replaceChildren(new Option('Не применяется · позиция удерживается до конца периода', 'none', true, true));
-        exitConfigSelect.disabled = true;
-        return;
-    }
     if(!Array.isArray(items)||!items.length)return;
     if (exitOrderLocked && exitConfigSelect.value && exitConfigSelect.value !== 'none') {
         selected = exitConfigSelect.value;
@@ -3139,7 +2545,6 @@ function renderExitOptions(items, selected, selectedSnapshots=null) {
         &&(selectedSnapshots===null||Number(item.snapshots)===selectedSnapshots))
         ||items.find(item=>item.id===exitConfigSelect.value);
     if(selectedItem?.snapshots)document.querySelector('#exit-confirmation-snapshots').value=String(selectedItem.snapshots);
-    scheduleStrategyRangeComparison();
 }
 renderEntryOptions(initialEntryOptions,entryConfigSelect.value);
 renderExitOptions(initialExitOptions,exitConfigSelect.value,Number(document.querySelector('#exit-confirmation-snapshots')?.value)||60);
@@ -3147,65 +2552,6 @@ if (symbolSelect?.value && serverRenderedSelectionMatches()) revealStrategyResul
 let exitRankingRequestVersion = 0;
 let refreshAfterExitRanking = false;
 let rankingMaintenancePending = false;
-async function handleMartingaleSettingsChange() {
-    const nextSettings = readAppliedMartingaleSettings();
-    if (JSON.stringify(nextSettings) === JSON.stringify(lastMartingaleSettings) || martingaleSettingsResetPending) return;
-    const previousSettings = lastMartingaleSettings;
-    lastMartingaleSettings = nextSettings;
-    updateMartingaleInitialNotional();
-    const martingaleWasActive = previousSettings.martingale_mode !== 'none';
-    const martingaleIsActive = nextSettings.martingale_mode !== 'none';
-    if (!martingaleWasActive && !martingaleIsActive) {
-        filtersForm.requestSubmit();
-        return;
-    }
-
-    martingaleSettingsResetPending = true;
-    rankingMaintenancePending = true;
-    exitRankingRequestVersion++;
-    replayRequest?.abort();
-    resetPortfolioRankingForRelevantFilterChange();
-    entryConfigSelect.disabled = true;
-    exitConfigSelect.disabled = true;
-    martingaleControls.forEach(control => { control.disabled = true; });
-    martingaleApplyButton.disabled = true;
-    stopCalculationQueueButton.disabled = true;
-    martingaleCacheStatus.hidden = false;
-    martingaleCacheStatus.textContent = 'Останавливаю старые расчёты и обновляю рейтинг мартингейла…';
-    let resetSucceeded = false;
-    try {
-        const response = await fetch('reset-strategy-ranking-cache.php', {
-            method: 'POST',
-            headers: {Accept: 'application/json'},
-            cache: 'no-store',
-        });
-        const result = await response.json();
-        if (!response.ok || result.status !== 'ready') {
-            throw new Error(result.message || 'Не удалось сбросить предыдущие рейтинги');
-        }
-        rankingGenerationInput.value = result.generation;
-        resetSucceeded = true;
-    } catch (error) {
-        writeAppliedMartingaleSettings(previousSettings);
-        martingaleControls.forEach(control => { control.value = previousSettings[control.dataset.martingaleSetting]; });
-        lastMartingaleSettings = previousSettings;
-        updateMartingaleInitialNotional();
-        martingaleCacheStatus.textContent = (error.message || 'Не удалось сбросить предыдущие рейтинги') + '. Настройки восстановлены.';
-    } finally {
-        rankingMaintenancePending = false;
-        martingaleSettingsResetPending = false;
-        entryConfigSelect.disabled = false;
-        exitConfigSelect.disabled = false;
-        martingaleControls.forEach(control => { control.disabled = false; });
-        stopCalculationQueueButton.disabled = false;
-        updateMartingaleDraftState();
-    }
-    if (resetSucceeded) filtersForm.requestSubmit();
-}
-martingaleApplyButton.addEventListener('click', () => {
-    writeAppliedMartingaleSettings(readMartingaleSettings());
-    handleMartingaleSettingsChange();
-});
 const exitConfirmationSnapshotCounts = [1, 2, 3, 5, 10, 20, 30, 40, 60, 80];
 async function loadExitRanking(preferredExit = null, isPoll = false) {
     if (rankingMaintenancePending) return;
@@ -3226,7 +2572,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
         return;
     }
     setStrategySortIndicators(true,0,0);
-    if (!selectorReturnRunKey && (params.get('martingale_mode') || 'none') === 'none') {
+    if (!selectorReturnRunKey) {
         try {
             const historyParams = new URLSearchParams(params);
             historyParams.delete('symbol');
@@ -3242,7 +2588,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             }
         } catch (_) {}
     }
-    if(selectorReturnRunKey || (params.get('martingale_mode') || 'none') === 'none'){
+    {
         const historyRequestVersion=exitRankingRequestVersion;
         try{
             const selectedSymbol=params.get('symbol')||'';
@@ -3431,8 +2777,7 @@ async function loadExitRanking(preferredExit = null, isPoll = false) {
             finalParams.delete('select_top_ranked_result');
             history.replaceState(null, '', location.pathname + '?' + finalParams.toString());
         }
-        updateMartingaleInitialNotional();
-        if (appliedAutomaticSelection || refreshAfterExitRanking) {
+                if (appliedAutomaticSelection || refreshAfterExitRanking) {
             refreshAfterExitRanking = false;
             void refreshStrategyResults();
         } else {
@@ -3623,26 +2968,7 @@ function rankingTable(container, columns, rows, sortOptions = null) {
                     link.rel = 'noopener';
                     link.textContent = value.text;
                     link.title = 'Открыть результаты этой комбинации по всем тикерам в новой вкладке';
-                    cell.appendChild(link);
-                } else if (value && typeof value === 'object' && value.favoriteParams) {
-                    const button = document.createElement('button');
-                    button.type = 'button';
-                    button.className = 'ranking-favorite-button';
-                    button.textContent = '☆';
-                    button.title = 'Добавить эту комбинацию в избранное';
-                    button.setAttribute('aria-label', button.title);
-                    button.addEventListener('click', () => postFavorite(value.favoriteParams, button));
-                    cell.appendChild(button);
-                } else if (value && typeof value === 'object' && value.favoriteUnavailable) {
-                    const button = document.createElement('button');
-                    button.type = 'button';
-                    button.className = 'ranking-favorite-button';
-                    button.textContent = '☆';
-                    button.disabled = true;
-                    button.title = 'Для этой строки пока нет готовой стратегии';
-                    button.setAttribute('aria-label', button.title);
-                    cell.appendChild(button);
-                } else {
+                    cell.appendChild(link); else {
                     cell.textContent = value === null || value === undefined ? '—' : String(value);
                 }
                 if (columns[index].numeric) cell.className = 'numeric';
@@ -4126,45 +3452,18 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', cal
         portfolioRankingContent.hidden = portfolioRankingCollapsed;
         const canLinkCurrentSettings = !showingSavedResult;
         const rankingUnit = ranking.ranking_data_source === 'strategy_return_points' ? '%' : 'USDT';
-        const savedMartingaleMode = ranking.history_metadata?.parameters?.martingale?.mode ?? null;
-        const tradeMetricLabel = showingSavedResult
-            ? (savedMartingaleMode === null ? 'Сделки / цепочки' : (savedMartingaleMode === 'none' ? 'Сделки' : 'Ордеры · цепочки'))
-            : (params.get('martingale_mode') && params.get('martingale_mode') !== 'none' ? 'Ордеры · цепочки' : 'Сделки');
-        const favoritePayload = (item, type, symbol) => {
-            if (!canLinkCurrentSettings) return {favoriteUnavailable: true};
-            if (!item.entry_id || !item.exit_id) return {favoriteUnavailable: true};
-            const favoriteParams = new URLSearchParams(params);
-            favoriteParams.set('favorite_type', type);
-            favoriteParams.set('symbol', symbol || symbolSelect.value);
-            favoriteParams.set('favorite_ranking_entry_config', params.get('entry_config') || '');
-            favoriteParams.set('entry_config', item.entry_id || '');
-            favoriteParams.set('exit_config', item.exit_id || '');
-            favoriteParams.set('favorite_entry_label', item.entry_label || '');
-            favoriteParams.set('favorite_exit_label', item.exit_label || '');
-            if (type === 'ticker_leader' && item.pnl !== null && item.pnl !== undefined && Number.isFinite(Number(item.pnl))) {
-                favoriteParams.set('favorite_result', Number(item.pnl).toFixed(8));
-                favoriteParams.set('favorite_result_label', 'Итог тикера');
-            }
-            if (type === 'ticker_leader' && item.market_average_pnl !== null && item.market_average_pnl !== undefined && Number.isFinite(Number(item.market_average_pnl))) {
-                favoriteParams.set('favorite_market_average', Number(item.market_average_pnl).toFixed(8));
-                favoriteParams.set('favorite_market_average_label', 'Средний итог этой пары на рынке');
-            }
-            favoriteParams.set('favorite_name', `${type === 'global_top' ? 'Общий топ-5' : symbol} · ${item.entry_label || item.entry_id} · ${item.exit_label || item.exit_id}`);
-            return favoriteParams;
-        };
+        const tradeMetricLabel = 'Сделки';
         const globalRows = (ranking.global_top || []).map(item => {
             const detailLink = canLinkCurrentSettings ? portfolioCombinationDetailLink(params, item) : null;
             return [
                 detailLink?.entry || item.entry_label, detailLink?.exit || item.exit_label, pnlText(item.average_pnl, rankingUnit),
                 item.eligible_symbols + ' из ' + ranking.universe_size,
                 String(item.profitable_symbols),
-                {favoriteParams: favoritePayload(item, 'global_top', symbolSelect.value)},
             ];
         });
         rankingTable(document.querySelector('#portfolio-global-table'), [
             {label:'Порог входа'}, {label:'TakeProfit & StopLoss'},
             {label:`Средний итог на тикер · ${rankingUnit}`,numeric:true}, {label:'Подходят по SAVE MODE',numeric:true}, {label:'В плюсе',numeric:true},
-            {label:'Избранное'},
         ], globalRows);
         const tickerRows = (ranking.ticker_leaders || []).map(item => {
             const detailLink = canLinkCurrentSettings ? portfolioCombinationDetailLink(params, item) : null;
@@ -4175,10 +3474,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', cal
                     item.symbol, entryCell, exitCell,
                     pnlText(item.pnl, rankingUnit), pnlText(item.market_average_pnl, rankingUnit),
                     item.market_eligible_symbols === undefined ? '—' : item.market_eligible_symbols + ' из ' + ranking.universe_size,
-                    item.trade_count ? (showingSavedResult
-                        ? (savedMartingaleMode === null ? `${item.trade_count} · ${item.chain_count ?? 0}` : (savedMartingaleMode === 'none' ? String(item.trade_count) : `${item.trade_count} · ${item.chain_count ?? 0}`))
-                        : (!params.get('martingale_mode') || params.get('martingale_mode') === 'none' ? String(item.trade_count) : `${item.trade_count} · ${item.chain_count ?? 0}`)) : 'нет надежных данных',
-                    {favoriteParams: favoritePayload(item, 'ticker_leader', item.symbol)},
+                    item.trade_count ? String(item.trade_count) : 'нет надежных данных',
                 ],
                 sortValues: {
                     tickerPnl: item.pnl === null || item.pnl === undefined ? null : Number(item.pnl),
@@ -4190,7 +3486,7 @@ async function loadPortfolioRanking({cachedOnly = false, savedCacheKey = '', cal
         rankingTable(document.querySelector('#portfolio-ticker-table'), [
             {label:'Тикер'}, {label:'Лучший порог входа'}, {label:'Лучший TakeProfit & StopLoss'},
             {label:`Итог тикера · ${rankingUnit}`,numeric:true,sortKey:'tickerPnl',defaultDirection:'desc'}, {label:`Средний итог этой пары на рынке · ${rankingUnit}`,numeric:true,sortKey:'marketAverage',defaultDirection:'desc'},
-            {label:'Поддержка',numeric:true}, {label:tradeMetricLabel,numeric:true}, {label:'Избранное'},
+            {label:'Поддержка',numeric:true}, {label:tradeMetricLabel,numeric:true},
         ], tickerRows, {initialKey:'tickerPnl',initialDirection:'desc'});
         portfolioRankingStatus.textContent = showingSavedResult
             ? `Показан сохранённый рейтинг за ${ranking.start_day || 'неизвестный период'} — ${ranking.end_day || 'неизвестный период'}; в расчёте ${ranking.universe_size} тикеров. SAVE MODE требует минимум ${ranking.min_trades}${ranking.min_trades === 1 ? ' сделку.' : ' сделки.'}`
@@ -4243,12 +3539,6 @@ refreshSymbolsButton.addEventListener('click', () => {
 calculateReturnHistoryButton?.addEventListener('click', () => {
     if (rankingMaintenancePending) return;
     setPortfolioRankingCollapsed(false);
-    if ((filtersForm.elements.namedItem('martingale_mode')?.value || 'none') !== 'none') {
-        setPortfolioRankingCollapsed(false);
-        portfolioRankingContent.hidden = false;
-        portfolioRankingStatus.textContent = 'Для расчёта истории и рейтинга из таблицы выберите обычный режим без мартингейла.';
-        return;
-    }
     loadPortfolioRanking({calculateReturnsOnly: true});
 });
 const collectorStatus = latestQuoteControl;
@@ -4313,11 +3603,8 @@ refreshCollectorStatus();
 window.setInterval(refreshCollectorStatus, 30000);
 refreshCalculationQueue();
 window.setInterval(refreshCalculationQueue, 5000);
-updateMartingaleInitialNotional();
-if (!favoriteView) {
-    void ensurePortfolioRankingCacheChecked();
-    void checkReturnHistoryActionState();
-    if (symbolSelect.value) loadCachedTickerBestResults();
-    loadExitRanking();
-}
+void ensurePortfolioRankingCacheChecked();
+void checkReturnHistoryActionState();
+if (symbolSelect.value) loadCachedTickerBestResults();
+loadExitRanking();
 </script></body></html>

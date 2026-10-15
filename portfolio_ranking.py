@@ -28,7 +28,8 @@ import pymysql
 from app import load_config
 from contract_rules import load_contract_specs, numba_market_order_rules
 from futures_costs import load_historical_funding_rates
-from database import connect_mysql, ensure_strategy_return_profile, flush_strategy_return_points
+from database import connect_mysql
+from strategy_return_run_store import ReturnRunStore
 from ranking_checkpoints import (
     CHECKPOINT_MIN_FREE_BYTES,
     STATE_DTYPE,
@@ -233,21 +234,10 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
         return symbol, None, 0, 0, 0, False, "unused", ()
 
     args = state["args"]
-    global _PORTFOLIO_WORKER_TRADE_CONNECTION
-    if args.persist_returns and _PORTFOLIO_WORKER_TRADE_CONNECTION is None:
-        _PORTFOLIO_WORKER_TRADE_CONNECTION = connect_mysql(state["mysql_config"])
-    trade_connection = _PORTFOLIO_WORKER_TRADE_CONNECTION if args.persist_returns else None
-    if trade_connection is not None:
-        trade_connection.ping(reconnect=True)
     source_return_run_key = ""
     source_return_start_day = args.start_day
     source_return_end_day = ""
-    trade_rows: list[tuple[Any, ...]] = []
-    profile_ids: dict[str, int] = {}
-    trade_insert_sql = (
-        "INSERT IGNORE INTO strategy_return_points "
-        "(symbol,strategy_id,point_minute,return_percent,trade_count) VALUES (%s,%s,%s,%s,%s)"
-    )
+    return_store = ReturnRunStore(args.cache_dir, args.return_run_key, symbol, {'balance': args.balance, 'fee': args.fee_percent, 'slippage_bps': args.slippage_bps, 'include_funding': args.include_funding, 'entry_signal_mode': state['ranking'].get('entry_signal_mode', 'exact'), 'entry_direction_mode': state['ranking'].get('entry_direction_mode', 'follow')}) if args.persist_returns else None
     range_start_timestamp = datetime.combine(date.fromisoformat(args.start_day), day_time.min, KYIV).timestamp()
     range_start_quote_count = int(np.searchsorted(quotes.timestamps, range_start_timestamp, side="left"))
     if immediate_short is not None:
@@ -329,7 +319,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
         else (None if first_missing_day == 0 else args.end_day)
         ))
     ) if use_checkpoint else None
-    if previous_checkpoint is None and checkpoint_path is not None and resume_until_day is not None:
+    if not args.persist_returns and previous_checkpoint is None and checkpoint_path is not None and resume_until_day is not None:
         previous_checkpoint = load_best_state_checkpoint(
             symbol_state, symbol, entry_id, resume_until_day, quotes, len(state["exit_options"]),
         )
@@ -372,7 +362,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
     ]
     day_quote_counts_to_capture = np.fromiter((count for _, count in boundaries_to_capture), dtype=np.int64)
 
-    cached_results = load_pair_result_cache(cache_path)
+    cached_results = {} if args.persist_returns else load_pair_result_cache(cache_path)
     batch_results: dict[tuple[str, str], tuple[float, int, int]] = {}
     if args.martingale_mode != "none":
         uncached = [
@@ -422,30 +412,7 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
                     pnl, trade_count, next_state, day_states = simulation_result[:4]
                     if args.persist_returns:
                         trade_events = simulation_result[4]
-                        prior_trade_count, prior_cumulative_percent = prior_events_by_exit.get(exit_id, (0, 0.0))
-                        cumulative_factor = 1.0 + prior_cumulative_percent / 100.0
-                        for trade_index, (entry_quote_index, exit_quote_index, event_pnl, balance_before, provisional) in enumerate(trade_events):
-                            if balance_before <= 0 or entry_quote_index < 0 or exit_quote_index < 0:
-                                continue
-                            trade_return = event_pnl / balance_before
-                            cumulative_factor *= 1.0 + trade_return
-                            if not provisional:
-                                strategy_id = profile_ids.get(exit_id)
-                                if strategy_id is None:
-                                    strategy_id = ensure_strategy_return_profile(
-                                        trade_connection, entry_id, entry_spec[1], exit_id,
-                                        state["exit_options"][exit_index][1],
-                                        state["exit_confirmation_mode"],
-                                        state["exit_confirmation_snapshots"] if state["exit_confirmation_mode"] != "immediate" else 0,
-                                    )
-                                    profile_ids[exit_id] = strategy_id
-                                point_time = datetime.fromtimestamp(
-                                    float(quotes.timestamps[exit_quote_index]), timezone.utc
-                                ).replace(second=0, microsecond=0, tzinfo=None)
-                                trade_rows.append((symbol, strategy_id, point_time, f"{trade_return * 100:.10f}", 1))
-                        if len(trade_rows) >= 5000:
-                            flush_strategy_return_points(trade_connection, trade_rows)
-                            trade_rows.clear()
+                        return_store.record(entry_id, entry_spec[1], exit_id, state["exit_options"][exit_index][1], quotes, trade_events, args.balance, pnl)
                     for index, (day, _) in enumerate(boundaries_to_capture):
                         states_by_day[day][state_index] = day_states[index]
                         state_counts_by_day[day] += 1
@@ -502,9 +469,8 @@ def simulate_symbol_entry(task: tuple[str, tuple[str, str, int | None, int | Non
         if results is not None:
             results[exit_index] = (pnl, trade_count, chain_count)
 
-    if trade_connection is not None:
-        if trade_rows:
-            flush_strategy_return_points(trade_connection, trade_rows)
+    if return_store is not None:
+        return_store.close()
     if cache_updated:
         write_pair_result_cache(cache_path, cached_results)
     checkpoint_status = "unused"
@@ -579,6 +545,7 @@ def main() -> int:
             payload = {
                 **payload,
                 "return_run_key": args.return_run_key,
+                "return_storage_version": 2,
                 "exit_confirmation_mode": confirmation_mode,
                 "exit_confirmation_snapshots": confirmation_snapshots if confirmation_mode != "immediate" else 0,
             }
@@ -825,6 +792,7 @@ def main() -> int:
         exit_index_by_id = {option[0]: index for index, option in enumerate(exit_options)}
         _PORTFOLIO_WORKER_STATE = {
             "quotes_by_symbol": quotes_by_symbol,
+            "ranking": ranking,
             "take_confirmation_snapshots": take_confirmation_snapshots,
             "stop_confirmation_snapshots": stop_confirmation_snapshots,
             "exit_confirmation_mode": confirmation_mode,
@@ -1051,14 +1019,11 @@ def main() -> int:
                 "start_day": args.start_day, "end_day": args.end_day,
                 "return_run_key": args.return_run_key,
             })
-            history_connection = connect_mysql(config["mysql"])
-            try:
-                with history_connection.cursor() as cursor:
-                    cursor.execute("SELECT COUNT(*) FROM strategy_return_points WHERE point_minute >= %s AND point_minute < %s", (start_utc, end_utc))
-                    count_row = cursor.fetchone()
-                    return_point_count = int(count_row[0]) if count_row else 0
-            finally:
-                history_connection.close()
+            import sqlite3
+            return_point_count = 0
+            for path in (args.cache_dir / 'return-runs' / args.return_run_key).glob('*.sqlite'):
+                with sqlite3.connect(path) as stored:
+                    return_point_count += int(stored.execute('SELECT COALESCE(SUM(closed_trade_count),0) FROM totals').fetchone()[0])
         if args.return_history_only:
             write_json(status_path, {
                 "status": "ready", "progress": 100,

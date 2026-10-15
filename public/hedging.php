@@ -5,26 +5,15 @@ date_default_timezone_set('Europe/Kyiv');
 $root = dirname(__DIR__);
 $config = json_decode((string) file_get_contents($root . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
 require_once __DIR__ . '/ticker-settings-lib.php';
-$favoritesPath = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-favorites.json';
-$favoriteView = false;
-$favorite = null;
-$favoriteId = trim((string) ($_GET['favorite_id'] ?? ''));
-if ($favoriteId !== '' && is_file($favoritesPath)) {
-    $storedFavorites = json_decode((string) file_get_contents($favoritesPath), true);
-    if (is_array($storedFavorites)) {
-        foreach ($storedFavorites as $storedFavorite) {
-            if (is_array($storedFavorite) && (string) ($storedFavorite['id'] ?? '') === $favoriteId
-                && (string) ($storedFavorite['type'] ?? '') === 'hedge'
-                && is_array($storedFavorite['params'] ?? null)) {
-                $favorite = $storedFavorite;
-                $_GET = array_merge($_GET, $storedFavorite['params']);
-                $favoriteView = true;
-                break;
-            }
-        }
-    }
+session_name('bitget_hedging_session');
+$hedgeSessionOpen = session_start(['cookie_httponly'=>true, 'cookie_samesite'=>'Lax']);
+$requestedTickerSet = trim((string) ($_GET['ticker_set'] ?? ($hedgeSessionOpen ? ($_SESSION['ticker_set'] ?? '') : '')));
+$tickerSetSelection = selectedTickerSet($config, $requestedTickerSet);
+if ($hedgeSessionOpen) {
+    $_SESSION['ticker_set'] = $tickerSetSelection['id'];
+    session_write_close();
 }
-$tickerSetSelection = selectedTickerSet($config, trim((string) ($_GET['ticker_set'] ?? '')));
+
 $tickerSetId = $tickerSetSelection['id'];
 $tickerSetOptions = $tickerSetSelection['sets'];
 $symbols = $tickerSetSelection['symbols'];
@@ -66,14 +55,13 @@ $endDay = (string) ($_GET['end_day'] ?? $today->format('Y-m-d'));
 $balanceAutoManaged = (string) ($_GET['balance_auto'] ?? '0') === '1';
 $balance = (string) ($_GET['balance'] ?? '100');
 $fee = (string) ($_GET['fee'] ?? '0.06');
+$intervalMode = in_array((string) ($_GET['interval'] ?? 'two_weeks'), ['week', 'two_weeks', 'month'], true) ? (string) $_GET['interval'] : 'two_weeks';
+$excludedIntervals = filter_var($_GET['exclude_last_intervals'] ?? '1', FILTER_VALIDATE_INT);
+if ($excludedIntervals === false || $excludedIntervals < 0 || $excludedIntervals > 2) $excludedIntervals = 1;
 $longSymbol = strtoupper((string) ($_GET['long_symbol'] ?? ($symbols[0] ?? '')));
 $shortSymbol = strtoupper((string) ($_GET['short_symbol'] ?? ($symbols[1] ?? '')));
-$favoriteSymbolsDisabled = $favoriteView && (
-    !in_array(strtoupper((string) ($favorite['params']['long_symbol'] ?? '')), $symbols, true)
-    || !in_array(strtoupper((string) ($favorite['params']['short_symbol'] ?? '')), $symbols, true)
-);
-if (!in_array($longSymbol, $symbols, true)) $longSymbol = $symbols[0] ?? '';
-if (!in_array($shortSymbol, $symbols, true) || $shortSymbol === $longSymbol) {
+if ($longSymbol !== '' && !in_array($longSymbol, $symbols, true)) $longSymbol = $symbols[0] ?? '';
+if (($shortSymbol !== '' && !in_array($shortSymbol, $symbols, true)) || ($shortSymbol !== '' && $shortSymbol === $longSymbol)) {
     $shortSymbol = current(array_values(array_filter($symbols, static fn (string $symbol): bool => $symbol !== $longSymbol))) ?: '';
 }
 $basicParams = $_GET;
@@ -103,28 +91,32 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bitget — хеджирование</title>
 <style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149;--green:#42d6a4;--red:#ff7188;--blue:#86a8ff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:none;margin:0 auto;padding:30px 20px}.page-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:14px}.eyebrow{color:#8ea5ff;text-transform:uppercase;letter-spacing:.13em;font-size:12px;font-weight:700}.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.panel{background:color-mix(in srgb,var(--panel) 95%,transparent);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px;box-shadow:0 18px 50px #0003}.filters{display:block}.hedge-filter-grid{display:grid;grid-template-columns:minmax(360px,.85fr) minmax(0,1.5fr);gap:18px 28px;align-items:start}.hedge-pair-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:end}.hedge-pair-controls .field select{width:100%;min-width:0}.hedge-pair-controls .small-note{grid-column:1/-1;margin:0}.hedge-period-controls{display:grid;grid-template-columns:repeat(4,minmax(0,220px));gap:12px;align-items:end;justify-content:start;padding:16px;border:1px solid #273149;border-radius:14px;background:#0c1222}.hedge-period-controls .field input{width:100%;min-width:0}.hedge-period-controls #minimum-balance-note{grid-column:1/-1;margin:0}#add-hedge-favorite{grid-column:1/-1;justify-self:start;border:1px solid #5574d8;border-radius:9px;padding:9px 13px;background:#263b7b;color:#fff;font:600 13px system-ui,sans-serif;cursor:pointer}#add-hedge-favorite:hover{background:#344d9d}.field{display:grid;gap:7px;color:var(--muted);font-size:13px;font-weight:600}.field select,.field input{font:inherit;color:var(--text);background:#0c1222;border:1px solid #34415e;border-radius:10px;padding:11px 13px;min-width:160px}.field select option.demo-available-ticker{color:#f2d77d;background:#292716}.field.pair-field select{min-width:360px}.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:0 0 18px}.stat{background:#0c1222;border:1px solid var(--line);border-radius:12px;padding:13px 15px;min-width:0}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.gain{color:var(--green)}.loss{color:var(--red)}.chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}.chart-head h2{font-size:17px;margin:0}.count,.small-note,.status{color:var(--muted);font-size:13px}.legend{display:flex;gap:18px;flex-wrap:wrap;color:#b7c1d5;font-size:13px;margin:14px 0}.legend span{display:inline-flex;gap:7px;align-items:center}.dot{width:9px;height:9px;border-radius:50%}.chart-wrap{position:relative}#hedge-chart{width:100%;height:clamp(260px,38vw,520px);display:block;overflow:visible}.chart-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:12px;background:#0c1222b8;color:#e9eefb;font-size:17px;font-weight:700;letter-spacing:.04em;z-index:1}.chart-loading[hidden]{display:none}.chart-loading-spinner{width:28px;height:28px;border:3px solid #34415e;border-top-color:#86a8ff;border-radius:50%;animation:chart-loading-spin .8s linear infinite}@keyframes chart-loading-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.chart-loading-spinner{animation-duration:2s}}#tooltip{position:absolute;display:none;z-index:2;pointer-events:none;min-width:190px;padding:10px 12px;border:1px solid #394765;border-radius:10px;background:#0b1020f2;font-size:12px;white-space:nowrap}.status.error{color:#ffb3bf}.empty{display:grid;place-items:center;min-height:230px;color:var(--muted);text-align:center;padding:20px}.small-note{margin:12px 0 0}@media(max-width:1050px){.hedge-filter-grid{grid-template-columns:1fr}.hedge-period-controls{grid-template-columns:repeat(4,minmax(0,1fr))}}@media(max-width:650px){.wrap{padding:22px 14px}.panel{padding:16px}.page-heading{align-items:flex-start}.field,.field select,.field input,.field.pair-field select{width:100%;min-width:0}.hedge-period-controls{grid-template-columns:repeat(2,minmax(0,1fr));padding:12px}.view-nav{width:100%}.view-nav a{flex:1;text-align:center}#hedge-chart{height:70vw}}
+:root{color-scheme:dark;--bg:#0b1020;--panel:#131a2d;--muted:#8995ad;--text:#e9eefb;--line:#273149;--green:#42d6a4;--red:#ff7188;--blue:#86a8ff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1b2850 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:none;margin:0 auto;padding:30px 20px}.page-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:14px}.eyebrow{color:#8ea5ff;text-transform:uppercase;letter-spacing:.13em;font-size:12px;font-weight:700}.view-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#0c1222;width:max-content;max-width:100%}.view-nav a{color:#b7c1d5;text-decoration:none;padding:9px 14px;border-radius:8px}.view-nav a:hover{background:#1b2843;color:var(--text)}.view-nav a[aria-current=page]{background:#263968;color:#fff}.panel{background:color-mix(in srgb,var(--panel) 95%,transparent);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px;box-shadow:0 18px 50px #0003}.filters{display:block}.hedge-filter-grid{display:grid;grid-template-columns:minmax(360px,.85fr) minmax(0,1.5fr);gap:18px 28px;align-items:start}.hedge-pair-controls{display:grid;grid-template-columns:48px repeat(2,minmax(0,1fr));gap:12px;align-items:end}.hedge-pair-controls .field select{width:100%;min-width:0}.hedge-pair-controls .small-note{grid-column:1/-1;margin:0}.pair-ranking-trigger{width:44px;height:44px;display:grid;place-items:center;align-self:end;margin-bottom:21px;padding:0;border:1px solid #52658d;border-radius:50%;background:#18233d;color:#c6d2ee;cursor:pointer}.pair-ranking-trigger:hover{background:#263968;color:#fff;border-color:#8299ef}.pair-ranking-trigger:focus-visible{outline:2px solid #a9b9ff;outline-offset:2px}.pair-ranking-trigger:disabled{opacity:.65;cursor:wait}.pair-ranking-trigger svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.pair-ranking-trigger[aria-busy="true"] svg{animation:pair-ranking-spin 1s linear infinite}@keyframes pair-ranking-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.pair-ranking-trigger[aria-busy="true"] svg{animation-duration:3s}}.hedge-period-controls{display:grid;grid-template-columns:repeat(6,minmax(0,220px));gap:12px;align-items:end;justify-content:start;padding:16px;border:1px solid #273149;border-radius:14px;background:#0c1222}.hedge-period-controls .field input{width:100%;min-width:0}.hedge-period-controls #minimum-balance-note{grid-column:1/-1;margin:0}.field{display:grid;gap:7px;color:var(--muted);font-size:13px;font-weight:600}.field select,.field input{font:inherit;color:var(--text);background:#0c1222;border:1px solid #34415e;border-radius:10px;padding:11px 13px;min-width:160px}.field select option.demo-available-ticker{color:#f2d77d;background:#292716}.field.pair-field select{min-width:360px}.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:0 0 18px}.stat{background:#0c1222;border:1px solid var(--line);border-radius:12px;padding:13px 15px;min-width:0}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{font-size:19px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.gain{color:var(--green)}.loss{color:var(--red)}.chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}.chart-head h2{font-size:17px;margin:0}.count,.small-note,.status{color:var(--muted);font-size:13px}.legend{display:flex;gap:18px;flex-wrap:wrap;color:#b7c1d5;font-size:13px;margin:14px 0}.legend span{display:inline-flex;gap:7px;align-items:center}.dot{width:9px;height:9px;border-radius:50%}.chart-wrap{position:relative}#hedge-chart{width:100%;height:clamp(260px,38vw,520px);display:block;overflow:visible}.chart-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:12px;background:#0c1222b8;color:#e9eefb;font-size:17px;font-weight:700;letter-spacing:.04em;z-index:1}.chart-loading[hidden]{display:none}.chart-loading-spinner{width:28px;height:28px;border:3px solid #34415e;border-top-color:#86a8ff;border-radius:50%;animation:chart-loading-spin .8s linear infinite}@keyframes chart-loading-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.chart-loading-spinner{animation-duration:2s}}#tooltip{position:absolute;display:none;z-index:2;pointer-events:none;min-width:190px;padding:10px 12px;border:1px solid #394765;border-radius:10px;background:#0b1020f2;font-size:12px;white-space:nowrap}.status.error{color:#ffb3bf}.empty{display:grid;place-items:center;min-height:230px;color:var(--muted);text-align:center;padding:20px}.small-note{margin:12px 0 0}@media(max-width:1050px){.hedge-filter-grid{grid-template-columns:1fr}.hedge-period-controls{grid-template-columns:repeat(4,minmax(0,1fr))}}@media(max-width:650px){.wrap{padding:22px 14px}.panel{padding:16px}.page-heading{align-items:flex-start}.field,.field select,.field input,.field.pair-field select{width:100%;min-width:0}.hedge-period-controls{grid-template-columns:repeat(2,minmax(0,1fr));padding:12px}.view-nav{width:100%}.view-nav a{flex:1;text-align:center}#hedge-chart{height:70vw}}
 .chart-mode{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.chart-mode button{border:1px solid #34415e;border-radius:9px;padding:9px 13px;background:#0c1222;color:#b7c1d5;font:inherit;cursor:pointer}.chart-mode button[aria-pressed="true"]{background:#263968;border-color:#5974bd;color:#fff}.chart-mode button:focus-visible{outline:2px solid #86a8ff;outline-offset:2px}
 .ticker-set-panel{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 18px;padding:14px 18px}.ticker-set-panel label{font-weight:700}.ticker-set-panel select{min-width:240px;padding:10px 12px;border:1px solid #34415e;border-radius:9px;background:#0c1222;color:var(--text);font:inherit}.ticker-set-panel .small-note{margin:0}.stat small{display:block;color:var(--muted);font-size:12px;font-weight:400;margin-top:3px}#local-moves-panel .chart-head{flex-wrap:wrap}.local-moves-scale{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:13px;font-weight:600}.local-moves-scale select{font:inherit;color:var(--text);background:#0c1222;border:1px solid #34415e;border-radius:9px;padding:8px 10px}
 .table-wrap{overflow:auto}.local-moves-table{width:100%;border-collapse:collapse;min-width:760px;font-size:13px}.local-moves-table th,.local-moves-table td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}.local-moves-table th{color:var(--muted);font-weight:600}.local-moves-table th:first-child,.local-moves-table td:first-child{text-align:left}
+.symbol-select-control{position:relative;width:100%}.ticker-sort-indicator[hidden]{display:none}.ticker-sort-indicator{position:absolute;top:50%;right:38px;transform:translateY(-50%);display:flex;align-items:center;gap:1px;padding:3px 6px;border-radius:6px;background:#0c1222;color:#a9b9ff;font-size:11px;font-weight:600;line-height:1.2;pointer-events:none}.ticker-sort-indicator .ticker-sort-dot{animation:ticker-sort-pulse 1.1s infinite;opacity:.25}.ticker-sort-indicator .ticker-sort-dot:nth-child(3){animation-delay:.18s}.ticker-sort-indicator .ticker-sort-dot:nth-child(4){animation-delay:.36s}@keyframes ticker-sort-pulse{0%,60%,100%{opacity:.25}30%{opacity:1}}@media(prefers-reduced-motion:reduce){.ticker-sort-indicator .ticker-sort-dot{animation:none;opacity:1}}
+.symbol-select-control[aria-busy="true"] select{padding-right:135px}
+.hedge-page-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:16px}.hedge-page-actions button,.hedge-page-actions a{display:inline-flex;align-items:center;justify-content:center;min-width:145px;border:1px solid #52658d;border-radius:9px;padding:11px 16px;background:#18233d;color:#e9eefb;font:700 14px system-ui,sans-serif;text-decoration:none;cursor:pointer}.hedge-page-actions button.primary{border-color:#6c8cff;background:#304b99}.hedge-page-actions button.primary:hover{background:#3c5db8}.hedge-page-actions a:hover{background:#263968}.hedge-page-actions button:focus-visible,.hedge-page-actions a:focus-visible{outline:2px solid #a9b9ff;outline-offset:2px}
+.small-note.error{color:#ffb3bf}
 </style>
 </head>
 <body><main class="wrap">
 <header class="page-heading"><div class="eyebrow">Market data · <?= $h($config['category']) ?></div><span class="count">Симуляция по сохранённым котировкам</span></header>
-<nav class="view-nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="<?= $h($basicUrl) ?>">Базовые проверки</a><a href="<?= $h($hedgeUrl) ?>" aria-current="page">Хеджирование</a><a href="favorites.php">Избранное</a><a href="settings.php">Настройки</a><a id="autotrading-paper-link" href="autotrading.php?mode=paper&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Автоторговля (Paper)</a><a id="autotrading-demo-link" href="autotrading.php?mode=demo&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Автоторговля (Тест)</a><a id="autotrading-real-link" href="autotrading.php?mode=real&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Автоторговля (реал)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
-<section class="panel ticker-set-panel" aria-label="Выбранный список тикеров"><label for="ticker-set-select">Выбранный список тикеров</label><select id="ticker-set-select" <?= $favoriteView ? 'disabled' : '' ?>><?php foreach ($tickerSetOptions as $tickerSet): ?><option value="<?= $h((string) ($tickerSet['id'] ?? '')) ?>" <?= ($tickerSet['id'] ?? '') === $tickerSetId ? 'selected' : '' ?>><?= $h((string) ($tickerSet['name'] ?? '')) ?></option><?php endforeach; ?></select><span class="small-note"><?= count($symbols) ?> активных тикеров в списке</span></section>
-<?php if ($favoriteView): ?><p class="small-note">Просмотр сохранённой пары «Лонг <?= $h($longSymbol) ?> / шорт <?= $h($shortSymbol) ?>». Параметры доступны только для чтения. <a href="favorites.php">← Вернуться к избранному</a></p><?php endif; ?>
-<?php if ($favoriteSymbolsDisabled): ?><p class="status error">Один из тикеров сохранённой пары выключен или не входит в выбранный список.</p><?php endif; ?>
+<nav class="view-nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="<?= $h($basicUrl) ?>">Базовые проверки</a><a href="<?= $h($hedgeUrl) ?>" aria-current="page">Хеджирование</a><a href="settings.php">Настройки</a><a id="autotrading-paper-link" href="autotrading.php?mode=paper&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Автоторговля (Paper)</a><a id="autotrading-demo-link" href="autotrading.php?mode=demo&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Автотрейдинг (демо)</a><a id="autotrading-real-link" href="autotrading.php?mode=real&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Автотрейдинг (real)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<section class="panel ticker-set-panel" aria-label="Выбранный список тикеров"><label for="ticker-set-select">Выбранный список тикеров</label><select id="ticker-set-select" ><?php foreach ($tickerSetOptions as $tickerSet): ?><option value="<?= $h((string) ($tickerSet['id'] ?? '')) ?>" <?= ($tickerSet['id'] ?? '') === $tickerSetId ? 'selected' : '' ?>><?= $h((string) ($tickerSet['name'] ?? '')) ?></option><?php endforeach; ?></select><span class="small-note"><?= count($symbols) ?> активных тикеров в списке</span></section>
 <h1>Хеджирование между тикерами</h1>
 <section class="panel"><form class="filters" id="hedge-filters">
 <input type="hidden" name="ticker_set" value="<?= $h($tickerSetId) ?>">
 <input type="hidden" name="start_day_auto" value="<?= $startDayAuto ? '1' : '0' ?>">
 <div class="hedge-filter-grid">
 <div class="hedge-pair-controls">
-<label class="field">Лонг<select id="hedge-long-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" class="<?= isset($demoAvailableSymbols[$symbol]) ? 'demo-available-ticker' : '' ?>" <?= $symbol === $longSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select></label>
-<label class="field">Шорт<select id="hedge-short-symbol" <?= $favoriteView ? 'disabled' : '' ?> required><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" class="<?= isset($demoAvailableSymbols[$symbol]) ? 'demo-available-ticker' : '' ?>" <?= $symbol === $shortSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select></label>
-<span class="small-note">Жёлтым отмечены тикеры, доступные в Bitget Demo.</span>
-<?php if (!$favoriteView): ?><button type="button" id="add-hedge-favorite">☆ В избранное</button><?php endif; ?>
+<button class="pair-ranking-trigger" type="button" id="rank-hedge-pairs" aria-label="Найти лучшую пару и отсортировать тикеры" title="Найти лучшую пару среди всех сочетаний лонга и шорта и отсортировать тикеры"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4.8 9a7.5 7.5 0 0 1 12.8-3L20 9M4 17v-5h5m10.2 3a7.5 7.5 0 0 1-12.8 3L4 15"/></svg></button>
+<label class="field">Лонг<div class="symbol-select-control"><select id="hedge-long-symbol" ><option value="" <?= $longSymbol === '' ? 'selected' : '' ?>></option><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" class="<?= isset($demoAvailableSymbols[$symbol]) ? 'demo-available-ticker' : '' ?>" <?= $symbol === $longSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select><span class="ticker-sort-indicator" id="hedge-long-sort-indicator" role="status" aria-label="Считаю коэффициенты пар" hidden>Считаю<span class="hedge-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></label>
+<label class="field">Шорт<div class="symbol-select-control"><select id="hedge-short-symbol" ><option value="" <?= $shortSymbol === '' ? 'selected' : '' ?>></option><?php foreach ($symbols as $symbol): ?><option value="<?= $h($symbol) ?>" class="<?= isset($demoAvailableSymbols[$symbol]) ? 'demo-available-ticker' : '' ?>" <?= $symbol === $shortSymbol ? 'selected' : '' ?>><?= $h($symbol) ?></option><?php endforeach; ?></select><span class="ticker-sort-indicator" id="hedge-short-sort-indicator" role="status" aria-label="Считаю коэффициенты пар" hidden>Считаю<span class="hedge-sort-progress"></span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span><span class="ticker-sort-dot">.</span></span></div></label>
+<span class="small-note">Оставьте одну сторону пустой для расчёта одного тикера; весь баланс используется на выбранную позицию. Жёлтым отмечены тикеры, доступные в Bitget Demo.</span>
+<span class="small-note" id="hedge-ticker-coverage-note" hidden></span>
+
 </div>
 <input type="hidden" name="pair" id="hedge-pair" value="<?= $h($longSymbol . '|' . $shortSymbol) ?>">
 <div class="hedge-period-controls" aria-label="Период и параметры расчёта">
@@ -133,30 +125,82 @@ $h = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | 
 <label class="field">Стартовый баланс (USDT)<input type="number" name="balance" min="0.01" max="1000000000" step="0.01" value="<?= $h($balance) ?>" required></label>
 <input type="hidden" name="balance_auto" value="<?= $balanceAutoManaged ? '1' : '0' ?>">
 <label class="field">Комиссия за сторону (%)<input type="number" name="fee" min="0" max="5" step="0.001" value="<?= $h($fee) ?>" required></label>
+<label class="field">Разбить по интервалам<select name="interval" id="hedge-interval"><option value="none" <?= $intervalMode === 'none' ? 'selected' : '' ?>>Без разбивки (всё как сейчас)</option><option value="week" <?= $intervalMode === 'week' ? 'selected' : '' ?>>Неделя</option><option value="two_weeks" <?= $intervalMode === 'two_weeks' ? 'selected' : '' ?>>2 недели</option><option value="month" <?= $intervalMode === 'month' ? 'selected' : '' ?>>Месяц</option></select></label>
+<label class="field">Не учитывать последние интервалы<select name="exclude_last_intervals" id="hedge-exclude-intervals"><?php foreach ([0, 1, 2] as $excludedOption): ?><option value="<?= $excludedOption ?>" <?= $excludedIntervals === $excludedOption ? 'selected' : '' ?>><?= $excludedOption ?></option><?php endforeach; ?></select></label>
 <p class="small-note" id="minimum-balance-note" aria-live="polite">Для выбранной пары рассчитывается сумма минимальных размеров лонга и шорта с комиссией Bitget.</p>
 </div>
 </div>
-</form><p class="small-note" id="pair-ranking-status" role="status" aria-live="polite">После загрузки графика рассчитаю доходность всех пар: 0%.</p><?php if (!$favoriteView): ?><p class="small-note" id="hedge-favorite-status" aria-live="polite"></p><?php endif; ?><p class="small-note">Баланс поровну распределяется между двумя позициями. Каждая сторона открывается по доступному ask/bid, закрывается для оценки по bid/ask, комиссия учитывается при входе и выходе. Несинхронные котировки сопоставляются по последнему уже известному снимку; снимки старше 120 секунд пропускаются.</p></section>
-<p class="status" id="hedge-status" role="status" aria-live="polite">Загружаю котировки выбранной пары…</p>
+<div class="hedge-page-actions"><a id="hedge-add-paper" href="autotrading.php?mode=paper&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Добавить в Paper</a><a id="hedge-add-demo" href="autotrading.php?mode=demo&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Добавить в Demo</a><a id="hedge-add-real" href="autotrading.php?mode=real&amp;view=setup&amp;hedge_long=<?= $h($longSymbol) ?>&amp;hedge_short=<?= $h($shortSymbol) ?>&amp;hedge_start_day=<?= $h($startDay) ?>&amp;hedge_end_day=<?= $h($endDay) ?>&amp;hedge_balance=<?= $h($balance) ?>&amp;hedge_fee=<?= $h($fee) ?>">Добавить в Real</a></div>
+<p class="small-note">Кнопка откроет подготовку пары в выбранном портфеле. Добавление подтверждается на следующей странице; исполнитель не запускается.</p>
+</form><p class="small-note" id="pair-ranking-status" role="status" aria-live="polite">Расчёт не запущен. Нажмите ↻ слева от тикеров, чтобы найти лучшую пару и отсортировать селекторы.</p><p class="small-note"><a id="hedge-pair-matrix-link" href="hedge-pair-matrix.php" target="_blank" rel="noopener">Открыть таблицу всех сочетаний лонга и шорта</a></p><p class="small-note">Баланс поровну распределяется между двумя позициями. Каждая сторона открывается по доступному ask/bid, закрывается для оценки по bid/ask, комиссия учитывается при входе и выходе. Несинхронные котировки сопоставляются по последнему уже известному снимку; снимки старше 120 секунд пропускаются.</p></section>
+<p class="status" id="hedge-status" role="status" aria-live="polite">Загружаю данные выбранной позиции…</p>
 <section class="summary" id="hedge-summary" hidden></section>
+<section class="panel" id="hedge-interval-panel" hidden><div class="chart-head"><h2>Результаты по интервалам</h2></div><p class="small-note">Показаны только полные интервалы от 00:00 до 00:00 по Киеву; правая граница не включается. Неполные интервалы в начале и конце доступных данных исключаются.</p><div class="table-wrap"><table class="local-moves-table"><thead><tr><th>Период</th><th>Лонг</th><th>Шорт</th><th>Общий итог</th><th>Максимум за период</th><th>Максимальное снижение на графике</th><th>Максимум / снижение</th></tr></thead><tbody id="hedge-interval-rows"></tbody></table></div><section class="summary" id="hedge-interval-summary" aria-label="Сводка по худшему интервалу"></section></section>
 <section class="panel"><div class="chart-mode" role="group" aria-label="Вид графика хеджирования"><button type="button" data-chart-view="net" aria-pressed="true">Чистая доходность по хеджированию</button><button type="button" data-chart-view="ticker" aria-pressed="false">Хеджирование между тикерами</button></div><div class="chart-head"><h2 id="hedge-chart-title">Чистая доходность по хеджированию</h2><span class="count" id="hedge-point-count"></span></div><div class="legend" id="hedge-legend"></div><div class="chart-wrap"><svg id="hedge-chart" role="img" aria-label="Чистая доходность по хеджированию во времени"></svg><div id="chart-loading" class="chart-loading" hidden role="status" aria-live="polite"><span class="chart-loading-spinner" aria-hidden="true"></span><span>Loading</span></div><div id="tooltip"></div></div><p class="small-note" id="hedge-chart-note">По вертикали — чистый результат в USDT с учётом комиссий открытия и расчётного закрытия. Позиции открываются на первом синхронизированном снимке выбранного периода.</p></section>
 <section class="panel" id="local-moves-panel" hidden><div class="chart-head"><h2>Крупнейшие локальные падения</h2><label class="local-moves-scale">Длительность падения<select id="local-moves-scale" aria-label="Минимальная длительность локального падения"><option value="minimum">Минимальная (как сейчас)</option><option value="medium">Средняя длительность</option><option value="large">Большая длительность</option></select></label><span class="count" id="local-moves-summary"></span></div><p class="small-note" id="local-moves-threshold"></p><div class="table-wrap"><table class="local-moves-table"><thead><tr><th>№</th><th>Максимум · время</th><th>Максимум · USDT</th><th>Минимум · время</th><th>Минимум · USDT</th><th>Падение</th><th>Длительность</th></tr></thead><tbody id="local-moves-rows"></tbody></table></div></section>
 </main>
 <script>
 const form=document.querySelector('#hedge-filters'),pairSelect=document.querySelector('#hedge-pair'),longSymbolSelect=document.querySelector('#hedge-long-symbol'),shortSymbolSelect=document.querySelector('#hedge-short-symbol'),statusNode=document.querySelector('#hedge-status'),summaryNode=document.querySelector('#hedge-summary'),chart=document.querySelector('#hedge-chart'),chartLoading=document.querySelector('#chart-loading'),pointCount=document.querySelector('#hedge-point-count'),tooltip=document.querySelector('#tooltip'),ns='http://www.w3.org/2000/svg';
+const allTickerOptions=[...longSymbolSelect.options].map(option=>option.cloneNode(true)),tickerCoverageNote=document.querySelector('#hedge-ticker-coverage-note');
+let tickerCoverageRequest=0;
+let preferredLongSymbol=longSymbolSelect.value,preferredShortSymbol=shortSymbolSelect.value;
+const tickerCoverageCache=new Map();
+function dateAtUtcMidnight(value){return new Date(value+'T00:00:00Z')}
+function subtractCalendarMonths(date,months){const result=new Date(date),day=result.getUTCDate();result.setUTCDate(1);result.setUTCMonth(result.getUTCMonth()-months);const lastDay=new Date(Date.UTC(result.getUTCFullYear(),result.getUTCMonth()+1,0)).getUTCDate();result.setUTCDate(Math.min(day,lastDay));return result}
+async function refreshTickerCoverage(){
+  const interval=form.elements.namedItem('interval').value,request=++tickerCoverageRequest;
+  if(!['two_weeks','month'].includes(interval)){tickerCoverageNote.hidden=true;applyTickerCoverage(new Set(allTickerOptions.map(option=>option.value).filter(Boolean)));return}
+  const startDay=form.elements.namedItem('start_day').value,endDay=form.elements.namedItem('end_day').value;
+  if(!startDay||!endDay){tickerCoverageNote.hidden=false;tickerCoverageNote.textContent='Укажите диапазон дат, чтобы отфильтровать тикеры по истории.';return}
+  const cacheKey=[form.elements.namedItem('ticker_set').value,startDay,endDay].join('|');
+  try{
+    let coverage=tickerCoverageCache.get(cacheKey);
+    if(!coverage){const params=new URLSearchParams({ticker_set:form.elements.namedItem('ticker_set').value,start_day:startDay,end_day:endDay});const response=await fetch('hedge-symbol-coverage.php?'+params,{headers:{Accept:'application/json'},cache:'no-store'});const data=await response.json();if(!response.ok||data.status!=='ready')throw new Error(data.message||'Не удалось проверить историю тикеров.');coverage=data.coverage||{};tickerCoverageCache.set(cacheKey,coverage)}
+    if(request!==tickerCoverageRequest)return;
+    const eligible=new Set(),requiredDays=interval==='two_weeks'?28:null;
+    for(const[symbol,range]of Object.entries(coverage)){
+      const first=dateAtUtcMidnight(range.first_day),end=dateAtUtcMidnight(range.last_day_exclusive);
+      if(interval==='two_weeks'?end-first>=requiredDays*86400000:first<=subtractCalendarMonths(end,2))eligible.add(symbol);
+    }
+    applyTickerCoverage(eligible);
+    tickerCoverageNote.hidden=false;
+    tickerCoverageNote.textContent=interval==='two_weeks'?`Показаны тикеры с историей не менее 4 недель в выбранном диапазоне: ${eligible.size} из ${allTickerOptions.length-1}.`:`Показаны тикеры с историей не менее 2 месяцев в выбранном диапазоне: ${eligible.size} из ${allTickerOptions.length-1}.`;
+  }catch(error){if(request!==tickerCoverageRequest)return;tickerCoverageNote.hidden=false;tickerCoverageNote.textContent=error.message+' Список тикеров пока не изменён.'}
+}
+function applyTickerCoverage(eligible){
+  const previousLong=longSymbolSelect.value,previousShort=shortSymbolSelect.value;
+  for(const select of [longSymbolSelect,shortSymbolSelect]){
+    const current=select===longSymbolSelect?preferredLongSymbol:preferredShortSymbol,options=allTickerOptions.filter(option=>option.value===''||eligible.has(option.value)).map(option=>option.cloneNode(true));
+    select.replaceChildren(...options);
+    if(current&&eligible.has(current))select.value=current;
+  }
+  if(!eligible.has(longSymbolSelect.value))longSymbolSelect.value=[...eligible].find(symbol=>symbol!==shortSymbolSelect.value)||'';
+  if(!eligible.has(shortSymbolSelect.value)||shortSymbolSelect.value===longSymbolSelect.value)shortSymbolSelect.value=[...eligible].find(symbol=>symbol!==longSymbolSelect.value)||'';
+  if(previousLong!==longSymbolSelect.value||previousShort!==shortSymbolSelect.value){syncManualPairSelection();syncHedgeUrlFromForm();scheduleSelectedHedgeCalculation()}
+}
 function setChartLoading(loading){chartLoading.hidden=!loading}
 const tickerSetSelect=document.querySelector('#ticker-set-select');
-tickerSetSelect?.addEventListener('change',()=>{const params=new URLSearchParams(location.search);params.set('ticker_set',tickerSetSelect.value);for(const key of ['pair','long_symbol','short_symbol','favorite_id'])params.delete(key);location.href=location.pathname+'?'+params.toString()});
+tickerSetSelect?.addEventListener('change',()=>{const params=new URLSearchParams(location.search);params.set('ticker_set',tickerSetSelect.value);for(const key of ['pair','long_symbol','short_symbol'])params.delete(key);location.href=location.pathname+'?'+params.toString()});
 const startDayAutoInput=form.elements.namedItem('start_day_auto');
-const favoriteView=<?= $favoriteView ? 'true' : 'false' ?>,favoriteSymbolsDisabled=<?= $favoriteSymbolsDisabled ? 'true' : 'false' ?>,favoriteId=<?= json_encode($favoriteId, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>,favoriteSavedParams=<?= json_encode($favorite['params'] ?? new stdClass(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
 const demoAvailableTickerSymbols=new Set(<?= json_encode(array_keys($demoAvailableSymbols), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>);
-if(favoriteView)form.querySelectorAll('select,input,button').forEach(control=>control.disabled=true);
 const palette={long_index:'#42d6a4',short_index:'#ff7188',equity_index:'#86a8ff'};
 const chartModeButtons=[...document.querySelectorAll('[data-chart-view]')],chartTitle=document.querySelector('#hedge-chart-title'),chartLegend=document.querySelector('#hedge-legend'),chartNote=document.querySelector('#hedge-chart-note');
 let chartView=new URLSearchParams(location.search).get('chart_view')==='ticker'?'ticker':'net';
 const fmt=(n,d=4)=>Number(n).toLocaleString('ru-RU',{minimumFractionDigits:d,maximumFractionDigits:d});
 const money=n=>(Number(n)>0?'+':'')+fmt(n)+' USDT';
 const signed=(n,d=2)=>(Number(n)>0?'+':Number(n)<0?'−':'')+fmt(Math.abs(Number(n)),d);
+const HEDGE_SESSION_PREFIX='hedge-results:v1:';
+function hedgeFilterScope(){return JSON.stringify([form.elements.start_day.value,form.elements.end_day.value,form.elements.balance.value,form.elements.fee.value,form.elements.interval.value])}
+function hedgeResultScope(){return JSON.stringify([form.elements.namedItem('ticker_set').value,...JSON.parse(hedgeFilterScope())])}
+function hedgeRankingSessionKey(){return HEDGE_SESSION_PREFIX+'ranking:'+JSON.stringify([hedgeResultScope(),form.elements.exclude_last_intervals.value])}
+function hedgeIntervalSessionKey(){return HEDGE_SESSION_PREFIX+'interval:'+hedgeResultScope()}
+function hedgeSelectorSessionKey(){return HEDGE_SESSION_PREFIX+'selectors:'+JSON.stringify([hedgeResultScope(),form.elements.exclude_last_intervals.value])}
+function clearHedgeSessionResults(){try{for(let i=sessionStorage.length-1;i>=0;i--){const key=sessionStorage.key(i);if(key?.startsWith(HEDGE_SESSION_PREFIX))sessionStorage.removeItem(key)}sessionStorage.setItem(HEDGE_SESSION_PREFIX+'filter-scope',hedgeFilterScope())}catch{}}
+function reconcileHedgeSession(){try{const key=HEDGE_SESSION_PREFIX+'filter-scope',current=hedgeFilterScope(),previous=sessionStorage.getItem(key);if(previous!==null&&previous!==current)clearHedgeSessionResults();sessionStorage.setItem(key,current)}catch{}}
+function saveHedgeIntervalResult(data,longSymbol,shortSymbol){try{const key=hedgeIntervalSessionKey(),saved=JSON.parse(sessionStorage.getItem(key)||'{}'),entries=saved.entries&&typeof saved.entries==='object'?saved.entries:{},pairKey=JSON.stringify([longSymbol,shortSymbol]);entries[pairKey]={long_symbol:longSymbol,short_symbol:shortSymbol,starting_balance:data.starting_balance,interval_rows:data.interval_rows||[],updated_at:Date.now()};const keep=Object.entries(entries).sort((a,b)=>Number(b[1]?.updated_at||0)-Number(a[1]?.updated_at||0)).slice(0,50);sessionStorage.setItem(key,JSON.stringify({entries:Object.fromEntries(keep)}))}catch{}}
+function restoreHedgeIntervalResult(){try{const saved=JSON.parse(sessionStorage.getItem(hedgeIntervalSessionKey())||'{}'),pairKey=JSON.stringify([longSymbolSelect.value,shortSymbolSelect.value]),data=saved.entries?.[pairKey];if(data&&Array.isArray(data.interval_rows))renderIntervalResults(data)}catch{}}
+function saveHedgeSelectorLabels(){try{sessionStorage.setItem(hedgeSelectorSessionKey(),JSON.stringify({long_symbol:longSymbolSelect.value,short_symbol:shortSymbolSelect.value,long_options:[...longSymbolSelect.options].map(option=>({value:option.value,text:option.textContent,className:option.className})),short_options:[...shortSymbolSelect.options].map(option=>({value:option.value,text:option.textContent,className:option.className}))}))}catch{}}
+function restoreHedgeSelectorLabels(){try{const saved=JSON.parse(sessionStorage.getItem(hedgeSelectorSessionKey())||'null');if(!saved)return;for(const[select,items]of [[longSymbolSelect,saved.long_options],[shortSymbolSelect,saved.short_options]]){const allowed=new Set([...select.options].map(option=>option.value));const options=(items||[]).filter(item=>allowed.has(item.value)).map(item=>{const option=document.createElement('option');option.value=item.value;option.textContent=item.text;option.className=item.className;option.selected=item.value===select.value;return option});if(options.length)select.replaceChildren(...options)}}catch{}}
 const durationLabel=milliseconds=>{let minutes=Math.floor(Math.max(0,Number(milliseconds))/60000);const days=Math.floor(minutes/1440);minutes%=1440;const hours=Math.floor(minutes/60);minutes%=60;const parts=[];if(days)parts.push(`${days} д`);if(hours)parts.push(`${hours} ч`);if(minutes)parts.push(`${minutes} мин`);return parts.join(' ')||'меньше минуты'};
 function findLocalDeclines(points){
   const peaks=[],troughs=[];let direction=0;
@@ -192,79 +236,208 @@ const localMovesPanel=document.querySelector('#local-moves-panel'),localMovesSum
 const pairRankingStatus=document.querySelector('#pair-ranking-status');
 let pairRankingRequest=0;
 let pairSelectionVersion=0;
+let hedgeDataRequest=0;
 let rankedPairData=null;
-function setAutoTradingLinksReady(ready){for(const id of ['#autotrading-paper-link','#autotrading-demo-link','#autotrading-real-link']){const link=document.querySelector(id);if(!link)continue;link.setAttribute('aria-disabled',ready?'false':'true');link.tabIndex=ready?0:-1;link.style.pointerEvents=ready?'':'none';link.style.opacity=ready?'':'0.55'}}
-function updateAutoTradingDemoLink(){if(!longSymbolSelect||!shortSymbolSelect)return;for(const[mode,id]of [['paper','#autotrading-paper-link'],['demo','#autotrading-demo-link'],['real','#autotrading-real-link']]){const link=document.querySelector(id);if(!link)continue;const params=new URLSearchParams({mode,view:'setup',hedge_long:longSymbolSelect.value,hedge_short:shortSymbolSelect.value,hedge_start_day:form.elements.start_day.value,hedge_end_day:form.elements.end_day.value,hedge_balance:form.elements.balance.value,hedge_fee:form.elements.fee.value});link.href='autotrading.php?'+params.toString()}}
-function syncManualPairSelection(){if(longSymbolSelect&&shortSymbolSelect){pairSelect.value=longSymbolSelect.value+'|'+shortSymbolSelect.value;updateAutoTradingDemoLink()}}
+function setHedgeRankingLoading(loading){
+  const trigger=document.querySelector('#rank-hedge-pairs');trigger.disabled=loading;trigger.setAttribute('aria-busy',String(loading));
+  for(const select of [longSymbolSelect,shortSymbolSelect]){
+    select.closest('.symbol-select-control').setAttribute('aria-busy',String(loading));
+    const indicator=document.querySelector(select===longSymbolSelect?'#hedge-long-sort-indicator':'#hedge-short-sort-indicator');
+    indicator.hidden=!loading;indicator.querySelector('.hedge-sort-progress').textContent='';
+  }
+}
+function updateHedgeRankingProgress(message){
+  const percent=message.match(/(\d+)%/);
+  for(const node of document.querySelectorAll('.hedge-sort-progress'))node.textContent=percent?' '+percent[1]+'%':'';
+}
+
+function setAutoTradingLinksReady(ready){for(const id of ['#autotrading-paper-link','#autotrading-demo-link','#autotrading-real-link','#hedge-add-paper','#hedge-add-demo','#hedge-add-real']){const link=document.querySelector(id);if(!link)continue;link.setAttribute('aria-disabled',ready?'false':'true');link.tabIndex=ready?0:-1;link.style.pointerEvents=ready?'':'none';link.style.opacity=ready?'':'0.55'}}
+function updateAutoTradingLinks(){if(!longSymbolSelect||!shortSymbolSelect)return;for(const[mode,id]of [['paper','#autotrading-paper-link'],['demo','#autotrading-demo-link'],['real','#autotrading-real-link'],['paper','#hedge-add-paper'],['demo','#hedge-add-demo'],['real','#hedge-add-real']]){const link=document.querySelector(id);if(!link)continue;const params=new URLSearchParams({mode,view:'setup',hedge_long:longSymbolSelect.value,hedge_short:shortSymbolSelect.value,hedge_start_day:form.elements.start_day.value,hedge_end_day:form.elements.end_day.value,hedge_balance:form.elements.balance.value,hedge_fee:form.elements.fee.value});link.href='autotrading.php?'+params.toString()}const matrixLink=document.querySelector('#hedge-pair-matrix-link');if(matrixLink){const params=new URLSearchParams(new FormData(form));params.delete('pair');params.set('ticker_set',form.elements.namedItem('ticker_set').value);params.set('symbols',[...new Set([...longSymbolSelect.options,...shortSymbolSelect.options].map(option=>option.value).filter(Boolean))].join(','));matrixLink.href='hedge-pair-matrix.php?'+params.toString()}}
+function syncManualPairSelection(){if(longSymbolSelect&&shortSymbolSelect){pairSelect.value=longSymbolSelect.value+'|'+shortSymbolSelect.value;updateAutoTradingLinks()}}
+function syncHedgeUrlFromForm(){const next=new URL(location.href);for(const key of ['start_day','end_day','balance','balance_auto','fee','start_day_auto','interval','exclude_last_intervals'])next.searchParams.set(key,form.elements.namedItem(key).value);next.searchParams.set('long_symbol',longSymbolSelect.value);next.searchParams.set('short_symbol',shortSymbolSelect.value);next.searchParams.set('pair',pairSelect.value);history.replaceState(null,'',next)}
+let selectedHedgeCalculationTimer=0;
+function scheduleSelectedHedgeCalculation(){window.clearTimeout(selectedHedgeCalculationTimer);selectedHedgeCalculationTimer=window.setTimeout(()=>{selectedHedgeCalculationTimer=0;loadData()},400)}
+function markHedgeCalculationPending(invalidateRanking=true){
+  hedgeDataRequest++;
+  if(invalidateRanking){
+    pairRankingRequest++;setHedgeRankingLoading(false);rankedPairData=null;
+    for(const select of [longSymbolSelect,shortSymbolSelect])for(const option of select.options)option.textContent=option.value;
+    pairRankingStatus.textContent='Рейтинг сброшен: нажмите ↻ слева от тикеров, чтобы рассчитать доходность для новых параметров.';
+  }else if(rankedPairData){
+    renderCurrentTickerRankings();
+    pairRankingStatus.textContent='Рейтинг всех пар сохранён; списки отсортированы относительно выбранных тикеров, доходность показана в вариантах.';
+  }
+  window.currentHedgeData=null;setChartLoading(false);summaryNode.hidden=true;localMovesPanel.hidden=true;chart.replaceChildren();chartLegend.replaceChildren();pointCount.textContent='';statusNode.classList.remove('error');statusNode.textContent='Параметры изменены. График выбранной позиции пересчитается автоматически.';setAutoTradingLinksReady(Boolean(longSymbolSelect.value&&shortSymbolSelect.value))
+}
 function renderTickerRanking(select,pairs,partnerSide){
   if(!select||!Array.isArray(pairs))return;
   const selected=select.value,bySymbol=new Map(pairs.map(pair=>[pair[partnerSide==='short'?'long_symbol':'short_symbol'],pair]));
   const options=[...select.options].map(option=>({symbol:option.value,pair:bySymbol.get(option.value)}));
   options.sort((left,right)=>{
-    const leftValue=left.pair?.net_pnl,rightValue=right.pair?.net_pnl;
+    if(left.symbol===''||right.symbol==='')return left.symbol===''?-1:1;
+    const leftValue=left.pair?.maximum_interval_ratio,rightValue=right.pair?.maximum_interval_ratio;
     if(leftValue===null||leftValue===undefined)return rightValue===null||rightValue===undefined?left.symbol.localeCompare(right.symbol):1;
     if(rightValue===null||rightValue===undefined)return -1;
-    return Number(rightValue)-Number(leftValue)||left.symbol.localeCompare(right.symbol);
+    return Number(rightValue)-Number(leftValue)||Number(right.pair?.net_pnl||0)-Number(left.pair?.net_pnl||0)||left.symbol.localeCompare(right.symbol);
   });
   select.replaceChildren(...options.map(({symbol,pair})=>{
     const option=document.createElement('option');option.value=symbol;
-    const returnLabel=pair?.net_pnl===null||pair?.net_pnl===undefined?'нет данных':`${signed(pair.net_pnl)} USDT (${signed(pair.return_percent)}%)`;
+    const returnLabel=pair?.net_pnl===null||pair?.net_pnl===undefined?'нет данных':`итог ${signed(pair.return_percent)}% · max score ${pair.maximum_interval_ratio===null||pair.maximum_interval_ratio===undefined?'—':fmt(pair.maximum_interval_ratio,2)} · min score ${pair.peak_drawdown_ratio===null||pair.peak_drawdown_ratio===undefined?'—':fmt(pair.peak_drawdown_ratio,2)}`;
     option.classList.toggle('demo-available-ticker',demoAvailableTickerSymbols.has(symbol));
-    option.textContent=pair?`${symbol} · доходность ${returnLabel}`:symbol;
+    option.textContent=pair?`${symbol} · ${returnLabel}`:symbol;
     option.selected=symbol===selected;return option;
   }));
 }
 function renderCurrentTickerRankings(){
   if(!rankedPairData){return}
-  const{symbols,pair_matrix:matrix,starting_balance:balance}=rankedPairData,index=new Map(symbols.map((symbol,i)=>[symbol,i]));
+  const{symbols,pair_matrix:matrix,pair_ratio_matrix:ratios,pair_maximum_ratio_matrix:maximumRatios,starting_balance:balance}=rankedPairData,index=new Map(symbols.map((symbol,i)=>[symbol,i]));
   const longIndex=index.get(longSymbolSelect.value),shortIndex=index.get(shortSymbolSelect.value);
   if(longIndex===undefined||shortIndex===undefined)return;
-  const makePair=(longSymbol,shortSymbol)=>{const net_pnl=matrix[index.get(longSymbol)][index.get(shortSymbol)];return{long_symbol:longSymbol,short_symbol:shortSymbol,net_pnl,return_percent:net_pnl===null?null:Number(net_pnl)/Number(balance)*100}};
+  const makePair=(longSymbol,shortSymbol)=>{const longIndex=index.get(longSymbol),shortIndex=index.get(shortSymbol),net_pnl=matrix[longIndex][shortIndex];return{long_symbol:longSymbol,short_symbol:shortSymbol,net_pnl,peak_drawdown_ratio:ratios[longIndex][shortIndex],maximum_interval_ratio:maximumRatios[longIndex][shortIndex],return_percent:net_pnl===null?null:Number(net_pnl)/Number(balance)*100}};
   renderTickerRanking(longSymbolSelect,symbols.filter(symbol=>symbol!==shortSymbolSelect.value).map(symbol=>makePair(symbol,shortSymbolSelect.value)),'short');
   renderTickerRanking(shortSymbolSelect,symbols.filter(symbol=>symbol!==longSymbolSelect.value).map(symbol=>makePair(longSymbolSelect.value,symbol)),'long');
+  saveHedgeSelectorLabels();
 }
-for(const select of [longSymbolSelect,shortSymbolSelect])select?.addEventListener('change',()=>{pairSelectionVersion++;syncManualPairSelection();renderCurrentTickerRankings();loadData()});
+for(const select of [longSymbolSelect,shortSymbolSelect])select?.addEventListener('change',()=>{if(select===longSymbolSelect)preferredLongSymbol=select.value;else preferredShortSymbol=select.value;pairSelectionVersion++;syncManualPairSelection()});
 pairSelect.addEventListener('change',()=>{pairSelectionVersion++});
-document.querySelector('#add-hedge-favorite')?.addEventListener('click',async()=>{const button=document.querySelector('#add-hedge-favorite'),status=document.querySelector('#hedge-favorite-status'),params=new URLSearchParams(new FormData(form)),[longSymbol,shortSymbol]=pairSelect.value.split('|');params.set('favorite_type','hedge');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);params.set('favorite_entry_label',`Лонг ${longSymbol} / шорт ${shortSymbol}`);params.set('favorite_exit_label','Закрытие по последнему синхронизированному снимку');params.set('favorite_name',`Лонг ${longSymbol} / шорт ${shortSymbol}`);button.disabled=true;status.textContent='Сохраняю пару…';try{const response=await fetch('favorites.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:params}),result=await response.json();if(!response.ok||result.status!=='ok')throw new Error(result.error||'Не удалось сохранить пару');button.textContent='✓ Добавлено';status.textContent='Пара добавлена в избранное.'}catch(error){status.textContent=error.message||'Не удалось сохранить пару';button.disabled=false}});
+const waitForHistoryImport=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+const formatImportDateTime=timestamp=>new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Kyiv',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(timestamp));
+function formatImportDuration(milliseconds){let seconds=Math.max(0,Math.floor(milliseconds/1000));const days=Math.floor(seconds/86400);seconds%=86400;const hours=Math.floor(seconds/3600);seconds%=3600;const minutes=Math.floor(seconds/60);seconds%=60;return days?`${days} д ${hours} ч ${minutes} мин`:hours?`${hours} ч ${minutes} мин ${seconds} сек`:`${minutes} мин ${seconds} сек`}
+function rankingImportTiming(status){
+  const startedAt=Number(status.started_at_ms),progress=Number(status.progress||0),now=Date.now();
+  if(!Number.isFinite(startedAt)||startedAt<=0)return '';
+  const elapsed=Math.max(0,now-startedAt),parts=[`старт: ${formatImportDateTime(startedAt)}`];
+  if(progress>0&&progress<100){const remaining=elapsed*(100-progress)/progress;parts.push(`расчётное окончание: ${formatImportDateTime(now+remaining)}`)}
+  else parts.push('расчётное окончание появится после первых страниц');
+  parts.push(`прошло: ${formatImportDuration(elapsed)}`);
+  return parts.join(' · ');
+}
+async function requireCompleteRankingHistory(params,requestId){
+  const completenessParams=new URLSearchParams({
+    start_day:params.get('start_day')||'',
+    end_day:params.get('end_day')||'',
+    ticker_set:params.get('ticker_set')||'',
+    exclude_end_day:params.get('interval')&&params.get('interval')!=='none'?'1':'0',
+    coverage_only:'1',
+  });
+  const completenessResponse=await fetch('candle-completeness.php?'+completenessParams.toString(),{headers:{Accept:'application/json'},cache:'no-store'});
+  const completeness=await completenessResponse.json();
+  if(!completenessResponse.ok||completeness.status!=='ready')throw new Error(completeness.message||'Не удалось проверить полноту исторических данных. Рейтинг не запущен.');
+  if(!completeness.all_incomplete)return true;
+  const missingDetails=(completeness.all_incomplete_details||[]).slice(0,5).map(item=>`${item.symbol}: ${item.first_quote||'нет начала'} — ${item.last_quote||'нет конца'}`).join(', ');
+  const missingSuffix=missingDetails?` Покрытие ${completeness.coverage_start_day} — ${completeness.coverage_end_day}: ${missingDetails}${(completeness.all_incomplete_details||[]).length>5?' и другие.':'.'}`:'';
+  pairRankingStatus.classList.add('error');
+  pairRankingStatus.textContent='Ошибка: для выбранного периода не хватает минутных данных.'+missingSuffix+' Рейтинг не запущен; запускаю подкачивание недостающей истории с Bitget…';
+  const selectedEndDay=params.get('end_day')||'';
+  const intervalEndDay=params.get('interval')&&params.get('interval')!=='none'&&selectedEndDay
+    ? new Date(new Date(selectedEndDay+'T12:00:00Z').getTime()-86400000).toISOString().slice(0,10)
+    : selectedEndDay;
+  const importRequest=new URLSearchParams({scope:'all',ticker_set:params.get('ticker_set')||'',start_day:params.get('start_day')||'',end_day:intervalEndDay});
+  const importResponse=await fetch('import-candles.php',{method:'POST',body:importRequest,headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},cache:'no-store'});
+  const importResult=await importResponse.json();
+  const jobId=importResult.job_id||importResult.active_job_id;
+  if(!jobId)throw new Error(importResult.message||'Недостающие данные найдены, но подкачивание с Bitget не запустилось.');
+  const waitingForAnotherJob=!importResult.job_id&&Boolean(importResult.active_job_id);
+  if(waitingForAnotherJob){
+    const activeResponse=await fetch('import-candles.php?active=1',{headers:{Accept:'application/json'},cache:'no-store'});
+    const active=await activeResponse.json();
+    const activeRange=active.request_start_day&&active.request_end_day?` за ${active.request_start_day} — ${active.request_end_day}`:'';
+    pairRankingStatus.textContent=`Ошибка полноты данных: рейтинг остановлен. Сейчас выполняется другая подкачка${activeRange}; ожидаю её завершения, затем запущу загрузку выбранного периода.`;
+  }
+  while(requestId===pairRankingRequest){
+    await waitForHistoryImport(1200);
+    const statusResponse=await fetch('import-candles.php?job_id='+encodeURIComponent(jobId),{headers:{Accept:'application/json'},cache:'no-store'});
+    const importStatus=await statusResponse.json();
+    if(!statusResponse.ok||importStatus.status==='error')throw new Error(importStatus.message||'Подкачивание истории с Bitget завершилось ошибкой.');
+    const progress=Number(importStatus.progress||0).toLocaleString('ru-RU',{maximumFractionDigits:1});
+    const timing=rankingImportTiming(importStatus);
+    pairRankingStatus.textContent=`Ошибка полноты данных: рейтинг остановлен. Подкачивание с Bitget: ${importStatus.message||'выполняется'} · ${progress}%${timing?' · '+timing:''}`;
+    if(importStatus.status==='cancelled')throw new Error('Подкачивание недостающих данных остановлено. Рейтинг не запущен.');
+    if(importStatus.status!=='ready'&&importStatus.status!=='partial')continue;
+    if(waitingForAnotherJob){
+      pairRankingStatus.textContent='Предыдущее задание завершено. Повторно проверяю данные и запускаю подкачивание выбранного периода…';
+      return requireCompleteRankingHistory(params,requestId);
+    }
+    pairRankingStatus.classList.toggle('error',importStatus.status==='partial');
+    pairRankingStatus.textContent=importStatus.status==='partial'
+      ? 'Подкачивание завершилось частично. Для некоторых тикеров данные по-прежнему отсутствуют; рейтинг не запущен.'
+      : 'Недостающие данные подкачаны с Bitget. Нажмите ↻ ещё раз для расчёта рейтинга.';
+    return false;
+  }
+  return false;
+}
 async function loadPairRanking(selectLeader=false){
+  if(!longSymbolSelect.value||!shortSymbolSelect.value){pairRankingRequest++;setHedgeRankingLoading(false);pairRankingStatus.textContent='Для сортировки всех пар выберите тикер и для лонга, и для шорта.';return;}
   if(!pairSelect.value){setChartLoading(false);pairRankingStatus.textContent='Для расчёта пары выберите список минимум с двумя активными тикерами.';if(selectLeader)statusNode.textContent='Для хеджирования нужны минимум два активных тикера.';return}
   const selectionVersion=pairSelectionVersion;
+  setHedgeRankingLoading(true);
   const requestId=++pairRankingRequest,params=new URLSearchParams(new FormData(form));params.delete('pair');
   const url=new URL('hedge-ranking.php',location.href);url.search=params.toString();
   let lastRankingProgress=Date.now(),lastRankingMessage='Проверяю кэш рейтинга пар…';
-  const progressTimer=setInterval(()=>{if(requestId!==pairRankingRequest)return;const waitingSeconds=Math.floor((Date.now()-lastRankingProgress)/1000);if(waitingSeconds>=10)pairRankingStatus.textContent=lastRankingMessage+' — жду следующий ответ сервера: '+waitingSeconds+' сек.'},5000);
-  if(selectLeader){summaryNode.hidden=true;localMovesPanel.hidden=true;chart.replaceChildren();pointCount.textContent='';setChartLoading(true);statusNode.classList.remove('error');statusNode.textContent='Сначала рассчитываю доходность всех пар; затем загружу график лучшей пары…'}
+  let progressTimer=0;
+  if(selectLeader){summaryNode.hidden=true;localMovesPanel.hidden=true;chart.replaceChildren();pointCount.textContent='';setChartLoading(true);statusNode.classList.remove('error');statusNode.textContent='Сначала рассчитываю коэффициенты всех пар; затем загружу график лучшей пары…'}
   pairRankingStatus.textContent='Проверяю кэш рейтинга пар…';
   try{
+    pairRankingStatus.classList.remove('error');
+    if(!await requireCompleteRankingHistory(params,requestId))return;
+    progressTimer=setInterval(()=>{if(requestId!==pairRankingRequest)return;const waitingSeconds=Math.floor((Date.now()-lastRankingProgress)/1000);if(waitingSeconds>=10)pairRankingStatus.textContent=lastRankingMessage+' — жду следующий ответ сервера: '+waitingSeconds+' сек.'},5000);
     const response=await fetch(url,{headers:{Accept:'application/x-ndjson, application/json'},cache:'no-store'});
     let data=null;
     if(response.headers.get('content-type')?.includes('application/x-ndjson')){
       const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
-      const consume=chunk=>{buffer+=chunk;const lines=buffer.split('\n');buffer=lines.pop();for(const line of lines){if(!line.trim())continue;const event=JSON.parse(line);if(event.type==='progress'){lastRankingProgress=Date.now();lastRankingMessage=event.message;pairRankingStatus.textContent=event.message}if(event.type==='error')throw new Error(event.message);if(event.type==='result')data=event.data}};
+      const consume=chunk=>{buffer+=chunk;const lines=buffer.split('\n');buffer=lines.pop();for(const line of lines){if(!line.trim())continue;const event=JSON.parse(line);if(event.type==='progress'){lastRankingProgress=Date.now();lastRankingMessage=event.message;pairRankingStatus.textContent=event.message;updateHedgeRankingProgress(event.message)}if(event.type==='error')throw new Error(event.message);if(event.type==='result')data=event.data}};
       while(true){const{value,done}=await reader.read();if(done)break;consume(decoder.decode(value,{stream:true}))}
       consume(decoder.decode());if(buffer.trim()){const event=JSON.parse(buffer);if(event.type==='error')throw new Error(event.message);if(event.type==='result')data=event.data}
     }else{data=await response.json()}
     if(requestId!==pairRankingRequest)return;
     if(!response.ok||data?.status!=='ready')throw new Error(data?.message||'Не удалось рассчитать доходность пар');
-    const leader=data.pairs?.find(pair=>pair.net_pnl!==null);
-    rankedPairData={symbols:data.symbols,pair_matrix:data.pair_matrix,starting_balance:data.starting_balance};
+    try{sessionStorage.setItem(hedgeRankingSessionKey(),'1')}catch{}
+    const availableTickerSymbols=new Set([...longSymbolSelect.options].map(option=>option.value).filter(Boolean));
+    const leader=data.pairs?.find(pair=>pair.maximum_interval_ratio!==null&&availableTickerSymbols.has(pair.long_symbol)&&availableTickerSymbols.has(pair.short_symbol));
+    rankedPairData={symbols:data.symbols,pair_matrix:data.pair_matrix,pair_ratio_matrix:data.pair_ratio_matrix,pair_maximum_ratio_matrix:data.pair_maximum_ratio_matrix,starting_balance:data.starting_balance};
     renderCurrentTickerRankings();
     if(leader&&selectLeader&&selectionVersion===pairSelectionVersion){longSymbolSelect.value=leader.long_symbol;shortSymbolSelect.value=leader.short_symbol;syncManualPairSelection();renderCurrentTickerRankings();await loadData()}
-    else if(!leader&&selectLeader&&selectionVersion===pairSelectionVersion){setChartLoading(false);statusNode.textContent='Не нашлось пары с данными для расчёта за выбранный период.'}
+    else if(!leader&&selectLeader&&selectionVersion===pairSelectionVersion){setChartLoading(false);statusNode.textContent='Нет пар с ненулевым максимальным снижением для расчёта коэффициента.'}
     const pairCount=data.ordered_pair_count??0;
-    pairRankingStatus.textContent=`${data.cache_hit?'Загружен сохранённый рейтинг':'Рассчитана доходность'} ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${data.end_day}; списки пересортировываются относительно выбранного тикера. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
-  }catch(error){if(requestId===pairRankingRequest){setChartLoading(false);pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message;if(selectLeader)statusNode.textContent='Не удалось рассчитать пары: '+error.message}}finally{clearInterval(progressTimer)}
+    const intervalLabel={week:'недельному',two_weeks:'двухнедельному',month:'месячному'}[data.interval_mode];
+    const excludedCount=Number(data.excluded_interval_count||0),rankingBasis=intervalLabel?`сортировка по максимальному коэффициенту «Максимум / снижение» среди полных интервалов (${intervalLabel}${excludedCount?`, исключены последние ${excludedCount}`:''})`:'сортировка по коэффициенту за весь выбранный период';
+    const rankingEndDay=excludedCount&&data.ranking_end_day?data.ranking_end_day:data.end_day;pairRankingStatus.textContent=`${data.cache_hit?'Загружен сохранённый рейтинг':'Рассчитана доходность'} ${pairCount.toLocaleString('ru-RU')} пар за ${data.start_day} — ${rankingEndDay}; ${rankingBasis}. Лидер: ${leader?`лонг ${leader.long_symbol} / шорт ${leader.short_symbol}`:'не найден'}.`;
+  }catch(error){if(requestId===pairRankingRequest){setChartLoading(false);pairRankingStatus.classList.add('error');pairRankingStatus.textContent='Не удалось обновить доходность пар: '+error.message;if(selectLeader&&selectionVersion===pairSelectionVersion)await loadData()}}finally{clearInterval(progressTimer);if(requestId===pairRankingRequest)setHedgeRankingLoading(false)}
 }
 function el(tag,attrs={},text=''){const node=document.createElementNS(ns,tag);for(const[key,value]of Object.entries(attrs))node.setAttribute(key,value);if(text)node.textContent=text;chart.append(node);return node}
+function renderIntervalResults(data){
+  const intervalPanel=document.querySelector('#hedge-interval-panel'),intervalRows=document.querySelector('#hedge-interval-rows'),intervalSummary=document.querySelector('#hedge-interval-summary');
+  const fmtIntervalDate=ms=>new Date(Number(ms)).toLocaleDateString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric'});
+  const intervalStartingBalance=Number(data.starting_balance);
+  const intervalMoney=value=>{const amount=Number(value),percent=intervalStartingBalance>0?amount/intervalStartingBalance*100:0;return `${amount.toLocaleString('ru-RU',{maximumFractionDigits:4})} USDT (${signed(percent)}%)`};
+  intervalRows.replaceChildren();
+  (data.interval_rows||[]).forEach(row=>{const tr=document.createElement('tr');const values=[`${fmtIntervalDate(row.start_ms)} — ${fmtIntervalDate(Number(row.end_ms)-1)}`,row.long_pnl,row.short_pnl,row.net_pnl,row.maximum_net_pnl,row.maximum_drawdown,row.peak_drawdown_ratio];values.forEach((value,index)=>{const td=document.createElement('td');td.textContent=index===0?value:(value===null?'—':index===6?Number(value).toLocaleString('ru-RU',{maximumFractionDigits:4}):intervalMoney(value));tr.append(td)});intervalRows.append(tr)});
+  intervalSummary.replaceChildren();
+  const worstInterval=(data.interval_rows||[]).filter(row=>Number.isFinite(Number(row.net_pnl))).reduce((worst,row)=>worst===null||Number(row.net_pnl)<Number(worst.net_pnl)?row:worst,null);
+  if(worstInterval){
+    const period=`${fmtIntervalDate(worstInterval.start_ms)} — ${fmtIntervalDate(Number(worstInterval.end_ms)-1)}`;
+    const addIntervalStat=(label,value,detail,valueClass='')=>{const card=document.createElement('div');card.className='stat';const title=document.createElement('span');title.textContent=label;const strong=document.createElement('strong');strong.className=valueClass;strong.textContent=value;card.append(title,strong);if(detail){const note=document.createElement('span');note.textContent=detail;card.append(note)}intervalSummary.append(card)};
+    addIntervalStat('Минимальный общий итог',money(worstInterval.net_pnl),period);
+    addIntervalStat('Максимальное снижение этого интервала',`${fmt(worstInterval.maximum_drawdown,4)} USDT`,period);
+    const ratioIntervals=(data.interval_rows||[]).filter(row=>row.peak_drawdown_ratio!==null&&row.peak_drawdown_ratio!==''&&Number.isFinite(Number(row.peak_drawdown_ratio)));
+    const maximumRatioInterval=ratioIntervals.reduce((best,row)=>best===null||Number(row.peak_drawdown_ratio)>Number(best.peak_drawdown_ratio)?row:best,null);
+    const minimumRatioInterval=ratioIntervals.reduce((worst,row)=>worst===null||Number(row.peak_drawdown_ratio)<Number(worst.peak_drawdown_ratio)?row:worst,null);
+    if(maximumRatioInterval)addIntervalStat('Максимальный максимум / снижение',fmt(maximumRatioInterval.peak_drawdown_ratio,4),`${fmtIntervalDate(maximumRatioInterval.start_ms)} — ${fmtIntervalDate(Number(maximumRatioInterval.end_ms)-1)}`,'gain');
+    if(minimumRatioInterval)addIntervalStat('Минимальный максимум / снижение',fmt(minimumRatioInterval.peak_drawdown_ratio,4),`${fmtIntervalDate(minimumRatioInterval.start_ms)} — ${fmtIntervalDate(Number(minimumRatioInterval.end_ms)-1)}`,'loss');
+  }
+  intervalPanel.hidden=!(data.interval_rows||[]).length;
+}
 function render(data){
   setChartLoading(false);
   window.currentHedgeData=data;
+  renderIntervalResults(data);
   chart.replaceChildren();
   const netView=chartView==='net';
   const series=netView
     ? [{key:'net_pnl',label:'Чистая доходность',color:'#86a8ff'}]
-    : [{key:'long_index',label:'Лонг: доходность',color:palette.long_index},{key:'short_index',label:'Шорт: доходность',color:palette.short_index},{key:'equity_index',label:'Общий баланс',color:palette.equity_index}];
-  chartTitle.textContent=netView?'Чистая доходность по хеджированию':'Хеджирование между тикерами';
+    : [{key:'long_index',label:'Лонг: доходность',color:palette.long_index},{key:'short_index',label:'Шорт: доходность',color:palette.short_index},{key:'equity_index',label:'Общий баланс',color:palette.equity_index}].filter(item=>item.key==='equity_index'||(item.key==='long_index'?data.long_symbol:data.short_symbol));
+  const single=!data.long_symbol||!data.short_symbol;
+  chartTitle.textContent=single?(netView?'Чистая доходность':'Доходность')+' · '+(data.long_symbol?'Лонг '+data.long_symbol:'Шорт '+data.short_symbol):(netView?'Чистая доходность по хеджированию':'Хеджирование между тикерами');
   chart.setAttribute('aria-label',netView?'График чистой доходности в USDT во времени':'График доходности лонга, шорта и общего баланса');
   chartModeButtons.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartView===(netView?'net':'ticker'))));
   chartLegend.innerHTML=series.map(item=>`<span><i class="dot" style="background:${item.color}"></i>${item.label}</span>`).join('')+(netView?'<span><i class="dot" style="background:#86a8ff"></i>Максимум за период</span><span><i class="dot" style="background:#ff7188"></i>Снижение после максимума</span><span><i class="dot" style="background:#f2d77d"></i>Максимальное снижение на графике</span><span><i class="dot" style="background:#7bdff2"></i>Локальные максимумы</span><span><i class="dot" style="background:#f3a6b3"></i>Следующие локальные минимумы</span>':'');
@@ -382,6 +555,7 @@ function render(data){
     tooltip.innerHTML=netView
       ? `<strong>${new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев</strong><br>Чистый итог: ${money(point.net_pnl)}${localDetails}`
       : `<strong>${new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев</strong><br>Лонг: ${fmt(point.long_index,3)}<br>Шорт: ${fmt(point.short_index,3)}<br>Баланс: ${fmt(point.equity_index,3)}<br>Итог: ${money(point.net_pnl)}`;
+    if(single&&!netView)tooltip.innerHTML=`<strong>${new Date(point.t).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · Киев</strong><br>${data.long_symbol?'Лонг':'Шорт'}: ${fmt(data.long_symbol?point.long_index:point.short_index,3)}<br>Баланс: ${fmt(point.equity_index,3)}<br>Итог: ${money(point.net_pnl)}`;
     tooltip.style.display='block';
     tooltip.style.left=`${Math.min(event.clientX-rect.left+12,rect.width-tooltip.offsetWidth-4)}px`;
     tooltip.style.top=`${Math.max(2,event.clientY-rect.top-tooltip.offsetHeight-10)}px`;
@@ -400,14 +574,34 @@ function render(data){
   const drawdownPeakTime=new Date(summary.maximum_drawdown_peak_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
   const drawdownTroughTime=new Date(summary.maximum_drawdown_trough_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
   const drawdownDuration=durationLabel(Number(summary.maximum_drawdown_trough_time_ms)-Number(summary.maximum_drawdown_peak_time_ms));
-  summaryNode.innerHTML=stat('Стартовый баланс',fmt(startingBalance,2)+' USDT')+statReturn('Лонг '+data.long_symbol,summary.long_pnl,Number(summary.long_pnl)>=0?'gain':'loss')+statReturn('Шорт '+data.short_symbol,summary.short_pnl,Number(summary.short_pnl)>=0?'gain':'loss')+statReturn('Общий итог',summary.net_pnl,Number(summary.net_pnl)>=0?'gain':'loss')+`<div class="stat"><span>Максимум за период</span><strong>${money(summary.maximum_net_pnl)}</strong><small>${percentFromStart(summary.maximum_net_pnl)} · ${maxTime} · Киев</small></div>`+`<div class="stat"><span>Снижение после максимума</span><strong class="${declineClass}">${fmt(summary.decline_after_maximum,4)} USDT · ${displayPeakDeclinePercent(summary.decline_after_maximum_percent)}</strong><small>Длительность: ${declineDuration}<br>Минимум: ${money(summary.minimum_after_maximum_net_pnl)} · ${percentFromStart(summary.minimum_after_maximum_net_pnl)} · ${lowTime}</small></div>`+`<div class="stat"><span>Максимальное снижение на графике</span><strong class="${drawdownClass}">${fmt(summary.maximum_drawdown,4)} USDT · ${displayPeakDeclinePercent(summary.maximum_drawdown_percent)}</strong><small>От ${money(summary.maximum_drawdown_peak_net_pnl)} · ${drawdownPeakTime}<br>До ${money(summary.maximum_drawdown_trough_net_pnl)} · ${drawdownTroughTime}<br>Длительность: ${drawdownDuration}</small></div>`+`<div class="stat"><span>Баланс после закрытия</span><strong>${fmt(summary.ending_balance,4)} USDT</strong><small>Доходность: ${percentFromStart(summary.net_pnl)}</small></div>`+`<div class="stat"><span>Размеры позиций</span><strong>${fmt(summary.long_notional,2)} / ${fmt(summary.short_notional,2)} USDT</strong><small>Лонг ${percentFromStart(summary.long_notional)} · Шорт ${percentFromStart(summary.short_notional)}</small></div>`;
+  summaryNode.innerHTML=stat('Стартовый баланс',fmt(startingBalance,2)+' USDT')+(data.long_symbol?statReturn('Лонг '+data.long_symbol,summary.long_pnl,Number(summary.long_pnl)>=0?'gain':'loss'):'')+(data.short_symbol?statReturn('Шорт '+data.short_symbol,summary.short_pnl,Number(summary.short_pnl)>=0?'gain':'loss'):'')+statReturn('Общий итог',summary.net_pnl,Number(summary.net_pnl)>=0?'gain':'loss')+`<div class="stat"><span>Максимум за период</span><strong>${money(summary.maximum_net_pnl)}</strong><small>${percentFromStart(summary.maximum_net_pnl)} · ${maxTime} · Киев</small></div>`+`<div class="stat"><span>Снижение после максимума</span><strong class="${declineClass}">${fmt(summary.decline_after_maximum,4)} USDT · ${displayPeakDeclinePercent(summary.decline_after_maximum_percent)}</strong><small>Длительность: ${declineDuration}<br>Минимум: ${money(summary.minimum_after_maximum_net_pnl)} · ${percentFromStart(summary.minimum_after_maximum_net_pnl)} · ${lowTime}</small></div>`+`<div class="stat"><span>Максимальное снижение на графике</span><strong class="${drawdownClass}">${fmt(summary.maximum_drawdown,4)} USDT · ${displayPeakDeclinePercent(summary.maximum_drawdown_percent)}</strong><small>От ${money(summary.maximum_drawdown_peak_net_pnl)} · ${drawdownPeakTime}<br>До ${money(summary.maximum_drawdown_trough_net_pnl)} · ${drawdownTroughTime}<br>Длительность: ${drawdownDuration}</small></div>`+`<div class="stat"><span>Баланс после закрытия</span><strong>${fmt(summary.ending_balance,4)} USDT</strong><small>Доходность: ${percentFromStart(summary.net_pnl)}</small></div>`+`<div class="stat"><span>Максимум / максимальное снижение</span><strong style="color:#c4a1ff">${Number(summary.maximum_drawdown)>0?fmt(Number(summary.maximum_net_pnl)/Number(summary.maximum_drawdown),2):'—'}</strong><small>${money(summary.maximum_net_pnl)} / ${fmt(summary.maximum_drawdown,4)} USDT${Number(summary.maximum_drawdown)>0?'':' · снижения не было'}<br>Чем выше, тем лучше</small></div>`;
   summaryNode.hidden=false;
-  statusNode.textContent=`Вход ${new Date(summary.entry_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · последний общий снимок ${new Date(summary.last_aligned_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · комиссия входа ${fmt(summary.entry_fees,4)} USDT`;
+  statusNode.textContent=`Вход ${new Date(summary.entry_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · ${single?'последний снимок':'последний общий снимок'} ${new Date(summary.last_aligned_time_ms).toLocaleString('ru-RU',{timeZone:'Europe/Kyiv'})} · комиссия входа ${fmt(summary.entry_fees,4)} USDT`;
   const interval=value=>Number(value).toLocaleString('ru-RU',{maximumFractionDigits:2});
-  pointCount.textContent=`Снимки для расчёта: ${data.long_symbol} — ${data.sampled_long_quotes} из ${data.long_quotes} (интервал ${interval(data.long_sampling_interval)}), ${data.short_symbol} — ${data.sampled_short_quotes} из ${data.short_quotes} (интервал ${interval(data.short_sampling_interval)})`;
+  pointCount.textContent='Снимки для расчёта: '+['long','short'].filter(side=>data[side+'_symbol']).map(side=>`${data[side+'_symbol']} — ${data['sampled_'+side+'_quotes']} из ${data[side+'_quotes']} (интервал ${interval(data[side+'_sampling_interval'])})`).join(', ');
+  if(single)chartNote.textContent='Одна позиция на весь стартовый баланс. Учтены цены Bid/Ask и комиссии открытия и расчётного закрытия; максимумы и снижения рассчитаны по этой позиции.';
 }
-async function loadData(){setAutoTradingLinksReady(false);if(!pairSelect.value){setChartLoading(false);summaryNode.hidden=true;statusNode.textContent='В выбранном списке нет двух активных тикеров для хеджирования.';return}if(favoriteSymbolsDisabled){setChartLoading(false);statusNode.textContent='Один из тикеров сохранённой пары не входит в список.';statusNode.classList.add('error');return}const [longSymbol,shortSymbol]=pairSelect.value.split('|');updateAutoTradingDemoLink();const params=new URLSearchParams(new FormData(form));if(favoriteView)for(const[key,value]of Object.entries(favoriteSavedParams))params.set(key,String(value));params.delete('pair');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);const url=new URL('hedge-data.php',location.href);url.search=params.toString();statusNode.textContent='Загружаю и сопоставляю снимки…';statusNode.classList.remove('error');chart.replaceChildren();setChartLoading(true);try{const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'}),data=await response.json();if(!response.ok||data.status==='error')throw new Error(data.message||'Не удалось загрузить данные пары');if(data.starting_balance!==undefined&&data.minimum_starting_balance!==undefined){const requested=Number(data.requested_starting_balance??params.get('balance')??0),minimum=Number(data.minimum_starting_balance),adjusted=Number(data.starting_balance),note=document.querySelector('#minimum-balance-note'),requirements=data.minimum_order_requirements||{};form.elements.balance.value=adjusted.toFixed(2);params.set('balance',adjusted.toFixed(2));if(note){const long= requirements.long||{},short=requirements.short||{};const pairMinimum=`${long.symbol||longSymbol}: ${Number(long.minimum_balance_usdt||0).toFixed(2)} + ${short.symbol||shortSymbol}: ${Number(short.minimum_balance_usdt||0).toFixed(2)} USDT`;note.textContent=adjusted<requested?`Стартовый баланс уменьшен с ${requested.toFixed(2)} до ${adjusted.toFixed(2)} USDT для выбранной пары. Минимумы с комиссией Bitget: ${pairMinimum}.`:adjusted>requested?`Стартовый баланс увеличен с ${requested.toFixed(2)} до ${adjusted.toFixed(2)} USDT для выбранной пары. Минимумы с комиссией Bitget: ${pairMinimum}.`:`Минимум для выбранной пары: ${pairMinimum} (всего ${minimum.toFixed(2)} USDT с комиссией Bitget).`;}updateAutoTradingDemoLink();setAutoTradingLinksReady(true)}if(data.status!=='ready'){render(data);return}render(data);const next=new URL(location.href);for(const[key,value]of params)next.searchParams.set(key,value);next.searchParams.set('pair',pairSelect.value);next.searchParams.set('chart_view',chartView);if(favoriteView)next.searchParams.set('favorite_id',favoriteId);history.replaceState(null,'',next);const basicParams=new URLSearchParams(location.search);for(const key of ['long_symbol','short_symbol','pair','favorite_id','chart_view'])basicParams.delete(key);for(const key of ['start_day','end_day','balance','balance_auto','fee'])basicParams.set(key,params.get(key));document.querySelector('.view-nav a[href^="basic-checks.php?"]').href='basic-checks.php?'+basicParams.toString()}catch(error){setChartLoading(false);summaryNode.hidden=true;statusNode.textContent=error.message;statusNode.classList.add('error')}}
+async function loadData(){const requestId=++hedgeDataRequest;setAutoTradingLinksReady(false);if(!longSymbolSelect.value&&!shortSymbolSelect.value){setChartLoading(false);summaryNode.hidden=true;localMovesPanel.hidden=true;window.currentHedgeData=null;chart.replaceChildren();pointCount.textContent='';statusNode.textContent='Выберите хотя бы один тикер: лонг или шорт.';return}const [longSymbol,shortSymbol]=pairSelect.value.split('|');updateAutoTradingLinks();const params=new URLSearchParams(new FormData(form));params.delete('pair');params.set('long_symbol',longSymbol);params.set('short_symbol',shortSymbol);const url=new URL('hedge-data.php',location.href);url.search=params.toString();statusNode.textContent='Загружаю сохранённый результат пары или котировки…';statusNode.classList.remove('error');chart.replaceChildren();setChartLoading(true);try{const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'}),data=await response.json();if(requestId!==hedgeDataRequest)return;if(!response.ok||data.status==='error')throw new Error(data.message||'Не удалось загрузить данные пары');if(data.starting_balance!==undefined&&data.minimum_starting_balance!==undefined){const requested=Number(data.requested_starting_balance??params.get('balance')??0),minimum=Number(data.minimum_starting_balance),adjusted=Number(data.starting_balance),note=document.querySelector('#minimum-balance-note'),requirements=data.minimum_order_requirements||{};form.elements.balance.value=adjusted.toFixed(2);params.set('balance',adjusted.toFixed(2));if(note){const long= requirements.long||{},short=requirements.short||{};const pairMinimum=[[longSymbol,long],[shortSymbol,short]].filter(([symbol])=>symbol).map(([symbol,rule])=>`${symbol}: ${Number(rule.minimum_balance_usdt||0).toFixed(2)}`).join(' + ')+' USDT';note.textContent=adjusted<requested?`Стартовый баланс уменьшен с ${requested.toFixed(2)} до ${adjusted.toFixed(2)} USDT для выбранной пары. Минимумы с комиссией Bitget: ${pairMinimum}.`:adjusted>requested?`Стартовый баланс увеличен с ${requested.toFixed(2)} до ${adjusted.toFixed(2)} USDT для выбранной пары. Минимумы с комиссией Bitget: ${pairMinimum}.`:`Минимум для выбранной пары: ${pairMinimum} (всего ${minimum.toFixed(2)} USDT с комиссией Bitget).`;}updateAutoTradingLinks();setAutoTradingLinksReady(Boolean(longSymbol&&shortSymbol))}if(data.status!=='ready'){render(data);return}saveHedgeIntervalResult(data,longSymbol,shortSymbol);render(data);if(data.cache_hit)statusNode.textContent='Загружен сохранённый расчёт пары. '+statusNode.textContent;const next=new URL(location.href);for(const[key,value]of params)next.searchParams.set(key,value);next.searchParams.set('pair',pairSelect.value);next.searchParams.set('chart_view',chartView);history.replaceState(null,'',next);const basicParams=new URLSearchParams(location.search);for(const key of ['long_symbol','short_symbol','pair','chart_view'])basicParams.delete(key);for(const key of ['start_day','end_day','balance','balance_auto','fee','interval'])basicParams.set(key,params.get(key));document.querySelector('.view-nav a[href^="basic-checks.php?"]').href='basic-checks.php?'+basicParams.toString()}catch(error){if(requestId!==hedgeDataRequest)return;setChartLoading(false);summaryNode.hidden=true;statusNode.textContent=error.message;statusNode.classList.add('error')}}
 function setChartView(nextView){chartView=nextView;chartModeButtons.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartView===chartView)));const next=new URL(location.href);next.searchParams.set('chart_view',chartView);history.replaceState(null,'',next);if(window.currentHedgeData)render(window.currentHedgeData)}
 chartModeButtons.forEach(button=>button.addEventListener('click',()=>setChartView(button.dataset.chartView)));
-localMovesScale.addEventListener('change',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});form.addEventListener('submit',event=>{event.preventDefault();loadPairRanking(true)});form.addEventListener('input',event=>{if(event.target.name==='balance')form.elements.balance_auto.value='0'});form.addEventListener('change',event=>{updateAutoTradingDemoLink();if(event.target.name==='start_day'){startDayAutoInput.value='0';const next=new URL(location.href);next.searchParams.set('start_day',event.target.value);next.searchParams.set('start_day_auto','0');history.replaceState(null,'',next)}if(event.target===pairSelect||event.target===longSymbolSelect||event.target===shortSymbolSelect){if(event.target===pairSelect){const [longSymbol,shortSymbol]=pairSelect.value.split('|');if(longSymbolSelect)longSymbolSelect.value=longSymbol;if(shortSymbolSelect)shortSymbolSelect.value=shortSymbol;updateAutoTradingDemoLink();loadData()}return}loadPairRanking(true)});window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});updateAutoTradingDemoLink();if(favoriteView)loadData();else loadPairRanking(true);
+localMovesScale.addEventListener('change',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});
+form.addEventListener('submit',event=>{event.preventDefault();scheduleSelectedHedgeCalculation()});
+document.querySelector('#rank-hedge-pairs')?.addEventListener('click',()=>loadPairRanking(true));
+form.addEventListener('input',event=>{if(event.target.name==='exclude_last_intervals')return;if(['start_day','end_day','balance','fee','interval'].includes(event.target.name))clearHedgeSessionResults();if(event.target.name==='balance')form.elements.balance_auto.value='0';updateAutoTradingLinks();markHedgeCalculationPending(event.target!==longSymbolSelect&&event.target!==shortSymbolSelect);scheduleSelectedHedgeCalculation()});
+form.addEventListener('change',event=>{
+  if(['start_day','end_day','balance','fee','interval'].includes(event.target.name))clearHedgeSessionResults();
+  if(event.target.name==='start_day')startDayAutoInput.value='0';
+  updateAutoTradingLinks();
+  syncHedgeUrlFromForm();
+  if(event.target.name==='exclude_last_intervals'){if(longSymbolSelect.value&&shortSymbolSelect.value)void loadPairRanking(false);return}
+  if(['start_day','end_day','interval'].includes(event.target.name))void refreshTickerCoverage();
+  markHedgeCalculationPending(event.target!==longSymbolSelect&&event.target!==shortSymbolSelect);
+  scheduleSelectedHedgeCalculation();
+});
+window.addEventListener('resize',()=>{if(window.currentHedgeData)render(window.currentHedgeData)});
+syncManualPairSelection();
+reconcileHedgeSession();
+const restoreRankingOnLoad=(()=>{try{return sessionStorage.getItem(hedgeRankingSessionKey())==='1'}catch{return false}})();
+void refreshTickerCoverage().finally(()=>{restoreHedgeSelectorLabels();restoreHedgeIntervalResult();if(restoreRankingOnLoad&&longSymbolSelect.value&&shortSymbolSelect.value)void loadPairRanking(false);scheduleSelectedHedgeCalculation()});
+setAutoTradingLinksReady(Boolean(longSymbolSelect.value&&shortSymbolSelect.value));
 </script></body></html>

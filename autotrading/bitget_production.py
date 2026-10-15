@@ -34,6 +34,10 @@ class LiveTradingDisabled(RuntimeError):
 class LiveRiskLimitExceeded(RuntimeError):
     """Raised when an order exceeds its configured live risk boundary."""
 
+    # These checks run before the order POST, so callers can safely mark the
+    # local request as rejected instead of locking reconciliation as uncertain.
+    order_submitted = False
+
 
 @dataclass(frozen=True)
 class LiveRiskSnapshot:

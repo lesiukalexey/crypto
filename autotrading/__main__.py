@@ -53,8 +53,9 @@ def _load_private_environment(mode: str) -> dict[str, str]:
 def _make_exchange_adapter(mode: str, store: SQLiteStateStore, enable_live: bool):
     if mode not in {"demo", "live"}:
         raise ValueError("Exchange adapter mode must be Demo or Real")
-    rows = store.db.execute("SELECT payload FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
-    payloads = [json.loads(row["payload"]) for row in rows]
+    rows = store.db.execute("SELECT kind,payload FROM portfolio_strategies WHERE enabled=1 ORDER BY added_at_ms").fetchall()
+    portfolio_strategies = [(row["kind"], json.loads(row["payload"])) for row in rows]
+    payloads = [payload for _, payload in portfolio_strategies]
     if not payloads:
         raise ValueError("Add at least one strategy to the portfolio before starting exchange execution")
     symbols = sorted({symbol for payload in payloads for symbol in payload["market"]["symbols"]})
@@ -78,7 +79,16 @@ def _make_exchange_adapter(mode: str, store: SQLiteStateStore, enable_live: bool
         "max_order_notional_usdt": str(max(Decimal(item["max_order_notional_usdt"]) for item in risks)),
         "max_total_exposure_usdt": str(min(initial_balance, sum((Decimal(item["max_total_exposure_usdt"]) for item in risks), Decimal(0)))),
         "max_daily_loss_usdt": str(sum((Decimal(item["max_daily_loss_usdt"]) for item in risks), Decimal(0))),
-        "max_open_positions": sum(int(item["max_open_positions"]) for item in risks),
+        # A hedge owns one position on each of its distinct symbols. Preserve
+        # the configured per-strategy limit, but reserve at least one slot per
+        # hedge leg so the second leg is not rejected after the first fills.
+        "max_open_positions": sum(
+            max(
+                int(payload["risk"]["max_open_positions"]),
+                len(payload["market"]["symbols"]) if kind == "hedge" else 1,
+            )
+            for kind, payload in portfolio_strategies
+        ),
     }
 
     def daily_risk_snapshot() -> LiveRiskSnapshot:

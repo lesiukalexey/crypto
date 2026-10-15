@@ -28,40 +28,20 @@ try {
     $ranges = strategyComparisonRanges($start, $end, new DateTimeImmutable('today', $zone), $limit);
     $config = json_decode((string) file_get_contents(dirname(__DIR__) . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
     if (!in_array($symbol, $config['symbols'], true)) throw new InvalidArgumentException('Неизвестная торговая пара.');
-    $db = $config['mysql'];
-    $password = getenv($db['password_env']) ?: '';
-    if ($password === '') throw new RuntimeException('Database unavailable.');
-    $pdo = new PDO(sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $db['host'], $db['port'], $db['database']),
-        $db['user'], $password, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
-    $utc = new DateTimeZone('UTC');
-    $from = $parseDay($ranges[0]['start_day'])->setTimezone($utc)->format('Y-m-d H:i:s');
-    $to = $parseDay($ranges[array_key_last($ranges)]['end_day'])->modify('+1 day')->setTimezone($utc)->format('Y-m-d H:i:s');
-    $query = $pdo->prepare('SELECT p.point_minute,p.return_percent,p.trade_count FROM strategy_return_points p '
-        . 'JOIN strategy_return_profiles s ON s.strategy_id=p.strategy_id '
-        . 'WHERE p.symbol=? AND s.entry_id=? AND s.exit_id=? AND s.exit_confirmation_mode=? AND s.exit_confirmation_snapshots=? '
-        . 'AND p.point_minute>=? AND p.point_minute<? ORDER BY p.point_minute');
-    $query->execute([$symbol,$entry,$exit,$mode,$mode === 'immediate' ? 0 : (int) ($_GET['exit_confirmation_snapshots'] ?? 60),$from,$to]);
-    foreach ($ranges as &$range) {
-        $range['factor'] = 1.0;
-        $range['point_count'] = 0;
-        $range['trade_count'] = 0;
-    }
-    unset($range);
-    while (($point = $query->fetch()) !== false) {
-        $day = (new DateTimeImmutable($point['point_minute'], $utc))->setTimezone($zone)->format('Y-m-d');
-        foreach ($ranges as &$range) {
-            if ($day < $range['start_day'] || $day > $range['end_day']) continue;
-            $range['factor'] *= max(0.0, 1.0 + (float) $point['return_percent'] / 100.0);
-            $range['point_count']++;
-            $range['trade_count'] += (int) $point['trade_count'];
-        }
-        unset($range);
-    }
-    foreach ($ranges as &$range) {
-        $range['return_percent'] = $range['point_count'] > 0 ? ($range['factor'] - 1.0) * 100.0 : null;
-        unset($range['factor']);
-    }
-    unset($range);
+    $params = $_GET;
+    $params['include_funding'] = (string) ($_GET['include_funding'] ?? '1');
+    $directory = (getenv('HOME') ?: '/home/alex') . '/.ai/home/.local/bitget-backtest-cache';
+    $job = tempnam($directory, '.range-job-');
+    if ($job === false) throw new RuntimeException('Не удалось подготовить сравнение.');
+    try {
+        file_put_contents($job, json_encode(['symbol'=>$symbol,'params'=>$params,'ranges'=>$ranges], JSON_THROW_ON_ERROR));
+        chmod($job,0600);
+        $root = dirname(__DIR__);
+        $output=[];$code=0;
+        exec(escapeshellarg($root . '/.venv/bin/python') . ' ' . escapeshellarg($root . '/strategy_range_replay.py') . ' ' . escapeshellarg($job), $output, $code);
+        if ($code !== 0) throw new RuntimeException('Не удалось пересчитать сравниваемые диапазоны.');
+        $ranges=json_decode(implode("\n",$output),true,512,JSON_THROW_ON_ERROR);
+    } finally { unlink($job); }
     echo json_encode(['status'=>'ready','symbol'=>$symbol,'entry_id'=>$entry,'exit_id'=>$exit,
         'range_days'=>(int) $start->diff($end)->format('%a') + 1,'ranges'=>$ranges], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 } catch (Throwable $error) {

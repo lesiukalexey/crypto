@@ -26,7 +26,8 @@ import pymysql
 from app import load_config
 from contract_rules import load_contract_specs, numba_market_order_rules
 from futures_costs import load_historical_funding_rates
-from database import connect_mysql, ensure_strategy_return_profile, flush_strategy_return_points
+from database import connect_mysql
+from strategy_return_run_store import ReturnRunStore
 from martingale import martingale_base_notional
 from ranking_checkpoints import STATE_DTYPE, daily_quote_boundaries, dated_state_checkpoint_path, has_dated_state_checkpoint, load_best_state_checkpoint, write_state_checkpoint
 
@@ -680,6 +681,7 @@ def simulate_standard_checkpoint_days(
     stop_confirmation_snapshots: int = 0,
     order_rules: tuple[float, float, int, float, float] | None = None,
     capture_events: bool = False,
+    capture_boundary_results: bool = False,
 ) -> tuple[float, int, tuple[float, int, int, int, bool], list[tuple[float, int, int, int, bool]]] | tuple[float, int, tuple[float, int, int, int, bool], list[tuple[float, int, int, int, bool]], list[tuple[int, int, float, float, bool]]]:
     """Resume once through the range and capture each supplied day boundary."""
     from numba_simulation import simulate_standard_stateful_days_numba
@@ -716,7 +718,11 @@ def simulate_standard_checkpoint_days(
     ]
     final_state = states[-1]
     result = (float(pnls[-1]), int(trade_counts[-1]), final_state, states)
-    return result + (events,) if capture_events else result
+    if capture_events:
+        result += (events,)
+    if capture_boundary_results:
+        result += (pnls.tolist(), trade_counts.tolist())
+    return result
 
 
 def finalize_standard_checkpoints(
@@ -914,6 +920,7 @@ def main() -> int:
             payload = {
                 **payload,
                 "return_run_key": args.return_run_key,
+                "return_storage_version": 2,
                 "exit_confirmation_mode": confirmation_mode,
                 "exit_confirmation_snapshots": confirmation_snapshots if confirmation_mode != "immediate" else 0,
             }
@@ -1054,14 +1061,8 @@ def main() -> int:
             bid_tree = PriceTree([])
             ask_tree = PriceTree([])
         fee_rate = args.fee_percent / 100
-        return_trade_connection = connect_mysql(config["mysql"]) if args.return_run_key else None
-        return_trade_rows: list[tuple[Any, ...]] = []
+        return_store = ReturnRunStore(args.cache_dir, args.return_run_key, args.symbol, {'balance': args.balance, 'fee': args.fee_percent, 'slippage_bps': args.slippage_bps, 'include_funding': args.include_funding, 'entry_signal_mode': ranking.get('entry_signal_mode', 'exact'), 'entry_direction_mode': ranking.get('entry_direction_mode', 'follow')}) if args.return_run_key else None
         return_trade_count = 0
-        return_profile_ids: dict[tuple[str, str], int] = {}
-        return_trade_insert_sql = (
-            "INSERT IGNORE INTO strategy_return_points "
-            "(symbol,strategy_id,point_minute,return_percent,trade_count) VALUES (%s,%s,%s,%s,%s)"
-        )
         for entry_id, entry_label, lookback, threshold_tenths_percent, entry_family, immediate_short in entry_specs_for_worker:
                 if len(quotes) < 2:
                     signals, shorts = np.empty(0, dtype=np.int64), np.empty(0, dtype=np.bool_)
@@ -1217,30 +1218,11 @@ def main() -> int:
                                     pnl, trade_count, next_state, day_states = simulation_result[:4]
                                     if args.return_run_key:
                                         trade_events = simulation_result[4]
-                                        cumulative_factor = 1.0
-                                        for trade_index, (entry_index, exit_index, event_pnl, balance_before, provisional) in enumerate(trade_events):
-                                            if balance_before <= 0 or entry_index < 0 or exit_index < 0:
-                                                continue
-                                            trade_return = event_pnl / balance_before
-                                            cumulative_factor *= 1.0 + trade_return
-                                            if not provisional:
-                                                profile_key = (entry_id, identifier)
-                                                strategy_id = return_profile_ids.get(profile_key)
-                                                if strategy_id is None:
-                                                    strategy_id = ensure_strategy_return_profile(
-                                                        return_trade_connection, entry_id, entry_label,
-                                                        identifier, f"{display_kind} {identifier}",
-                                                        confirmation_mode,
-                                                        confirmation_snapshots if confirmation_mode != "immediate" else 0,
-                                                    )
-                                                    return_profile_ids[profile_key] = strategy_id
-                                                point_time = datetime.fromtimestamp(
-                                                    float(quotes.timestamps[exit_index]), timezone.utc
-                                                ).replace(second=0, microsecond=0, tzinfo=None)
-                                                return_trade_rows.append((args.symbol, strategy_id, point_time, f"{trade_return * 100:.10f}", 1))
-                                        if len(return_trade_rows) >= 5000:
-                                            return_trade_count += flush_strategy_return_points(return_trade_connection, return_trade_rows)
-                                            return_trade_rows.clear()
+                                        exit_label = (f'TP {target / 10:.2f}% / SL {loss / 10:.2f}%' if target is not None and loss is not None
+                                            else f'TP {target / 10:.2f}% · без SL' if target is not None
+                                            else f'SL {loss / 10:.2f}% · без TP' if loss is not None else 'Без выхода')
+                                        return_store.record(entry_id, entry_label, identifier, exit_label, quotes, trade_events, args.balance, pnl)
+                                        return_trade_count += sum(not event[4] for event in trade_events)
                                     for index, (day, _) in enumerate(boundaries_to_capture):
                                         states_by_day[day][state_index] = day_states[index]
                                         state_counts_by_day[day] += 1
@@ -1359,10 +1341,7 @@ def main() -> int:
         entries.sort(key=lambda item: (-item["best_pnl"], item["label"]))
         elapsed_seconds = int(time.monotonic() - started)
         if args.return_run_key:
-            if return_trade_rows:
-                return_trade_count += flush_strategy_return_points(return_trade_connection, return_trade_rows)
-                return_trade_rows.clear()
-            return_trade_connection.close()
+            return_store.close()
             write_json(status_path, {
                 "status": "pending", "progress": 99, "phase": "finalizing_return_history",
                 "elapsed_seconds": int(time.monotonic() - started), "return_point_count": return_trade_count,
@@ -1381,12 +1360,10 @@ def main() -> int:
         return 0
     except Exception as exc:
         write_json(status_path, {"status": "error", "progress": 0, "message": "Не удалось рассчитать рейтинг стратегий."})
-        if args.return_run_key:
+        if 'return_store' in locals() and return_store is not None:
             try:
-                if "return_trade_connection" in locals() and return_trade_connection is not None:
-                    if return_trade_rows:
-                        flush_strategy_return_points(return_trade_connection, return_trade_rows)
-                    return_trade_connection.close()
+                return_store.db.rollback()
+                return_store.db.close()
             except Exception:
                 pass
         print(f"strategy ranking failed: {exc}", file=sys.stderr)

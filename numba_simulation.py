@@ -114,17 +114,22 @@ def _find_delayed_standard_exit(
     due_take = -1
     due_stop = -1
     saw_crossing = False
+    entry_price = bids[entry_index] if is_short else asks[entry_index]
+    funding_cursor = 0
+    while funding_cursor < len(funding_event_indexes) and funding_event_indexes[funding_cursor] <= entry_index:
+        funding_cursor += 1
+    funding_cashflow = 0.0
     for index in range(entry_index + 1, len(bids)):
-        entry_price = bids[entry_index] if is_short else asks[entry_index]
         exit_price = asks[index] if is_short else bids[index]
         if is_short:
             net = quantity * (entry_price * (1.0 - fee_rate) - exit_price * (1.0 + fee_rate))
         else:
             net = quantity * (exit_price * (1.0 - fee_rate) - entry_price * (1.0 + fee_rate))
-        net += _standard_funding_cashflow(
-            entry_index, index, quantity, is_short,
-            funding_event_indexes, funding_mark_prices, funding_rates,
-        )
+        while funding_cursor < len(funding_event_indexes) and funding_event_indexes[funding_cursor] <= index:
+            amount = quantity * funding_mark_prices[funding_cursor] * funding_rates[funding_cursor]
+            funding_cashflow += amount if is_short else -amount
+            funding_cursor += 1
+        net += funding_cashflow
         take_condition = has_take and net >= take_profit
         stop_condition = has_stop and net <= -stop_loss
         if take_condition and due_take < 0:
@@ -504,20 +509,20 @@ def simulate_standard_stateful_numba(
         )
         if not order_valid:
             return np.nan, closed_trades, balance, max(0, signal_from), -1, False, event_entries, event_exits, event_pnls, event_balances, event_provisional, event_count
-        first_take, first_stop = _find_funded_standard_exit(
-            bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
-            tree_size, count, open_index, entry_price, quantity,
-            actual_notional * fee_rate, open_short, fee_rate, take_profit, stop_loss,
-            funding_event_indexes, funding_mark_prices, funding_rates,
-        )
-
         if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
             delayed_exit, _ = _find_delayed_standard_exit(
-                bids, asks, open_index, open_short, quantity, fee_rate,
+                bids[:count], asks[:count], open_index, open_short, quantity, fee_rate,
                 take_profit, stop_loss, take_confirmation_snapshots, stop_confirmation_snapshots,
                 funding_event_indexes, funding_mark_prices, funding_rates,
             )
             first_take, first_stop = delayed_exit, -1
+        else:
+            first_take, first_stop = _find_funded_standard_exit(
+                bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
+                tree_size, count, open_index, entry_price, quantity,
+                actual_notional * fee_rate, open_short, fee_rate, take_profit, stop_loss,
+                funding_event_indexes, funding_mark_prices, funding_rates,
+            )
 
         if first_take >= 0 or first_stop >= 0:
             if first_take >= 0 and first_stop >= 0:
@@ -566,20 +571,20 @@ def simulate_standard_stateful_numba(
         if not order_valid:
             return np.nan, closed_trades, balance, max(0, signal_from), -1, False, event_entries, event_exits, event_pnls, event_balances, event_provisional, event_count
 
-        first_take, first_stop = _find_funded_standard_exit(
-            bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
-            tree_size, count, entry_index, entry_price, quantity,
-            actual_notional * fee_rate, is_short, fee_rate, take_profit, stop_loss,
-            funding_event_indexes, funding_mark_prices, funding_rates,
-        )
-
         if take_confirmation_snapshots > 0 or stop_confirmation_snapshots > 0:
             delayed_exit, _ = _find_delayed_standard_exit(
-                bids, asks, entry_index, is_short, quantity, fee_rate,
+                bids[:count], asks[:count], entry_index, is_short, quantity, fee_rate,
                 take_profit, stop_loss, take_confirmation_snapshots, stop_confirmation_snapshots,
                 funding_event_indexes, funding_mark_prices, funding_rates,
             )
             first_take, first_stop = delayed_exit, -1
+        else:
+            first_take, first_stop = _find_funded_standard_exit(
+                bids, bid_maximum, bid_minimum, asks, ask_maximum, ask_minimum,
+                tree_size, count, entry_index, entry_price, quantity,
+                actual_notional * fee_rate, is_short, fee_rate, take_profit, stop_loss,
+                funding_event_indexes, funding_mark_prices, funding_rates,
+            )
 
         if first_take >= 0 and first_stop >= 0:
             exit_index = min(first_take, first_stop)

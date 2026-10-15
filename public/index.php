@@ -16,11 +16,11 @@ declare(strict_types=1);
 <a href="index.php" aria-current="page">Главная</a>
 <a href="basic-checks.php">Базовые проверки</a>
 <a href="hedging.php">Хеджирование</a>
-<a href="favorites.php">Избранное</a>
+
 <a href="settings.php">Настройки</a>
 <a href="autotrading.php?mode=paper">Автоторговля (Paper)</a>
-<a href="autotrading.php?mode=demo">Автоторговля (Тест)</a>
-<a href="autotrading.php?mode=real">Автоторговля (реал)</a>
+<a href="autotrading.php?mode=demo">Автотрейдинг (демо)</a>
+<a href="autotrading.php?mode=real">Автотрейдинг (real)</a>
 <a href="autotrading-pi.php">Raspberry Pi</a>
 </nav>
 <section class="panel">

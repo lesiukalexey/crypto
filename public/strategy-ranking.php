@@ -109,10 +109,12 @@ try {
     if ((string) ($_GET['return_history_status'] ?? '') === '1') {
         if ($martingaleMode !== 'none') respond(['status' => 'unsupported']);
         $statusRunKey = hash('sha256', json_encode([
-            'strategy-return-history-v4-append-only-minute-points', $config['category'], 'ticker:' . $symbol, $symbol,
-            [$symbol], $startValue, (float) $balance, (float) $fee, $ranking,
+            'strategy-return-history-v8-isolated-context', $config['category'], 'ticker:' . $symbol, $symbol,
+            [$symbol], $startValue, $endValue, (float) $balance, (float) $fee, $ranking,
             $martingaleMode, $martingaleTiming, $martingaleAttempts,
             $simulationCosts['include_funding'] ? '1' : '0', (float) $simulationCosts['slippage_bps'], $cacheGeneration,
+            rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration),
+            rankingContractRulesIdentity($config['category'], [$symbol]),
         ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
         $history = returnStatusFromFiles($cacheDir, $statusRunKey);
         if (!is_array($history) || ($history['start_day'] ?? $startValue) !== $startValue || ($history['end_day'] ?? $endValue) !== $endValue) respond(['status' => 'missing']);
@@ -127,7 +129,7 @@ try {
     $snapshotIds = rankingSnapshotIds($pdo, $cacheDir, $config['category'], $startValue, $endValue, $startUtc, $endUtc, $cacheGeneration);
     $snapshotIds = filterEnabledTickerSnapshotIds($snapshotIds, $config, $tickerSetId);
     $maxId = (int) ($snapshotIds[$symbol] ?? 0);
-    $keyParts = ['ranking-v31-range-reset-at-start', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
+    $keyParts = ['ranking-v32-isolated-return-results', $cacheGeneration, $config['category'], $symbol, $startValue, $endValue, $balance, $fee, $minTrades, $ranking, $martingaleMode, $martingaleTiming, $martingaleAttempts];
     array_push($keyParts, ...rankingMartingaleCacheIdentity($martingaleMode, $martingaleRiskLimits));
     array_push($keyParts, ...rankingSimulationCostsIdentity($simulationCosts));
     array_push($keyParts, ...rankingContractRulesIdentity($config['category'], [$symbol]));
@@ -138,10 +140,12 @@ try {
     $returnHistoryRow = false;
     if ($martingaleMode === 'none') {
         $returnRunKey = hash('sha256', json_encode([
-            'strategy-return-history-v4-append-only-minute-points', $config['category'], 'ticker:' . $symbol, $symbol,
-            [$symbol], $startValue, (float) $balance, (float) $fee, $ranking,
+            'strategy-return-history-v8-isolated-context', $config['category'], 'ticker:' . $symbol, $symbol,
+            [$symbol], $startValue, $endValue, (float) $balance, (float) $fee, $ranking,
             $martingaleMode, $martingaleTiming, $martingaleAttempts,
             $simulationCosts['include_funding'] ? '1' : '0', (float) $simulationCosts['slippage_bps'], $cacheGeneration,
+            rankingSnapshotRevision($cacheDir, $config['category'], $startValue, $endValue, $cacheGeneration),
+            rankingContractRulesIdentity($config['category'], [$symbol]),
         ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
         $returnHistoryRow = returnStatusFromFiles($cacheDir, $returnRunKey);
     }

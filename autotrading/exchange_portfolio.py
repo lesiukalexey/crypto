@@ -246,7 +246,7 @@ class ExchangePortfolioExecutor:
             result = self.adapter.submit(OrderRequest(symbol, side, quantity, client_id, reduce_only=intent == "close"))
         except Exception as exc:
             definite_rejection = isinstance(exc, BitgetAPIError) and exc.category == "api_rejection" and exc.outcome == "rejected"
-            definite_local_failure = isinstance(exc, (ValueError, ExchangeStateMismatch))
+            definite_local_failure = isinstance(exc, (ValueError, ExchangeStateMismatch)) or getattr(exc, "order_submitted", None) is False
             if definite_rejection or definite_local_failure:
                 self.store.db.execute("UPDATE exchange_orders SET status='rejected',updated_at_ms=? WHERE client_order_id=?", (int(time.time() * 1000), client_id)); self.store.db.commit()
                 order_request_sent = isinstance(exc, BitgetAPIError) and exc.method == "POST" and exc.endpoint == "/api/v2/mix/order/place-order"
