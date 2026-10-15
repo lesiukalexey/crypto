@@ -15,6 +15,7 @@ declare(strict_types=1);
 <nav class="nav" aria-label="Разделы">
 <a href="index.php" aria-current="page">Главная</a>
 <a href="basic-checks.php">Базовые проверки</a>
+<a href="basic-checks-2.php">Базовые проверки 2</a>
 <a href="hedging.php">Хеджирование</a>
 
 <a href="settings.php">Настройки</a>

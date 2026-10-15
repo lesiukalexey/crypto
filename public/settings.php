@@ -151,7 +151,7 @@ if (!isset($_SESSION['settings_csrf'])) $_SESSION['settings_csrf'] = bin2hex(ran
 </style>
 </head>
 <body><main class="wrap">
-<nav class="nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="basic-checks.php">Базовые проверки</a><a href="hedging.php">Хеджирование</a><a href="settings.php" aria-current="page">Настройки</a><a href="autotrading.php?mode=paper">Автоторговля (Paper)</a><a href="autotrading.php?mode=demo">Автотрейдинг (демо)</a><a href="autotrading.php?mode=real">Автотрейдинг (real)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
+<nav class="nav" aria-label="Разделы"><a href="index.php">Главная</a><a href="basic-checks.php">Базовые проверки</a><a href="basic-checks-2.php">Базовые проверки 2</a><a href="hedging.php">Хеджирование</a><a href="settings.php" aria-current="page">Настройки</a><a href="autotrading.php?mode=paper">Автоторговля (Paper)</a><a href="autotrading.php?mode=demo">Автотрейдинг (демо)</a><a href="autotrading.php?mode=real">Автотрейдинг (real)</a><a href="autotrading-pi.php">Raspberry Pi</a></nav>
 <h1><?= settingsH($settingsPages[$settingsPage]) ?></h1>
 <nav class="settings-subnav" aria-label="Разделы настроек">
 <a href="settings.php?page=data-export" <?= $settingsPage === 'data-export' ? 'aria-current="page"' : '' ?>>Выгрузить данные</a>
